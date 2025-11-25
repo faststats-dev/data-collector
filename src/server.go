@@ -2,6 +2,7 @@ package app
 
 import (
 	"log/slog"
+	"net/http"
 	"os"
 
 	"github.com/gofiber/fiber/v2"
@@ -37,6 +38,9 @@ func Run() {
 	app.Use(recover.New())
 
 	app.Post("/v1/collect", state.CollectHandler)
+	app.Get("/v1/health", func(c *fiber.Ctx) error {
+		return c.SendStatus(http.StatusOK)
+	})
 
 	port := os.Getenv("PORT")
 	if port == "" {

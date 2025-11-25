@@ -1,0 +1,4 @@
+/target
+.env
+data-collector
+coverage.out

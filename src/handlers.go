@@ -29,134 +29,107 @@ var (
 	}
 )
 
-func (state *AppState) CollectHandler(c *fiber.Ctx) error {
-	response, code := state.handleRequest(c)
-	return c.Status(code).JSON(response)
-}
-
-func (state *AppState) handleRequest(c *fiber.Ctx) (ApiResponse, int) {
-	dataReq, err := parseRequestBody(c)
-	if err != nil {
-		return errorResponse("Validation Error", "Invalid JSON body", []string{err.Error()}), http.StatusBadRequest
-	}
-
-	token := extractToken(c)
+func (s *AppState) CollectHandler(c *fiber.Ctx) error {
+	token := strings.TrimPrefix(c.Get("Authorization"), "Bearer ")
 	if token == "" {
-		return errorResponse("Unauthorized", "Invalid or missing authentication token", nil), http.StatusUnauthorized
+		return c.Status(http.StatusUnauthorized).JSON(errResp("Unauthorized", "Missing token", nil))
 	}
 
-	projectCtx, err := state.getProjectContext(c.Context(), token)
+	projectCtx, err := s.getProjectContext(c.Context(), token)
 	if err != nil {
 		slog.Error("Failed to get project context", "error", err)
-		return errorResponse("Internal Server Error", "An unexpected error occurred", nil), http.StatusInternalServerError
+		return c.Status(http.StatusInternalServerError).JSON(errResp("Internal Server Error", "An unexpected error occurred", nil))
 	}
 	if projectCtx == nil {
-		return errorResponse("Unauthorized", "Invalid or missing authentication token", nil), http.StatusUnauthorized
+		return c.Status(http.StatusUnauthorized).JSON(errResp("Unauthorized", "Invalid token", nil))
 	}
 
-	filteredData, validationErrors := processData(c, projectCtx, dataReq.Data)
-	if len(validationErrors) > 0 {
-		return errorResponse("Validation Error", "Validation failed for some fields", validationErrors), http.StatusBadRequest
+	var req DataRequest
+	if err := decodeBody(c.Body(), &req); err != nil {
+		return c.Status(http.StatusBadRequest).JSON(errResp("Validation Error", "Invalid request body", []string{err.Error()}))
 	}
 
-	if len(filteredData) == 0 {
-		return successResponse("No data to insert"), http.StatusOK
+	data, errs := processData(c, projectCtx, req.Data)
+	if len(errs) > 0 {
+		return c.Status(http.StatusBadRequest).JSON(errResp("Validation Error", "Validation failed", errs))
+	}
+	if len(data) == 0 {
+		return c.JSON(ApiResponse{Success: true, Message: ptr("No data to insert")})
 	}
 
-	dataJSON, err := json.Marshal(filteredData)
-	if err != nil {
-		slog.Error("Failed to marshal filtered data", "error", err)
-		return errorResponse("Internal Server Error", "An unexpected error occurred", nil), http.StatusInternalServerError
-	}
-
-	_, err = state.Pool.Exec(c.Context(),
+	dataJSON, _ := json.Marshal(data)
+	if _, err := s.Pool.Exec(c.Context(),
 		"INSERT INTO data_entries (project_id, server_id, data) VALUES ($1, $2, $3)",
-		projectCtx.Project.ID, dataReq.ServerID, dataJSON)
-	if err != nil {
+		projectCtx.Project.ID, req.ServerID, dataJSON); err != nil {
 		slog.Error("Failed to insert data", "error", err)
-		return errorResponse("Internal Server Error", "An unexpected error occurred", nil), http.StatusInternalServerError
+		return c.Status(http.StatusInternalServerError).JSON(errResp("Internal Server Error", "An unexpected error occurred", nil))
 	}
 
-	return ApiResponse{Success: true}, http.StatusOK
+	return c.JSON(ApiResponse{Success: true})
 }
 
-func parseRequestBody(c *fiber.Ctx) (*DataRequest, error) {
-	var dataReq DataRequest
-	body := c.Body()
-
+func decodeBody(body []byte, v any) error {
 	if len(body) == 0 {
-		return nil, fmt.Errorf("empty request body")
+		return fmt.Errorf("empty body")
 	}
 
-	switch {
-	case len(body) >= 4 && body[0] == 0x28 && body[1] == 0xb5 && body[2] == 0x2f && body[3] == 0xfd: // zstd magic
-		decoder := zstdDecoderPool.Get().(*zstd.Decoder)
-		defer zstdDecoderPool.Put(decoder)
-
-		if err := decoder.Reset(bytes.NewReader(body)); err != nil {
-			return nil, fmt.Errorf("failed to decompress zstd: %w", err)
+	if len(body) >= 4 && body[0] == 0x28 && body[1] == 0xb5 && body[2] == 0x2f && body[3] == 0xfd {
+		dec := zstdDecoderPool.Get().(*zstd.Decoder)
+		defer zstdDecoderPool.Put(dec)
+		if err := dec.Reset(bytes.NewReader(body)); err != nil {
+			return err
 		}
+		return json.NewDecoder(dec).Decode(v)
+	}
 
-		return &dataReq, json.NewDecoder(decoder).Decode(&dataReq)
-
-	case len(body) >= 2 && body[0] == 0x1f && body[1] == 0x8b:
-		decoder, err := gzip.NewReader(bytes.NewReader(body))
+	if len(body) >= 2 && body[0] == 0x1f && body[1] == 0x8b {
+		dec, err := gzip.NewReader(bytes.NewReader(body))
 		if err != nil {
-			return nil, fmt.Errorf("failed to decompress gzip: %w", err)
+			return err
 		}
-		defer decoder.Close()
-
-		return &dataReq, json.NewDecoder(decoder).Decode(&dataReq)
-
-	default:
-		return &dataReq, json.Unmarshal(body, &dataReq)
+		defer dec.Close()
+		return json.NewDecoder(dec).Decode(v)
 	}
+
+	return json.Unmarshal(body, v)
 }
 
-func processData(c *fiber.Ctx, projectCtx *ProjectContext, data DataMap) (DataMap, []string) {
+func processData(c *fiber.Ctx, ctx *ProjectContext, data DataMap) (DataMap, []string) {
 	filtered := make(DataMap, len(data))
-	var errors []string
+	var errs []string
 
-	if config, ok := projectCtx.ValidDataSources["country"]; ok {
-		if country := getCountryFromHeaders(c); country != "" {
-			if err := validateField("country", country, config); err == nil {
+	if cfg, ok := ctx.ValidDataSources["country"]; ok {
+		if country := c.Get("x-vercel-ip-country", c.Get("cf-ipcountry")); country != "" {
+			if validateField("country", country, cfg) == nil {
 				filtered["country"] = country
 			}
 		}
 	}
 
-	for key, value := range data {
+	for key, val := range data {
 		if slices.Contains(blockedFields, key) {
 			continue
 		}
-		config, ok := projectCtx.ValidDataSources[key]
+		cfg, ok := ctx.ValidDataSources[key]
 		if !ok {
 			continue
 		}
-		if err := validateField(key, value, config); err != nil {
-			errors = append(errors, err.Error())
+		if err := validateField(key, val, cfg); err != nil {
+			errs = append(errs, err.Error())
 			continue
 		}
-		filtered[key] = value
+		filtered[key] = val
 	}
 
-	return filtered, errors
+	return filtered, errs
 }
 
-func extractToken(c *fiber.Ctx) string {
-	authHeader := c.Get("Authorization")
-	if authHeader == "" {
-		return ""
-	}
-	return strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
-}
-
-func (state *AppState) getProjectContext(ctx context.Context, token string) (*ProjectContext, error) {
-	if cached, found := state.Cache.Get(token); found {
+func (s *AppState) getProjectContext(ctx context.Context, token string) (*ProjectContext, error) {
+	if cached, found := s.Cache.Get(token); found {
 		return cached.(*ProjectContext), nil
 	}
 
-	rows, err := state.Pool.Query(ctx, `
+	rows, err := s.Pool.Query(ctx, `
 		SELECT p.id, d.reference_id, d.data_type, d.regex 
 		FROM project p 
 		LEFT JOIN data_sources d ON d.project_id = p.id 
@@ -168,12 +141,11 @@ func (state *AppState) getProjectContext(ctx context.Context, token string) (*Pr
 
 	var projectID uuid.UUID
 	dataSources := make(map[string]DataSourceConfig)
-
 	hasRows := false
+
 	for rows.Next() {
 		var pid uuid.UUID
 		var refID, dType, regexStr *string
-
 		if err := rows.Scan(&pid, &refID, &dType, &regexStr); err != nil {
 			return nil, err
 		}
@@ -186,10 +158,7 @@ func (state *AppState) getProjectContext(ctx context.Context, token string) (*Pr
 
 		var r *regexp.Regexp
 		if regexStr != nil && *regexStr != "" {
-			r, err = regexp.Compile(*regexStr)
-			if err != nil {
-				slog.Warn("Invalid regex for data source", "reference_id", *refID, "error", err)
-			}
+			r, _ = regexp.Compile(*regexStr)
 		}
 		dataSources[*refID] = DataSourceConfig{DataType: *dType, Regex: r}
 	}
@@ -202,14 +171,13 @@ func (state *AppState) getProjectContext(ctx context.Context, token string) (*Pr
 		Project:          Project{ID: projectID},
 		ValidDataSources: dataSources,
 	}
-	state.Cache.Set(token, pCtx, cache.DefaultExpiration)
-
+	s.Cache.Set(token, pCtx, cache.DefaultExpiration)
 	return pCtx, nil
 }
 
-func validateField(key string, value interface{}, config DataSourceConfig) error {
+func validateField(key string, value any, cfg DataSourceConfig) error {
 	var valid bool
-	switch config.DataType {
+	switch cfg.DataType {
 	case "string":
 		_, valid = value.(string)
 	case "number":
@@ -217,36 +185,19 @@ func validateField(key string, value interface{}, config DataSourceConfig) error
 	case "boolean":
 		_, valid = value.(bool)
 	}
-
 	if !valid {
-		return fmt.Errorf("field %q expects type %q", key, config.DataType)
+		return fmt.Errorf("field %q expects type %q", key, cfg.DataType)
 	}
-
-	if config.Regex != nil {
-		if s, ok := value.(string); ok && !config.Regex.MatchString(s) {
-			return fmt.Errorf("field %q does not match regex pattern", key)
+	if cfg.Regex != nil {
+		if s, ok := value.(string); ok && !cfg.Regex.MatchString(s) {
+			return fmt.Errorf("field %q does not match regex", key)
 		}
 	}
-
 	return nil
 }
 
-func getCountryFromHeaders(c *fiber.Ctx) string {
-	if v := c.Get("x-vercel-ip-country"); v != "" {
-		return v
-	}
-	return c.Get("cf-ipcountry")
+func errResp(errType, msg string, details []string) ApiResponse {
+	return ApiResponse{Success: false, Error: &errType, Message: &msg, Details: details}
 }
 
-func errorResponse(errorType, message string, details []string) ApiResponse {
-	return ApiResponse{
-		Success: false,
-		Error:   &errorType,
-		Message: &message,
-		Details: details,
-	}
-}
-
-func successResponse(message string) ApiResponse {
-	return ApiResponse{Success: true, Message: &message}
-}
+func ptr(s string) *string { return &s }

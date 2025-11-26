@@ -96,32 +96,34 @@ func decodeBody(body []byte, v any) error {
 
 func processData(c *fiber.Ctx, ctx *ProjectContext, data DataMap) (DataMap, []string) {
 	filtered := make(DataMap, len(data))
-	var errs []string
+	var errors []string
 
-	if cfg, ok := ctx.ValidDataSources["country"]; ok {
-		if country := c.Get("x-vercel-ip-country", c.Get("cf-ipcountry")); country != "" {
-			if validateField("country", country, cfg) == nil {
-				filtered["country"] = country
-			}
+	if cfg, exists := ctx.ValidDataSources["country"]; exists {
+		country := c.Get("x-vercel-ip-country", c.Get("cf-ipcountry"))
+		if country != "" && validateField("country", country, cfg) == nil {
+			filtered["country"] = country
 		}
 	}
 
-	for key, val := range data {
+	for key, value := range data {
 		if slices.Contains(blockedFields, key) {
 			continue
 		}
-		cfg, ok := ctx.ValidDataSources[key]
-		if !ok {
+
+		cfg, exists := ctx.ValidDataSources[key]
+		if !exists {
 			continue
 		}
-		if err := validateField(key, val, cfg); err != nil {
-			errs = append(errs, err.Error())
+
+		if err := validateField(key, value, cfg); err != nil {
+			errors = append(errors, err.Error())
 			continue
 		}
-		filtered[key] = val
+
+		filtered[key] = value
 	}
 
-	return filtered, errs
+	return filtered, errors
 }
 
 func (s *AppState) getProjectContext(ctx context.Context, token string) (*ProjectContext, error) {
@@ -130,7 +132,7 @@ func (s *AppState) getProjectContext(ctx context.Context, token string) (*Projec
 	}
 
 	rows, err := s.Pool.Query(ctx, `
-		SELECT p.id, d.reference_id, d.data_type, d.regex 
+		SELECT p.id, d.reference_id, d.data_type, d.regex, d.allow_negative, d.allow_float, d.min_value, d.max_value
 		FROM project p 
 		LEFT JOIN data_sources d ON d.project_id = p.id 
 		WHERE p.token = $1`, token)
@@ -144,23 +146,41 @@ func (s *AppState) getProjectContext(ctx context.Context, token string) (*Projec
 	hasRows := false
 
 	for rows.Next() {
-		var pid uuid.UUID
-		var refID, dType, regexStr *string
-		if err := rows.Scan(&pid, &refID, &dType, &regexStr); err != nil {
+		var (
+			pid           uuid.UUID
+			refID         *string
+			dataType      *string
+			regexStr      *string
+			allowNegative *bool
+			allowFloat    *bool
+			minValue      *float64
+			maxValue      *float64
+		)
+
+		if err := rows.Scan(&pid, &refID, &dataType, &regexStr, &allowNegative, &allowFloat, &minValue, &maxValue); err != nil {
 			return nil, err
 		}
+
 		hasRows = true
 		projectID = pid
 
-		if refID == nil || dType == nil {
+		if refID == nil || dataType == nil {
 			continue
 		}
 
-		var r *regexp.Regexp
+		var regex *regexp.Regexp
 		if regexStr != nil && *regexStr != "" {
-			r, _ = regexp.Compile(*regexStr)
+			regex, _ = regexp.Compile(*regexStr)
 		}
-		dataSources[*refID] = DataSourceConfig{DataType: *dType, Regex: r}
+
+		dataSources[*refID] = DataSourceConfig{
+			DataType:      *dataType,
+			Regex:         regex,
+			AllowNegative: allowNegative,
+			AllowFloat:    allowFloat,
+			MinValue:      minValue,
+			MaxValue:      maxValue,
+		}
 	}
 
 	if !hasRows {
@@ -176,23 +196,57 @@ func (s *AppState) getProjectContext(ctx context.Context, token string) (*Projec
 }
 
 func validateField(key string, value any, cfg DataSourceConfig) error {
-	var valid bool
 	switch cfg.DataType {
 	case "string":
-		_, valid = value.(string)
-	case "number":
-		_, valid = value.(float64)
-	case "boolean":
-		_, valid = value.(bool)
-	}
-	if !valid {
-		return fmt.Errorf("field %q expects type %q", key, cfg.DataType)
-	}
-	if cfg.Regex != nil {
-		if s, ok := value.(string); ok && !cfg.Regex.MatchString(s) {
+		str, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("field %q expects type %q", key, cfg.DataType)
+		}
+		if cfg.Regex != nil && !cfg.Regex.MatchString(str) {
 			return fmt.Errorf("field %q does not match regex", key)
 		}
+		return nil
+
+	case "number":
+		num, ok := value.(float64)
+		if !ok {
+			return fmt.Errorf("field %q expects type %q", key, cfg.DataType)
+		}
+		if err := validateNumber(num, key, cfg); err != nil {
+			return err
+		}
+		return nil
+
+	case "boolean":
+		if _, ok := value.(bool); !ok {
+			return fmt.Errorf("field %q expects type %q", key, cfg.DataType)
+		}
+		return nil
+
+	default:
+		return fmt.Errorf("field %q expects type %q", key, cfg.DataType)
 	}
+}
+
+func validateNumber(num float64, key string, cfg DataSourceConfig) error {
+	if cfg.AllowNegative != nil && !*cfg.AllowNegative && num < 0 {
+		return fmt.Errorf("field %q does not allow negative values", key)
+	}
+
+	if cfg.AllowFloat != nil && !*cfg.AllowFloat {
+		if num != float64(int64(num)) {
+			return fmt.Errorf("field %q does not allow float values", key)
+		}
+	}
+
+	if cfg.MinValue != nil && num < *cfg.MinValue {
+		return fmt.Errorf("field %q value must be at least %v", key, *cfg.MinValue)
+	}
+
+	if cfg.MaxValue != nil && num > *cfg.MaxValue {
+		return fmt.Errorf("field %q value must be at most %v", key, *cfg.MaxValue)
+	}
+
 	return nil
 }
 

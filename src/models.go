@@ -16,8 +16,12 @@ type Project struct {
 }
 
 type DataSourceConfig struct {
-	DataType string         `json:"data_type"`
-	Regex    *regexp.Regexp `json:"-"`
+	DataType      string         `json:"data_type"`
+	Regex         *regexp.Regexp `json:"-"`
+	AllowNegative *bool          `json:"allow_negative,omitempty"`
+	AllowFloat    *bool          `json:"allow_float,omitempty"`
+	MinValue      *float64       `json:"min_value,omitempty"`
+	MaxValue      *float64       `json:"max_value,omitempty"`
 }
 
 type DataMap = map[string]any

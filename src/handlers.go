@@ -2,6 +2,7 @@ package app
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"fmt"
 	"log/slog"
@@ -23,6 +24,13 @@ var (
 	zstdDecoderPool = sync.Pool{
 		New: func() any {
 			d, _ := zstd.NewReader(nil)
+			return d
+		},
+	}
+
+	gzipDecoderPool = sync.Pool{
+		New: func() any {
+			d, _ := gzip.NewReader(nil)
 			return d
 		},
 	}
@@ -81,19 +89,32 @@ func (state *AppState) handleRequest(c *fiber.Ctx) (ApiResponse, int) {
 
 func parseRequestBody(c *fiber.Ctx) (*DataRequest, error) {
 	var dataReq DataRequest
+	body := c.Body()
 
-	if c.Get("content-encoding") != "zstd" || c.Get("content-type") != "application/octet-stream" {
-		return &dataReq, json.Unmarshal(c.Body(), &dataReq)
+	switch c.Get("content-encoding") {
+	case "zstd":
+		decoder := zstdDecoderPool.Get().(*zstd.Decoder)
+		defer zstdDecoderPool.Put(decoder)
+
+		if err := decoder.Reset(bytes.NewReader(body)); err != nil {
+			return nil, fmt.Errorf("failed to decompress zstd: %w", err)
+		}
+
+		return &dataReq, json.NewDecoder(decoder).Decode(&dataReq)
+
+	case "gzip":
+		decoder := gzipDecoderPool.Get().(*gzip.Reader)
+		defer gzipDecoderPool.Put(decoder)
+
+		if err := decoder.Reset(bytes.NewReader(body)); err != nil {
+			return nil, fmt.Errorf("failed to decompress gzip: %w", err)
+		}
+
+		return &dataReq, json.NewDecoder(decoder).Decode(&dataReq)
+
+	default:
+		return &dataReq, json.Unmarshal(body, &dataReq)
 	}
-
-	decoder := zstdDecoderPool.Get().(*zstd.Decoder)
-	defer zstdDecoderPool.Put(decoder)
-
-	if err := decoder.Reset(bytes.NewReader(c.Body())); err != nil {
-		return nil, fmt.Errorf("failed to decompress: %w", err)
-	}
-
-	return &dataReq, json.NewDecoder(decoder).Decode(&dataReq)
 }
 
 func processData(c *fiber.Ctx, projectCtx *ProjectContext, data DataMap) (DataMap, []string) {

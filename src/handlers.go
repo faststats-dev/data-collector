@@ -27,13 +27,6 @@ var (
 			return d
 		},
 	}
-
-	gzipDecoderPool = sync.Pool{
-		New: func() any {
-			d, _ := gzip.NewReader(nil)
-			return d
-		},
-	}
 )
 
 func (state *AppState) CollectHandler(c *fiber.Ctx) error {
@@ -91,8 +84,12 @@ func parseRequestBody(c *fiber.Ctx) (*DataRequest, error) {
 	var dataReq DataRequest
 	body := c.Body()
 
-	switch c.Get("content-encoding") {
-	case "zstd":
+	if len(body) == 0 {
+		return nil, fmt.Errorf("empty request body")
+	}
+
+	switch {
+	case len(body) >= 4 && body[0] == 0x28 && body[1] == 0xb5 && body[2] == 0x2f && body[3] == 0xfd: // zstd magic
 		decoder := zstdDecoderPool.Get().(*zstd.Decoder)
 		defer zstdDecoderPool.Put(decoder)
 
@@ -102,13 +99,12 @@ func parseRequestBody(c *fiber.Ctx) (*DataRequest, error) {
 
 		return &dataReq, json.NewDecoder(decoder).Decode(&dataReq)
 
-	case "gzip":
-		decoder := gzipDecoderPool.Get().(*gzip.Reader)
-		defer gzipDecoderPool.Put(decoder)
-
-		if err := decoder.Reset(bytes.NewReader(body)); err != nil {
+	case len(body) >= 2 && body[0] == 0x1f && body[1] == 0x8b:
+		decoder, err := gzip.NewReader(bytes.NewReader(body))
+		if err != nil {
 			return nil, fmt.Errorf("failed to decompress gzip: %w", err)
 		}
+		defer decoder.Close()
 
 		return &dataReq, json.NewDecoder(decoder).Decode(&dataReq)
 

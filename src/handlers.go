@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"maps"
 	"net/http"
 	"regexp"
 	"slices"
@@ -20,10 +19,8 @@ import (
 )
 
 var (
-	defaultDataSources     map[string]DataSourceConfig
-	defaultDataSourcesOnce sync.Once
-	blockedFields          = []string{"country", "server_count"}
-	zstdDecoderPool        = sync.Pool{
+	blockedFields   = []string{"country"}
+	zstdDecoderPool = sync.Pool{
 		New: func() any {
 			d, _ := zstd.NewReader(nil)
 			return d
@@ -153,8 +150,7 @@ func (state *AppState) getProjectContext(ctx context.Context, token string) (*Pr
 	defer rows.Close()
 
 	var projectID uuid.UUID
-	dataSources := make(map[string]DataSourceConfig, len(getDefaultDataSources())+5)
-	maps.Copy(dataSources, getDefaultDataSources())
+	dataSources := make(map[string]DataSourceConfig)
 
 	hasRows := false
 	for rows.Next() {
@@ -216,26 +212,6 @@ func validateField(key string, value interface{}, config DataSourceConfig) error
 	}
 
 	return nil
-}
-
-func getDefaultDataSources() map[string]DataSourceConfig {
-	defaultDataSourcesOnce.Do(func() {
-		defaultDataSources = map[string]DataSourceConfig{
-			"player_count":      {DataType: "number"},
-			"server_count":      {DataType: "number"},
-			"core_count":        {DataType: "number"},
-			"online_mode":       {DataType: "boolean"},
-			"plugin_version":    {DataType: "string"},
-			"minecraft_version": {DataType: "string"},
-			"server_type":       {DataType: "string"},
-			"java_version":      {DataType: "string"},
-			"os_name":           {DataType: "string"},
-			"os_version":        {DataType: "string"},
-			"os_arch":           {DataType: "string"},
-			"country":           {DataType: "string"},
-		}
-	})
-	return defaultDataSources
 }
 
 func getCountryFromHeaders(c *fiber.Ctx) string {

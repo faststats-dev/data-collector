@@ -34,7 +34,9 @@ func Run() {
 		DisableStartupMessage: true,
 	})
 
-	app.Use(logger.New())
+	app.Use(logger.New(logger.Config{
+		Format: "${time} | ${status} | ${latency} | ${method} | ${path} | ${error}\n",
+	}))
 	app.Use(recover.New())
 
 	app.Post("/v1/collect", state.CollectHandler)

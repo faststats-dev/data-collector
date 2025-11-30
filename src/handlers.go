@@ -132,7 +132,7 @@ func (s *AppState) getProjectContext(ctx context.Context, token string) (*Projec
 	}
 
 	rows, err := s.Pool.Query(ctx, `
-		SELECT p.id, d.reference_id, d.data_type, d.regex, d.allow_negative, d.allow_float, d.min_value, d.max_value
+		SELECT p.id, d.reference_id, d.data_type, d.regex, d.allow_negative, d.allow_float, d.min_value, d.max_value, d.is_array
 		FROM project p 
 		LEFT JOIN data_sources d ON d.project_id = p.id 
 		WHERE p.token = $1`, token)
@@ -155,9 +155,10 @@ func (s *AppState) getProjectContext(ctx context.Context, token string) (*Projec
 			allowFloat    *bool
 			minValue      *float64
 			maxValue      *float64
+			isArray       bool
 		)
 
-		if err := rows.Scan(&pid, &refID, &dataType, &regexStr, &allowNegative, &allowFloat, &minValue, &maxValue); err != nil {
+		if err := rows.Scan(&pid, &refID, &dataType, &regexStr, &allowNegative, &allowFloat, &minValue, &maxValue, &isArray); err != nil {
 			return nil, err
 		}
 
@@ -180,6 +181,7 @@ func (s *AppState) getProjectContext(ctx context.Context, token string) (*Projec
 			AllowFloat:    allowFloat,
 			MinValue:      minValue,
 			MaxValue:      maxValue,
+			IsArray:       isArray,
 		}
 	}
 
@@ -196,6 +198,28 @@ func (s *AppState) getProjectContext(ctx context.Context, token string) (*Projec
 }
 
 func validateField(key string, value any, cfg DataSourceConfig) error {
+	if cfg.IsArray {
+		return validateArrayField(key, value, cfg)
+	}
+	return validateSingleField(key, value, cfg)
+}
+
+func validateArrayField(key string, value any, cfg DataSourceConfig) error {
+	arr, ok := value.([]any)
+	if !ok {
+		return fmt.Errorf("field %q expects an array", key)
+	}
+
+	for i, elem := range arr {
+		if err := validateSingleField(key, elem, cfg); err != nil {
+			return fmt.Errorf("field %q[%d]: %w", key, i, err)
+		}
+	}
+
+	return nil
+}
+
+func validateSingleField(key string, value any, cfg DataSourceConfig) error {
 	switch cfg.DataType {
 	case "string":
 		str, ok := value.(string)

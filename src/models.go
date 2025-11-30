@@ -22,6 +22,7 @@ type DataSourceConfig struct {
 	AllowFloat    *bool          `json:"allow_float,omitempty"`
 	MinValue      *float64       `json:"min_value,omitempty"`
 	MaxValue      *float64       `json:"max_value,omitempty"`
+	IsArray       bool           `json:"is_array"`
 }
 
 type DataMap = map[string]any

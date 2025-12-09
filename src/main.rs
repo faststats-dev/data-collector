@@ -26,7 +26,14 @@ async fn main() {
         .route("/v1/collect", post(handler::collect))
         .with_state(state);
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let port: u16 = std::env::var("PORT")
+        .unwrap_or_else(|_| "3000".to_string())
+        .parse()
+        .expect("Failed to parse PORT");
+
+    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port))
+        .await
+        .unwrap();
     println!("Listening on {}", listener.local_addr().unwrap());
     axum::serve(listener, app).await.unwrap();
 }

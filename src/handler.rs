@@ -160,14 +160,13 @@ pub async fn collect(
         }
     };
 
-    let country = headers
+    let mut data_map: HashMap<String, Value> = req.data;
+    if let Some(country) = headers
         .get("CF-IPCountry")
         .and_then(|value| value.to_str().ok())
-        .map(String::from)
-        .unwrap_or_default();
-
-    let mut data_map: HashMap<String, Value> = req.data;
-    data_map.insert("country".to_string(), Value::String(country));
+    {
+        data_map.insert("country".to_string(), Value::String(country.to_string()));
+    }
 
     let (valid_data, warnings) = validate_and_filter_payload(&data_map, &datasource_by_reference);
 

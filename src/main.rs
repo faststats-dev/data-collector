@@ -1,0 +1,31 @@
+use axum::{
+    Router,
+    http::StatusCode,
+    routing::{get, post},
+};
+use sqlx::postgres::PgPoolOptions;
+mod handler;
+mod models;
+mod validation;
+
+#[tokio::main]
+async fn main() {
+    let database_url = std::env::var("DATABASE_URL")
+        .expect("DATABASE_URL must be set in .env file or environment variables");
+
+    let pool = PgPoolOptions::new()
+        .max_connections(10)
+        .connect(&database_url)
+        .await
+        .expect("Failed to connect to database");
+
+    let state = models::AppState { pool };
+
+    let app = Router::new()
+        .route("/v1/health", get(|| async { (StatusCode::OK, "OK") }))
+        .route("/v1/collect", post(handler::collect))
+        .with_state(state);
+
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
+    axum::serve(listener, app).await.unwrap();
+}

@@ -1,5 +1,6 @@
 use crate::models::{AppState, DataSource, Request};
 use crate::validation::validate_and_filter_payload;
+use axum::Json;
 use axum::{
     body::Body,
     extract::State,
@@ -8,12 +9,11 @@ use axum::{
 };
 use flate2::read::GzDecoder;
 use serde_json::Value;
-use sqlx::types::Json;
 use sqlx::{Row, types::Uuid};
 use std::collections::HashMap;
 use std::io::Read;
 
-async fn get_authorization(headers: &HeaderMap) -> Option<String> {
+fn get_authorization(headers: &HeaderMap) -> Option<String> {
     headers
         .get("Authorization")
         .and_then(|value| value.to_str().ok())
@@ -32,9 +32,12 @@ pub async fn collect(
     headers: HeaderMap,
     body: Body,
 ) -> impl IntoResponse {
-    let auth = get_authorization(&headers).await;
+    let auth = get_authorization(&headers);
     if auth.is_none() {
-        (StatusCode::UNAUTHORIZED, "Unauthorized");
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "Unauthorized" })),
+        );
     }
 
     let rows = match sqlx::query(
@@ -55,16 +58,24 @@ pub async fn collect(
         WHERE p.token = $1
         ",
     )
-    .bind(&auth.unwrap())
+    .bind(auth.as_deref().unwrap())
     .fetch_all(&state.pool)
     .await
     {
         Ok(rows) => rows,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error"),
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "Internal server error" })),
+            );
+        }
     };
 
     if rows.is_empty() {
-        return (StatusCode::UNAUTHORIZED, "Unauthorized");
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "Unauthorized" })),
+        );
     }
 
     let project_id: Uuid = rows[0].try_get("id").unwrap();
@@ -103,7 +114,12 @@ pub async fn collect(
 
     let bytes = match axum::body::to_bytes(body, 1024 * 1024).await {
         Ok(bytes) => bytes,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error"),
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "Internal server error" })),
+            );
+        }
     };
 
     let decompressed: Vec<u8> = match headers
@@ -113,13 +129,21 @@ pub async fn collect(
     {
         "zstd" => match zstd::decode_all(&bytes[..]) {
             Ok(data) => data,
-            Err(_) => return (StatusCode::BAD_REQUEST, "Invalid zstd encoding"),
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": "Invalid zstd encoding" })),
+                );
+            }
         },
         "gzip" => {
             let mut decoder = GzDecoder::new(&bytes[..]);
             let mut out = Vec::new();
             if decoder.read_to_end(&mut out).is_err() {
-                return (StatusCode::BAD_REQUEST, "Invalid gzip encoding");
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": "Invalid gzip encoding" })),
+                );
             }
             out
         }
@@ -128,7 +152,12 @@ pub async fn collect(
 
     let req: Request = match serde_json::from_slice(&decompressed) {
         Ok(req) => req,
-        Err(_) => return (StatusCode::BAD_REQUEST, "Invalid JSON"),
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "Invalid JSON" })),
+            );
+        }
     };
 
     let country = headers
@@ -140,26 +169,52 @@ pub async fn collect(
     let mut data_map: HashMap<String, Value> = req.data;
     data_map.insert("country".to_string(), Value::String(country));
 
-    let valid_data = validate_and_filter_payload(&data_map, &datasource_by_reference);
+    let (valid_data, warnings) = validate_and_filter_payload(&data_map, &datasource_by_reference);
 
-    if valid_data.is_empty() {
-        return (StatusCode::NO_CONTENT, "No valid data");
+    let server_id = match req.server_id.parse::<Uuid>() {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "Invalid server_id" })),
+            );
+        }
+    };
+
+    if !valid_data.is_empty() {
+        let data_json = sqlx::types::Json(&valid_data);
+
+        if sqlx::query("INSERT INTO data_entries (project_id, server_id, data) VALUES ($1, $2, $3)")
+            .bind(project_id)
+            .bind(server_id)
+            .bind(data_json)
+            .execute(&state.pool)
+            .await
+            .is_err()
+        {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "Internal server error" })),
+            );
+        }
     }
 
-    let server_id = req.server_id.parse::<Uuid>().unwrap();
-    let data_json = Json(&valid_data);
-
-    match sqlx::query("INSERT INTO data_entries (project_id, server_id, data) VALUES ($1, $2, $3)")
-        .bind(project_id)
-        .bind(server_id)
-        .bind(data_json)
-        .execute(&state.pool)
-        .await
-        .map_err(|e| {
-            eprintln!("Error inserting data: {:?}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        }) {
-        Ok(_) => (StatusCode::OK, "Data saved"),
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error"),
+    if warnings.is_empty() {
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({ "status": "success" })),
+        );
     }
+
+    let warnings_obj: serde_json::Map<String, Value> = warnings
+        .into_iter()
+        .map(|(k, v)| (k, Value::String(v)))
+        .collect();
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "warnings": warnings_obj
+        })),
+    )
 }

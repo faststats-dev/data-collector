@@ -7,6 +7,7 @@ use axum::{
     response::IntoResponse,
 };
 use flate2::read::GzDecoder;
+use serde_json::Value;
 use sqlx::types::Json;
 use sqlx::{Row, types::Uuid};
 use std::collections::HashMap;
@@ -130,9 +131,16 @@ pub async fn collect(
         Err(_) => return (StatusCode::BAD_REQUEST, "Invalid JSON"),
     };
 
-    let data_map: &HashMap<String, serde_json::Value> = &req.data;
+    let country = headers
+        .get("CF-IPCountry")
+        .and_then(|value| value.to_str().ok())
+        .map(String::from)
+        .unwrap_or_default();
 
-    let valid_data = validate_and_filter_payload(data_map, &datasource_by_reference);
+    let mut data_map: HashMap<String, Value> = req.data;
+    data_map.insert("country".to_string(), Value::String(country));
+
+    let valid_data = validate_and_filter_payload(&data_map, &datasource_by_reference);
 
     if valid_data.is_empty() {
         return (StatusCode::NO_CONTENT, "No valid data");

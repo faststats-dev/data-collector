@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+dotenvy = "0.15.7"
 axum = "0.8.7"
-dotenv = "0.15"
 flate2 = "1.1.5"
 regex = "1.12.2"
 serde = "1.0.228"

@@ -10,6 +10,11 @@ mod validation;
 
 #[tokio::main]
 async fn main() {
+    #[cfg(debug_assertions)]
+    {
+        dotenvy::dotenv().ok();
+    }
+
     let database_url = std::env::var("DATABASE_URL")
         .expect("DATABASE_URL must be set in .env file or environment variables");
 

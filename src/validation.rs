@@ -57,20 +57,12 @@ pub fn validate_and_filter_payload(
                 }
             }
 
+            valid_data.insert(ref_id.clone(), Value::Array(valid_elements.clone()));
             let valid_count = valid_elements.len();
-            if valid_count > 0 {
-                valid_data.insert(ref_id.clone(), Value::Array(valid_elements));
-                debug!(
-                    "key='{}' VALID=true ({} valid elements)",
-                    ref_id, valid_count
-                );
-            } else {
-                warnings.insert(ref_id.clone(), "no valid elements in array".to_string());
-                debug!(
-                    "key='{}' VALID=false reason='no valid elements in array'",
-                    ref_id
-                );
-            }
+            debug!(
+                "key='{}' VALID=true ({} valid elements)",
+                ref_id, valid_count
+            );
         } else {
             if value.is_array() {
                 warnings.insert(

@@ -4,6 +4,8 @@ use axum::{
     routing::{get, post},
 };
 use sqlx::postgres::PgPoolOptions;
+use std::sync::Arc;
+mod batch;
 mod handler;
 mod models;
 mod validation;
@@ -24,7 +26,13 @@ async fn main() {
         .await
         .expect("Failed to connect to database");
 
-    let state = models::AppState { pool };
+    let batch_config = batch::BatchConfig::from_env();
+    let batch_processor = Arc::new(batch::BatchProcessor::new(pool.clone(), batch_config));
+
+    let state = models::AppState {
+        pool,
+        batch_processor,
+    };
 
     let app = Router::new()
         .route("/v1/health", get(|| async { (StatusCode::OK, "OK") }))

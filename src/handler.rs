@@ -1,3 +1,4 @@
+use crate::batch::BatchEntry;
 use crate::models::{AppState, DataSource, Request};
 use crate::validation::validate_and_filter_payload;
 use axum::Json;
@@ -181,16 +182,26 @@ pub async fn collect(
     };
 
     if !valid_data.is_empty() {
-        let data_json = sqlx::types::Json(&valid_data);
+        let entry = BatchEntry {
+            project_id,
+            server_id,
+            data: valid_data,
+        };
 
-        if sqlx::query("INSERT INTO data_entries (project_id, server_id, data) VALUES ($1, $2, $3)")
-            .bind(project_id)
-            .bind(server_id)
-            .bind(data_json)
-            .execute(&state.pool)
-            .await
-            .is_err()
-        {
+        // Check for X-Debug-Direct header to bypass batch queue
+        let use_direct_insert = headers
+            .get("X-Debug-Direct")
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
+
+        let result = if use_direct_insert {
+            state.batch_processor.insert_direct(entry).await
+        } else {
+            state.batch_processor.add_entry(entry).await
+        };
+
+        if result.is_err() {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({ "error": "Internal server error" })),

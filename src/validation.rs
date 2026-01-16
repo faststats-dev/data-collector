@@ -21,9 +21,10 @@ pub fn validate_and_filter_payload(
 
     for (ref_id, ds) in ds_by_ref {
         if let Some(pat) = &ds.regex
-            && let Ok(re) = Regex::new(pat) {
-                re_cache.insert(ref_id.clone(), re);
-            }
+            && let Ok(re) = Regex::new(pat)
+        {
+            re_cache.insert(ref_id.clone(), re);
+        }
     }
 
     for (ref_id, value) in data {
@@ -93,9 +94,10 @@ fn validate_scalar(v: &Value, ds: &DataSource, re: Option<&Regex>) -> Result<(),
         "string" => {
             let s = v.as_str().ok_or_else(|| "expected string".to_string())?;
             if let Some(re) = re
-                && !re.is_match(s) {
-                    return Err("regex mismatch".to_string());
-                }
+                && !re.is_match(s)
+            {
+                return Err("regex mismatch".to_string());
+            }
             Ok(())
         }
         "boolean" => {
@@ -107,21 +109,25 @@ fn validate_scalar(v: &Value, ds: &DataSource, re: Option<&Regex>) -> Result<(),
         "number" => {
             let n = extract_number(v).ok_or_else(|| "expected number".to_string())?;
             if let Some(false) = ds.allow_float
-                && n.fract() != 0.0 {
-                    return Err("float not allowed; expected integer".to_string());
-                }
+                && n.fract() != 0.0
+            {
+                return Err("float not allowed; expected integer".to_string());
+            }
             if let Some(false) = ds.allow_negative
-                && n < 0.0 {
-                    return Err("negative not allowed".to_string());
-                }
+                && n < 0.0
+            {
+                return Err("negative not allowed".to_string());
+            }
             if let Some(min) = ds.min_value
-                && n < min {
-                    return Err(format!("value {} < min {}", n, min));
-                }
+                && n < min
+            {
+                return Err(format!("value {} < min {}", n, min));
+            }
             if let Some(max) = ds.max_value
-                && n > max {
-                    return Err(format!("value {} > max {}", n, max));
-                }
+                && n > max
+            {
+                return Err(format!("value {} > max {}", n, max));
+            }
             if !n.is_finite() {
                 return Err("NaN/Infinity not allowed".to_string());
             }

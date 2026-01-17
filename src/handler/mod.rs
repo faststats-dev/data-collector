@@ -100,6 +100,7 @@ pub async fn read_and_decompress_body(
 
 pub struct ProjectContext {
     pub project_id: Uuid,
+    pub domain: Option<String>,
     pub datasources: HashMap<String, DataSource>,
 }
 
@@ -111,6 +112,7 @@ pub async fn load_project_context(
         "
         SELECT
             p.id,
+            p.properties->>'domain' AS domain,
             d.reference_id,
             d.name,
             d.data_type::text AS data_type,
@@ -135,6 +137,7 @@ pub async fn load_project_context(
     }
 
     let project_id: Uuid = rows[0].try_get("id").unwrap();
+    let domain: Option<String> = rows[0].try_get("domain").unwrap_or(None);
 
     let mut datasources: HashMap<String, DataSource> = HashMap::with_capacity(rows.len());
     for row in rows {
@@ -169,8 +172,35 @@ pub async fn load_project_context(
 
     Ok(ProjectContext {
         project_id,
+        domain,
         datasources,
     })
+}
+
+pub fn get_request_origin(headers: &HeaderMap) -> Option<String> {
+    // Try Origin header first (preferred for CORS requests)
+    if let Some(origin) = headers.get("Origin").and_then(|v| v.to_str().ok())
+        && let Ok(url) = url::Url::parse(origin)
+    {
+        return url.host_str().map(|h| h.to_string());
+    }
+
+    // Fall back to Referer header
+    if let Some(referer) = headers.get("Referer").and_then(|v| v.to_str().ok())
+        && let Ok(url) = url::Url::parse(referer)
+    {
+        return url.host_str().map(|h| h.to_string());
+    }
+
+    None
+}
+
+pub fn validate_domain(project_domain: Option<&str>, request_origin: Option<&str>) -> bool {
+    match (project_domain, request_origin) {
+        (None, _) | (Some(""), _) => true,
+        (Some(_), None) => false,
+        (Some(domain), Some(origin)) => domain.eq_ignore_ascii_case(origin),
+    }
 }
 
 pub fn enrich_data_with_country(data: &mut HashMap<String, Value>, headers: &HeaderMap) {
@@ -207,9 +237,125 @@ pub async fn insert_data_entry(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::HeaderValue;
     use flate2::Compression;
     use flate2::write::GzEncoder;
     use std::io::Write;
+
+    mod domain_validation {
+        use super::*;
+
+        #[test]
+        fn allows_all_when_no_domain_configured() {
+            assert!(validate_domain(None, Some("example.com")));
+            assert!(validate_domain(None, None));
+        }
+
+        #[test]
+        fn allows_all_when_empty_domain_configured() {
+            assert!(validate_domain(Some(""), Some("example.com")));
+            assert!(validate_domain(Some(""), None));
+        }
+
+        #[test]
+        fn rejects_when_domain_configured_but_no_origin() {
+            assert!(!validate_domain(Some("example.com"), None));
+        }
+
+        #[test]
+        fn allows_matching_domain() {
+            assert!(validate_domain(Some("example.com"), Some("example.com")));
+        }
+
+        #[test]
+        fn allows_matching_domain_case_insensitive() {
+            assert!(validate_domain(Some("Example.COM"), Some("example.com")));
+            assert!(validate_domain(Some("example.com"), Some("EXAMPLE.COM")));
+        }
+
+        #[test]
+        fn rejects_non_matching_domain() {
+            assert!(!validate_domain(Some("example.com"), Some("other.com")));
+            assert!(!validate_domain(
+                Some("example.com"),
+                Some("sub.example.com")
+            ));
+        }
+    }
+
+    mod get_request_origin_tests {
+        use super::*;
+
+        #[test]
+        fn extracts_from_origin_header() {
+            let mut headers = HeaderMap::new();
+            headers.insert("Origin", HeaderValue::from_static("https://example.com"));
+            assert_eq!(
+                get_request_origin(&headers),
+                Some("example.com".to_string())
+            );
+        }
+
+        #[test]
+        fn extracts_from_origin_with_port() {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                "Origin",
+                HeaderValue::from_static("https://example.com:8080"),
+            );
+            assert_eq!(
+                get_request_origin(&headers),
+                Some("example.com".to_string())
+            );
+        }
+
+        #[test]
+        fn extracts_from_referer_header() {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                "Referer",
+                HeaderValue::from_static("https://example.com/page/path?query=1"),
+            );
+            assert_eq!(
+                get_request_origin(&headers),
+                Some("example.com".to_string())
+            );
+        }
+
+        #[test]
+        fn prefers_origin_over_referer() {
+            let mut headers = HeaderMap::new();
+            headers.insert("Origin", HeaderValue::from_static("https://origin.com"));
+            headers.insert(
+                "Referer",
+                HeaderValue::from_static("https://referer.com/page"),
+            );
+            assert_eq!(get_request_origin(&headers), Some("origin.com".to_string()));
+        }
+
+        #[test]
+        fn returns_none_when_no_headers() {
+            let headers = HeaderMap::new();
+            assert_eq!(get_request_origin(&headers), None);
+        }
+
+        #[test]
+        fn returns_none_for_invalid_url() {
+            let mut headers = HeaderMap::new();
+            headers.insert("Origin", HeaderValue::from_static("not-a-valid-url"));
+            assert_eq!(get_request_origin(&headers), None);
+        }
+
+        #[test]
+        fn handles_http_origin() {
+            let mut headers = HeaderMap::new();
+            headers.insert("Origin", HeaderValue::from_static("http://example.com"));
+            assert_eq!(
+                get_request_origin(&headers),
+                Some("example.com".to_string())
+            );
+        }
+    }
 
     fn compress_gzip(data: &[u8]) -> Vec<u8> {
         let mut encoder = GzEncoder::new(Vec::new(), Compression::default());

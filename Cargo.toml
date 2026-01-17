@@ -18,3 +18,4 @@ sqlx = { version = "0.8.6", features = ["runtime-tokio-rustls", "postgres", "mac
 tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread"] }
 zstd = "0.13.3"
 tower-http = { version = "0.6.8", features = ["cors"] }
+url = "2"

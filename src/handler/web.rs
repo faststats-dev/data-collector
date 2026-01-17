@@ -1,6 +1,7 @@
 use super::{
-    enrich_data_with_country, error_response, get_authorization, insert_data_entry,
-    load_project_context, read_and_decompress_body, success_response,
+    enrich_data_with_country, error_response, get_authorization, get_request_origin,
+    insert_data_entry, load_project_context, read_and_decompress_body, success_response,
+    validate_domain,
 };
 use crate::debounce::should_debounce;
 use crate::models::AppState;
@@ -85,6 +86,11 @@ pub async fn web(
         Ok(ctx) => ctx,
         Err(e) => return e,
     };
+
+    let request_origin = get_request_origin(&headers);
+    if !validate_domain(ctx.domain.as_deref(), request_origin.as_deref()) {
+        return error_response(StatusCode::FORBIDDEN, "Origin not allowed");
+    }
 
     let mut data_map = parsed.data;
     enrich_data_with_country(&mut data_map, &headers);

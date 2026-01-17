@@ -280,6 +280,7 @@ dependencies = [
  "sqlx",
  "tokio",
  "tower-http",
+ "url",
  "zstd",
 ]
 

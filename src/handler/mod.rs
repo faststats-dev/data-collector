@@ -1,20 +1,20 @@
-use crate::debounce::should_debounce;
-use crate::models::{AppState, DataSource, Request};
-use crate::salt::get_daily_salt;
-use crate::validation::validate_and_filter_payload;
+mod collect;
+mod web;
+
+pub use collect::collect;
+pub use web::web;
+
+use crate::models::DataSource;
 use axum::Json;
-use axum::{
-    body::Body,
-    extract::State,
-    http::{HeaderMap, StatusCode},
-    response::IntoResponse,
-};
+use axum::body::Body;
+use axum::http::{HeaderMap, StatusCode};
 use flate2::read::GzDecoder;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use sqlx::{Row, types::Uuid};
 use std::collections::HashMap;
 use std::io::Read;
+
+pub type HandlerResponse = (StatusCode, Json<Value>);
 
 #[derive(Debug, PartialEq)]
 pub enum DecompressionError {
@@ -40,7 +40,7 @@ pub fn decompress(
     }
 }
 
-fn get_authorization(headers: &HeaderMap) -> Option<String> {
+pub fn get_authorization(headers: &HeaderMap) -> Option<String> {
     headers
         .get("Authorization")
         .and_then(|value| value.to_str().ok())
@@ -54,13 +54,11 @@ fn get_authorization(headers: &HeaderMap) -> Option<String> {
         .map(String::from)
 }
 
-type HandlerResponse = (StatusCode, Json<Value>);
-
-fn error_response(status: StatusCode, message: &str) -> HandlerResponse {
+pub fn error_response(status: StatusCode, message: &str) -> HandlerResponse {
     (status, Json(serde_json::json!({ "error": message })))
 }
 
-fn success_response(warnings: HashMap<String, String>) -> HandlerResponse {
+pub fn success_response(warnings: HashMap<String, String>) -> HandlerResponse {
     if warnings.is_empty() {
         (
             StatusCode::OK,
@@ -78,7 +76,7 @@ fn success_response(warnings: HashMap<String, String>) -> HandlerResponse {
     }
 }
 
-async fn read_and_decompress_body(
+pub async fn read_and_decompress_body(
     headers: &HeaderMap,
     body: Body,
 ) -> Result<Vec<u8>, HandlerResponse> {
@@ -100,12 +98,12 @@ async fn read_and_decompress_body(
     })
 }
 
-struct ProjectContext {
-    project_id: Uuid,
-    datasources: HashMap<String, DataSource>,
+pub struct ProjectContext {
+    pub project_id: Uuid,
+    pub datasources: HashMap<String, DataSource>,
 }
 
-async fn load_project_context(
+pub async fn load_project_context(
     pool: &sqlx::PgPool,
     token: &str,
 ) -> Result<ProjectContext, HandlerResponse> {
@@ -175,7 +173,7 @@ async fn load_project_context(
     })
 }
 
-fn enrich_data_with_country(data: &mut HashMap<String, Value>, headers: &HeaderMap) {
+pub fn enrich_data_with_country(data: &mut HashMap<String, Value>, headers: &HeaderMap) {
     if let Some(country) = headers
         .get("CF-IPCountry")
         .and_then(|value| value.to_str().ok())
@@ -184,7 +182,7 @@ fn enrich_data_with_country(data: &mut HashMap<String, Value>, headers: &HeaderM
     }
 }
 
-async fn insert_data_entry(
+pub async fn insert_data_entry(
     pool: &sqlx::PgPool,
     project_id: Uuid,
     server_id: Uuid,
@@ -204,145 +202,6 @@ async fn insert_data_entry(
         .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error"))?;
 
     Ok(())
-}
-
-/// Generate a privacy-safe visitor identifier using daily salted hashing
-fn generate_visitor_id(token: &str, ip: &str, user_agent: &str) -> Uuid {
-    let salt = get_daily_salt();
-
-    let mut hasher = Sha256::new();
-    hasher.update(salt);
-    hasher.update(token.as_bytes());
-    hasher.update(ip.as_bytes());
-    hasher.update(user_agent.as_bytes());
-    let hash = hasher.finalize();
-
-    // Use first 16 bytes of SHA256 hash to create a UUID
-    let mut bytes = [0u8; 16];
-    bytes.copy_from_slice(&hash[..16]);
-    bytes[6] = (bytes[6] & 0x0f) | 0x40; // Version 4
-    bytes[8] = (bytes[8] & 0x3f) | 0x80; // Variant 1
-
-    Uuid::from_bytes(bytes)
-}
-
-fn get_client_ip(headers: &HeaderMap) -> String {
-    if let Some(xff) = headers.get("X-Forwarded-For").and_then(|v| v.to_str().ok())
-        && let Some(first_ip) = xff.split(',').next()
-    {
-        return first_ip.trim().to_string();
-    }
-    if let Some(cf_ip) = headers
-        .get("CF-Connecting-IP")
-        .and_then(|v| v.to_str().ok())
-    {
-        return cf_ip.to_string();
-    }
-    if let Some(real_ip) = headers.get("X-Real-IP").and_then(|v| v.to_str().ok()) {
-        return real_ip.to_string();
-    }
-    String::new()
-}
-
-pub async fn collect(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    body: Body,
-) -> impl IntoResponse {
-    let token = match get_authorization(&headers) {
-        Some(t) => t,
-        None => return error_response(StatusCode::UNAUTHORIZED, "Unauthorized"),
-    };
-
-    let ctx = match load_project_context(&state.pool, &token).await {
-        Ok(ctx) => ctx,
-        Err(e) => return e,
-    };
-
-    let decompressed = match read_and_decompress_body(&headers, body).await {
-        Ok(d) => d,
-        Err(e) => return e,
-    };
-
-    let req: Request = match serde_json::from_slice(&decompressed) {
-        Ok(req) => req,
-        Err(_) => return error_response(StatusCode::BAD_REQUEST, "Invalid JSON"),
-    };
-
-    let server_id = match req.id.value().parse::<Uuid>() {
-        Ok(id) => id,
-        Err(_) => {
-            return error_response(StatusCode::BAD_REQUEST, "Invalid server_id or identifier");
-        }
-    };
-
-    let mut data_map = req.data;
-    enrich_data_with_country(&mut data_map, &headers);
-
-    let (valid_data, warnings) = validate_and_filter_payload(&data_map, &ctx.datasources);
-
-    if let Err(e) = insert_data_entry(&state.pool, ctx.project_id, server_id, &valid_data).await {
-        return e;
-    }
-
-    success_response(warnings)
-}
-
-pub async fn web(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    body: Body,
-) -> impl IntoResponse {
-    let header_token = get_authorization(&headers);
-
-    let decompressed = match read_and_decompress_body(&headers, body).await {
-        Ok(d) => d,
-        Err(e) => return e,
-    };
-
-    #[derive(serde::Deserialize)]
-    struct WebRequest {
-        token: Option<String>,
-        data: HashMap<String, Value>,
-    }
-
-    let parsed: WebRequest = match serde_json::from_slice(&decompressed) {
-        Ok(req) => req,
-        Err(_) => return error_response(StatusCode::BAD_REQUEST, "Invalid JSON"),
-    };
-
-    let token = match parsed.token.or(header_token) {
-        Some(t) => t,
-        None => return error_response(StatusCode::UNAUTHORIZED, "Unauthorized"),
-    };
-
-    let ctx = match load_project_context(&state.pool, &token).await {
-        Ok(ctx) => ctx,
-        Err(e) => return e,
-    };
-
-    let mut data_map = parsed.data;
-    enrich_data_with_country(&mut data_map, &headers);
-
-    let (valid_data, warnings) = validate_and_filter_payload(&data_map, &ctx.datasources);
-
-    let ip = get_client_ip(&headers);
-    let user_agent = headers
-        .get("User-Agent")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    let server_id = generate_visitor_id(&token, &ip, user_agent);
-
-    let url = valid_data.get("url").and_then(|v| v.as_str()).unwrap_or("");
-    if should_debounce(server_id, url) {
-        return success_response(warnings);
-    }
-
-    if let Err(e) = insert_data_entry(&state.pool, ctx.project_id, server_id, &valid_data).await {
-        return e;
-    }
-
-    success_response(warnings)
 }
 
 #[cfg(test)]

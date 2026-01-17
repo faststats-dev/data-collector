@@ -1,9 +1,10 @@
 use axum::{
     Router,
-    http::StatusCode,
+    http::{HeaderValue, Method, StatusCode},
     routing::{get, post},
 };
 use sqlx::postgres::PgPoolOptions;
+use tower_http::cors::CorsLayer;
 mod handler;
 mod models;
 mod validation;
@@ -26,9 +27,15 @@ async fn main() {
 
     let state = models::AppState { pool };
 
+    let cors = CorsLayer::new()
+        .allow_origin("*".parse::<HeaderValue>().unwrap())
+        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        .allow_headers(tower_http::cors::Any);
+
     let app = Router::new()
         .route("/v1/health", get(|| async { (StatusCode::OK, "OK") }))
         .route("/v1/collect", post(handler::collect))
+        .layer(cors)
         .with_state(state);
 
     let port: u16 = std::env::var("PORT")

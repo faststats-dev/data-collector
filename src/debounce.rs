@@ -29,18 +29,20 @@ pub fn should_debounce(visitor_id: &str, url: &str) -> bool {
         let guard = DEBOUNCE_CACHE.read().unwrap();
         if let Some(cache) = guard.as_ref()
             && let Some(entry) = cache.get(&key)
-                && now.duration_since(entry.last_seen) < DEBOUNCE_WINDOW {
-                    return true;
-                }
+            && now.duration_since(entry.last_seen) < DEBOUNCE_WINDOW
+        {
+            return true;
+        }
     }
 
     let mut guard = DEBOUNCE_CACHE.write().unwrap();
     let cache = guard.get_or_insert_with(HashMap::new);
 
     if let Some(entry) = cache.get(&key)
-        && now.duration_since(entry.last_seen) < DEBOUNCE_WINDOW {
-            return true; // Duplicate, should skip
-        }
+        && now.duration_since(entry.last_seen) < DEBOUNCE_WINDOW
+    {
+        return true; // Duplicate, should skip
+    }
 
     if cache.len() > CLEANUP_THRESHOLD {
         cache.retain(|_, entry| now.duration_since(entry.last_seen) < DEBOUNCE_WINDOW);
@@ -48,7 +50,7 @@ pub fn should_debounce(visitor_id: &str, url: &str) -> bool {
 
     cache.insert(key, DebounceEntry { last_seen: now });
 
-    false 
+    false
 }
 
 #[cfg(test)]

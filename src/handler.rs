@@ -333,7 +333,7 @@ pub async fn web(
 
     let url = valid_data.get("url").and_then(|v| v.as_str()).unwrap_or("");
     if should_debounce(&server_id.to_string(), url) {
-        return success_response(warnings); 
+        return success_response(warnings);
     }
 
     if let Err(e) = insert_data_entry(&state.pool, ctx.project_id, server_id, &valid_data).await {

@@ -209,10 +209,12 @@ async fn insert_data_entry(
 /// Generate a privacy-safe visitor identifier using daily salted hashing
 fn generate_visitor_id(token: &str, ip: &str, user_agent: &str) -> Uuid {
     let salt = get_daily_salt();
-    let input = format!("{}-{}-{}-{}", salt, token, ip, user_agent);
 
     let mut hasher = Sha256::new();
-    hasher.update(input.as_bytes());
+    hasher.update(salt);
+    hasher.update(token.as_bytes());
+    hasher.update(ip.as_bytes());
+    hasher.update(user_agent.as_bytes());
     let hash = hasher.finalize();
 
     // Use first 16 bytes of SHA256 hash to create a UUID
@@ -332,7 +334,7 @@ pub async fn web(
     let server_id = generate_visitor_id(&token, &ip, user_agent);
 
     let url = valid_data.get("url").and_then(|v| v.as_str()).unwrap_or("");
-    if should_debounce(&server_id.to_string(), url) {
+    if should_debounce(server_id, url) {
         return success_response(warnings);
     }
 

@@ -1,42 +1,41 @@
 use chrono::{NaiveDate, Utc};
+use parking_lot::RwLock;
 use rand::Rng;
-use std::sync::RwLock;
 
 struct SaltState {
-    salt: String,
+    salt: [u8; 32],
     date: NaiveDate,
 }
 
 static DAILY_SALT: RwLock<Option<SaltState>> = RwLock::new(None);
 
-fn generate_salt() -> String {
-    let bytes: [u8; 32] = rand::rng().random();
-    hex::encode(bytes)
+fn generate_salt() -> [u8; 32] {
+    rand::rng().random()
 }
 
-pub fn get_daily_salt() -> String {
+pub fn get_daily_salt() -> [u8; 32] {
     let today = Utc::now().date_naive();
 
     {
-        let guard = DAILY_SALT.read().unwrap();
+        let guard = DAILY_SALT.read();
         if let Some(state) = guard.as_ref()
             && state.date == today
         {
-            return state.salt.clone();
+            return state.salt;
         }
     }
 
-    let mut guard = DAILY_SALT.write().unwrap();
+    let mut guard = DAILY_SALT.write();
 
     if let Some(state) = guard.as_ref()
         && state.date == today
     {
-        return state.salt.clone();
+        return state.salt;
     }
 
     let new_salt = generate_salt();
     *guard = Some(SaltState {
-        salt: new_salt.clone(),
+        salt: new_salt,
         date: today,
     });
 
@@ -55,9 +54,8 @@ mod tests {
     }
 
     #[test]
-    fn test_salt_is_64_hex_chars() {
+    fn test_salt_is_32_bytes() {
         let salt = get_daily_salt();
-        assert_eq!(salt.len(), 64);
-        assert!(salt.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(salt.len(), 32);
     }
 }

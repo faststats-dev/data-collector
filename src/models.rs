@@ -22,7 +22,27 @@ pub struct DataSource {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Request {
-    pub server_id: String,
+    #[serde(flatten)]
+    pub id: RequestIdentifier,
     pub data: HashMap<String, Value>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub enum RequestIdentifier {
+    #[serde(rename = "server_id")]
+    ServerId(String),
+    #[serde(rename = "identifier")]
+    Identifier(String),
+}
+
+impl RequestIdentifier {
+    pub fn value(&self) -> &str {
+        match self {
+            RequestIdentifier::ServerId(s) => s,
+            RequestIdentifier::Identifier(s) => s,
+        }
+    }
 }

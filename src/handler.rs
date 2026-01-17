@@ -186,12 +186,12 @@ pub async fn collect(
 
     let (valid_data, warnings) = validate_and_filter_payload(&data_map, &datasource_by_reference);
 
-    let server_id = match req.server_id.parse::<Uuid>() {
+    let server_id = match req.id.value().parse::<Uuid>() {
         Ok(id) => id,
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": "Invalid server_id" })),
+                Json(serde_json::json!({ "error": "Invalid server_id or identifier" })),
             );
         }
     };

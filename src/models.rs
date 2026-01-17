@@ -27,6 +27,7 @@ pub struct Request {
     #[serde(flatten)]
     pub id: RequestIdentifier,
     pub data: HashMap<String, Value>,
+    pub token: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

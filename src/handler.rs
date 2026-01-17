@@ -56,7 +56,47 @@ pub async fn collect(
     headers: HeaderMap,
     body: Body,
 ) -> impl IntoResponse {
-    let auth = get_authorization(&headers);
+    let bytes = match axum::body::to_bytes(body, 1024 * 1024).await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "Internal server error" })),
+            );
+        }
+    };
+
+    let content_encoding = headers
+        .get("Content-Encoding")
+        .and_then(|v| v.to_str().ok());
+
+    let decompressed = match decompress(&bytes, content_encoding) {
+        Ok(data) => data,
+        Err(DecompressionError::InvalidZstd) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "Invalid zstd encoding" })),
+            );
+        }
+        Err(DecompressionError::InvalidGzip) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "Invalid gzip encoding" })),
+            );
+        }
+    };
+
+    let req: Request = match serde_json::from_slice(&decompressed) {
+        Ok(req) => req,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "Invalid JSON" })),
+            );
+        }
+    };
+
+    let auth = get_authorization(&headers).or_else(|| req.token.clone());
     if auth.is_none() {
         return (
             StatusCode::UNAUTHORIZED,
@@ -135,46 +175,6 @@ pub async fn collect(
             datasource_by_reference.insert(datasource.reference_id.clone(), datasource);
         }
     }
-
-    let bytes = match axum::body::to_bytes(body, 1024 * 1024).await {
-        Ok(bytes) => bytes,
-        Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": "Internal server error" })),
-            );
-        }
-    };
-
-    let content_encoding = headers
-        .get("Content-Encoding")
-        .and_then(|v| v.to_str().ok());
-
-    let decompressed = match decompress(&bytes, content_encoding) {
-        Ok(data) => data,
-        Err(DecompressionError::InvalidZstd) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": "Invalid zstd encoding" })),
-            );
-        }
-        Err(DecompressionError::InvalidGzip) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": "Invalid gzip encoding" })),
-            );
-        }
-    };
-
-    let req: Request = match serde_json::from_slice(&decompressed) {
-        Ok(req) => req,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": "Invalid JSON" })),
-            );
-        }
-    };
 
     let mut data_map: HashMap<String, Value> = req.data;
     if let Some(country) = headers

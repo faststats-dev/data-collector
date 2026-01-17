@@ -5,6 +5,7 @@ use axum::{
 };
 use sqlx::postgres::PgPoolOptions;
 use tower_http::cors::CorsLayer;
+mod debounce;
 mod handler;
 mod models;
 mod salt;

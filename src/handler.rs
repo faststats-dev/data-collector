@@ -1,3 +1,4 @@
+use crate::debounce::should_debounce;
 use crate::models::{AppState, DataSource, Request};
 use crate::salt::get_daily_salt;
 use crate::validation::validate_and_filter_payload;
@@ -225,9 +226,10 @@ fn generate_visitor_id(token: &str, ip: &str, user_agent: &str) -> Uuid {
 
 fn get_client_ip(headers: &HeaderMap) -> String {
     if let Some(xff) = headers.get("X-Forwarded-For").and_then(|v| v.to_str().ok())
-        && let Some(first_ip) = xff.split(',').next() {
-            return first_ip.trim().to_string();
-        }
+        && let Some(first_ip) = xff.split(',').next()
+    {
+        return first_ip.trim().to_string();
+    }
     if let Some(cf_ip) = headers
         .get("CF-Connecting-IP")
         .and_then(|v| v.to_str().ok())
@@ -328,6 +330,11 @@ pub async fn web(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     let server_id = generate_visitor_id(&token, &ip, user_agent);
+
+    let url = valid_data.get("url").and_then(|v| v.as_str()).unwrap_or("");
+    if should_debounce(&server_id.to_string(), url) {
+        return success_response(warnings); 
+    }
 
     if let Err(e) = insert_data_entry(&state.pool, ctx.project_id, server_id, &valid_data).await {
         return e;

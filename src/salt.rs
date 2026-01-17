@@ -20,17 +20,19 @@ pub fn get_daily_salt() -> String {
     {
         let guard = DAILY_SALT.read().unwrap();
         if let Some(state) = guard.as_ref()
-            && state.date == today {
-                return state.salt.clone();
-            }
+            && state.date == today
+        {
+            return state.salt.clone();
+        }
     }
 
     let mut guard = DAILY_SALT.write().unwrap();
 
     if let Some(state) = guard.as_ref()
-        && state.date == today {
-            return state.salt.clone();
-        }
+        && state.date == today
+    {
+        return state.salt.clone();
+    }
 
     let new_salt = generate_salt();
     *guard = Some(SaltState {

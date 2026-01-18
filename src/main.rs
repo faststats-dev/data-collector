@@ -5,8 +5,10 @@ use axum::{
 };
 use sqlx::postgres::PgPoolOptions;
 use tower_http::cors::CorsLayer;
+mod debounce;
 mod handler;
 mod models;
+mod salt;
 mod validation;
 
 #[tokio::main]
@@ -35,6 +37,7 @@ async fn main() {
     let app = Router::new()
         .route("/v1/health", get(|| async { (StatusCode::OK, "OK") }))
         .route("/v1/collect", post(handler::collect))
+        .route("/v1/web", post(handler::web))
         .layer(cors)
         .with_state(state);
 

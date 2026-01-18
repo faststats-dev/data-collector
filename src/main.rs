@@ -1,10 +1,10 @@
 use axum::{
     Router,
-    http::{HeaderValue, Method, StatusCode},
+    http::{HeaderName, Method, StatusCode},
     routing::{get, post},
 };
 use sqlx::postgres::PgPoolOptions;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 mod debounce;
 mod handler;
 mod models;
@@ -30,9 +30,13 @@ async fn main() {
     let state = models::AppState { pool };
 
     let cors = CorsLayer::new()
-        .allow_origin("*".parse::<HeaderValue>().unwrap())
+        .allow_origin(AllowOrigin::mirror_request())
         .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
-        .allow_headers(tower_http::cors::Any);
+        .allow_headers([
+            HeaderName::from_static("content-type"),
+            HeaderName::from_static("authorization"),
+        ])
+        .allow_credentials(true);
 
     let app = Router::new()
         .route("/v1/health", get(|| async { (StatusCode::OK, "OK") }))

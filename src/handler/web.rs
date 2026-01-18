@@ -1,10 +1,10 @@
 use super::{
     enrich_data_with_country, error_response, get_authorization, get_request_origin,
-    insert_data_entry, load_project_context, read_and_decompress_body, success_response,
-    validate_domain,
+    insert_data_entry, insert_error_entries, load_project_context, read_and_decompress_body,
+    success_response, validate_domain,
 };
 use crate::debounce::should_debounce;
-use crate::models::AppState;
+use crate::models::{AppState, ErrorTracking};
 use crate::salt::get_daily_salt;
 use crate::validation::validate_and_filter_payload;
 use axum::body::Body;
@@ -20,6 +20,7 @@ use std::collections::HashMap;
 struct WebRequest {
     token: Option<String>,
     data: HashMap<String, Value>,
+    errors: Option<Vec<ErrorTracking>>,
 }
 
 /// Generate a privacy-safe visitor identifier using daily salted hashing
@@ -109,8 +110,24 @@ pub async fn web(
         return success_response(warnings);
     }
 
-    if let Err(e) = insert_data_entry(&state.pool, ctx.project_id, server_id, &valid_data).await {
-        return e;
+    if !ctx.error_tracking_enabled {
+        return success_response(warnings);
+    }
+
+    let data_entry_id =
+        match insert_data_entry(&state.pool, ctx.project_id, server_id, &valid_data).await {
+            Ok(id) => id,
+            Err(e) => return e,
+        };
+
+    if let Some(errors) = parsed.errors {
+        for error in errors {
+            if let Err(e) =
+                insert_error_entries(&state.pool, ctx.project_id, data_entry_id, error).await
+            {
+                return e;
+            }
+        }
     }
 
     success_response(warnings)

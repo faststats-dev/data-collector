@@ -4,7 +4,7 @@ mod web;
 pub use collect::collect;
 pub use web::web;
 
-use crate::models::DataSource;
+use crate::models::{DataSource, Error, ErrorTracking};
 use axum::Json;
 use axum::body::Body;
 use axum::http::{HeaderMap, StatusCode};
@@ -102,6 +102,7 @@ pub struct ProjectContext {
     pub project_id: Uuid,
     pub domain: Option<String>,
     pub datasources: HashMap<String, DataSource>,
+    pub error_tracking_enabled: bool,
 }
 
 pub async fn load_project_context(
@@ -116,6 +117,7 @@ pub async fn load_project_context(
             d.reference_id,
             d.name,
             d.data_type::text AS data_type,
+            d.error_tracking_enabled,
             d.regex,
             d.allow_negative,
             d.allow_float,
@@ -138,6 +140,7 @@ pub async fn load_project_context(
 
     let project_id: Uuid = rows[0].try_get("id").unwrap();
     let domain: Option<String> = rows[0].try_get("domain").unwrap_or(None);
+    let error_tracking_enabled: bool = rows[0].try_get("error_tracking_enabled").unwrap_or(false);
 
     let mut datasources: HashMap<String, DataSource> = HashMap::with_capacity(rows.len());
     for row in rows {
@@ -174,6 +177,7 @@ pub async fn load_project_context(
         project_id,
         domain,
         datasources,
+        error_tracking_enabled,
     })
 }
 
@@ -217,19 +221,78 @@ pub async fn insert_data_entry(
     project_id: Uuid,
     server_id: Uuid,
     data: &HashMap<String, Value>,
-) -> Result<(), HandlerResponse> {
+) -> Result<Uuid, HandlerResponse> {
     if data.is_empty() {
-        return Ok(());
+        return Ok(Uuid::nil());
     }
 
     let data_json = sqlx::types::Json(data);
-    sqlx::query("INSERT INTO data_entries (project_id, server_id, data) VALUES ($1, $2, $3)")
+    let row = sqlx::query(
+        "INSERT INTO data_entries (project_id, server_id, data) VALUES ($1, $2, $3) RETURNING id",
+    )
+    .bind(project_id)
+    .bind(server_id)
+    .bind(data_json)
+    .fetch_one(pool)
+    .await
+    .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error"))?;
+
+    let id: Uuid = row
+        .try_get("id")
+        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error"))?;
+
+    Ok(id)
+}
+
+/// Recursively insert an error and its cause chain into the error table.
+/// Returns the ID of the root error.
+async fn insert_error(pool: &sqlx::PgPool, error: &Error) -> Result<i32, HandlerResponse> {
+    // First, recursively insert the cause if present
+    let cause_id: Option<i32> = match &error.cause {
+        Some(cause) => Some(Box::pin(insert_error(pool, cause)).await?),
+        None => None,
+    };
+
+    let row = sqlx::query(
+        "INSERT INTO error (name, message, stack, cause_id) VALUES ($1, $2, $3, $4) RETURNING id",
+    )
+    .bind(&error.error)
+    .bind(error.message.as_deref().unwrap_or(""))
+    .bind(error.stack.clone().unwrap_or_default())
+    .bind(cause_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error"))?;
+
+    let id: i32 = row
+        .try_get("id")
+        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error"))?;
+
+    Ok(id)
+}
+
+pub async fn insert_error_entries(
+    pool: &sqlx::PgPool,
+    project_id: Uuid,
+    data_entry_id: Uuid,
+    data: ErrorTracking,
+) -> Result<(), HandlerResponse> {
+    let error_id = insert_error(pool, &data.error).await?;
+
+    sqlx::query(
+        "INSERT INTO error_tracking (hash, project_id, error_id, count, data_entry_id) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (project_id, hash) DO UPDATE SET count = error_tracking.count + EXCLUDED.count"
+    )
+        .bind(&data.hash)
         .bind(project_id)
-        .bind(server_id)
-        .bind(data_json)
+        .bind(error_id)
+        .bind(data.count)
+        .bind(data_entry_id)
         .execute(pool)
         .await
-        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error"))?;
+        .map_err(|e| {
+            eprintln!("Error inserting error tracking: {:?}", e);
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error")
+        })?;
 
     Ok(())
 }

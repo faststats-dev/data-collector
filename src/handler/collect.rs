@@ -53,6 +53,10 @@ pub async fn collect(
             Err(e) => return e,
         };
 
+    if !ctx.error_tracking_enabled {
+        return success_response(warnings);
+    }
+
     if let Some(errors) = req.errors {
         for error in errors {
             if let Err(e) =

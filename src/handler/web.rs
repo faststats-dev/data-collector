@@ -110,15 +110,15 @@ pub async fn web(
         return success_response(warnings);
     }
 
-    if !ctx.error_tracking_enabled {
-        return success_response(warnings);
-    }
-
     let data_entry_id =
         match insert_data_entry(&state.pool, ctx.project_id, server_id, &valid_data).await {
             Ok(id) => id,
             Err(e) => return e,
         };
+
+    if !ctx.error_tracking_enabled {
+        return success_response(warnings);
+    }
 
     if let Some(errors) = parsed.errors {
         for error in errors {

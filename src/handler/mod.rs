@@ -285,7 +285,7 @@ pub async fn insert_error_entries(
         .bind(&data.hash)
         .bind(project_id)
         .bind(error_id)
-        .bind(data.count)
+        .bind(data.count.unwrap_or(1))
         .bind(data_entry_id)
         .execute(pool)
         .await

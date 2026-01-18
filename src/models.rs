@@ -36,7 +36,7 @@ pub struct ErrorTracking {
     #[serde(flatten)]
     pub error: Error,
     #[serde(default)]
-    pub count: i32,
+    pub count: Option<i32>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

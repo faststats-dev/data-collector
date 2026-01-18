@@ -42,6 +42,7 @@ async fn main() {
         .route("/v1/health", get(|| async { (StatusCode::OK, "OK") }))
         .route("/v1/collect", post(handler::collect))
         .route("/v1/web", post(handler::web))
+        .route("/v1/vitals", post(handler::vitals))
         .layer(cors)
         .with_state(state);
 

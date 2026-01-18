@@ -1,7 +1,9 @@
 mod collect;
+mod vitals;
 mod web;
 
 pub use collect::collect;
+pub use vitals::vitals;
 pub use web::web;
 
 use crate::models::{DataSource, Error, ErrorTracking};

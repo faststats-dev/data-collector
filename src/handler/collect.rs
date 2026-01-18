@@ -1,6 +1,6 @@
 use super::{
     enrich_data_with_country, error_response, get_authorization, insert_data_entry,
-    load_project_context, read_and_decompress_body, success_response,
+    insert_error_entries, load_project_context, read_and_decompress_body, success_response,
 };
 use crate::models::{AppState, Request};
 use crate::validation::validate_and_filter_payload;
@@ -47,8 +47,20 @@ pub async fn collect(
 
     let (valid_data, warnings) = validate_and_filter_payload(&data_map, &ctx.datasources);
 
-    if let Err(e) = insert_data_entry(&state.pool, ctx.project_id, server_id, &valid_data).await {
-        return e;
+    let data_entry_id =
+        match insert_data_entry(&state.pool, ctx.project_id, server_id, &valid_data).await {
+            Ok(id) => id,
+            Err(e) => return e,
+        };
+
+    if let Some(errors) = req.errors {
+        for error in errors {
+            if let Err(e) =
+                insert_error_entries(&state.pool, ctx.project_id, data_entry_id, error).await
+            {
+                return e;
+            }
+        }
     }
 
     success_response(warnings)

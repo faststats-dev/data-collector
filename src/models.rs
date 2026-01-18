@@ -22,11 +22,30 @@ pub struct DataSource {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct Error {
+    pub error: String,
+    pub message: Option<String>,
+    pub stack: Option<Vec<String>>,
+    #[serde(default)]
+    pub cause: Option<Box<Error>>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ErrorTracking {
+    pub hash: String,
+    #[serde(flatten)]
+    pub error: Error,
+    #[serde(default)]
+    pub count: i32,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
     #[serde(flatten)]
     pub id: RequestIdentifier,
     pub data: HashMap<String, Value>,
+    pub errors: Option<Vec<ErrorTracking>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

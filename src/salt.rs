@@ -1,13 +1,10 @@
 use chrono::{NaiveDate, Utc};
-use parking_lot::RwLock;
+use moka::sync::Cache;
 use rand::Rng;
+use std::sync::LazyLock;
 
-struct SaltState {
-    salt: [u8; 32],
-    date: NaiveDate,
-}
-
-static DAILY_SALT: RwLock<Option<SaltState>> = RwLock::new(None);
+static DAILY_SALT: LazyLock<Cache<NaiveDate, [u8; 32]>> =
+    LazyLock::new(|| Cache::builder().max_capacity(1).build());
 
 fn generate_salt() -> [u8; 32] {
     rand::rng().random()
@@ -16,30 +13,7 @@ fn generate_salt() -> [u8; 32] {
 pub fn get_daily_salt() -> [u8; 32] {
     let today = Utc::now().date_naive();
 
-    {
-        let guard = DAILY_SALT.read();
-        if let Some(state) = guard.as_ref()
-            && state.date == today
-        {
-            return state.salt;
-        }
-    }
-
-    let mut guard = DAILY_SALT.write();
-
-    if let Some(state) = guard.as_ref()
-        && state.date == today
-    {
-        return state.salt;
-    }
-
-    let new_salt = generate_salt();
-    *guard = Some(SaltState {
-        salt: new_salt,
-        date: today,
-    });
-
-    new_salt
+    DAILY_SALT.get_with(today, generate_salt)
 }
 
 #[cfg(test)]

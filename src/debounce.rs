@@ -1,19 +1,19 @@
-use parking_lot::RwLock;
+use moka::sync::Cache;
 use sha2::{Digest, Sha256};
 use sqlx::types::Uuid;
-use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::sync::LazyLock;
+use std::time::Duration;
 
 const DEBOUNCE_WINDOW: Duration = Duration::from_secs(5);
-const CLEANUP_THRESHOLD: usize = 10000;
+const MAX_ENTRIES: u64 = 10_000;
 
-struct DebounceEntry {
-    last_seen: Instant,
-}
+static DEBOUNCE_CACHE: LazyLock<Cache<[u8; 32], ()>> = LazyLock::new(|| {
+    Cache::builder()
+        .max_capacity(MAX_ENTRIES)
+        .time_to_live(DEBOUNCE_WINDOW)
+        .build()
+});
 
-static DEBOUNCE_CACHE: RwLock<Option<HashMap<[u8; 32], DebounceEntry>>> = RwLock::new(None);
-
-/// Generate a debounce key from visitor UUID and URL
 fn debounce_key(visitor_id: Uuid, url: &str) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(visitor_id.as_bytes());
@@ -23,33 +23,12 @@ fn debounce_key(visitor_id: Uuid, url: &str) -> [u8; 32] {
 
 pub fn should_debounce(visitor_id: Uuid, url: &str) -> bool {
     let key = debounce_key(visitor_id, url);
-    let now = Instant::now();
 
-    {
-        let guard = DEBOUNCE_CACHE.read();
-        if let Some(cache) = guard.as_ref()
-            && let Some(entry) = cache.get(&key)
-            && now.duration_since(entry.last_seen) < DEBOUNCE_WINDOW
-        {
-            return true;
-        }
+    if DEBOUNCE_CACHE.contains_key(&key) {
+        return true;
     }
 
-    let mut guard = DEBOUNCE_CACHE.write();
-    let cache = guard.get_or_insert_with(HashMap::new);
-
-    if let Some(entry) = cache.get(&key)
-        && now.duration_since(entry.last_seen) < DEBOUNCE_WINDOW
-    {
-        return true; // Duplicate, should skip
-    }
-
-    if cache.len() > CLEANUP_THRESHOLD {
-        cache.retain(|_, entry| now.duration_since(entry.last_seen) < DEBOUNCE_WINDOW);
-    }
-
-    cache.insert(key, DebounceEntry { last_seen: now });
-
+    DEBOUNCE_CACHE.insert(key, ());
     false
 }
 

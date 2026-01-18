@@ -8,7 +8,6 @@ dotenvy = "0.15.7"
 axum = "0.8.7"
 chrono = "0.4"
 flate2 = "1.1.5"
-parking_lot = "0.12"
 rand = "0.9"
 regex = "1.12.2"
 serde = "1.0.228"
@@ -19,3 +18,4 @@ tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread"] }
 zstd = "0.13.3"
 tower-http = { version = "0.6.8", features = ["cors"] }
 url = "2"
+moka = { version = "0.12.12", features = ["sync"] }

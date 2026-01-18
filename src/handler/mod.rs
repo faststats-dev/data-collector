@@ -117,7 +117,7 @@ pub async fn load_project_context(
             d.reference_id,
             d.name,
             d.data_type::text AS data_type,
-            d.error_tracking_enabled,
+            p.error_tracking_enabled,
             d.regex,
             d.allow_negative,
             d.allow_float,

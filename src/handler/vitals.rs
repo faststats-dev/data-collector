@@ -6,9 +6,10 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 use sqlx::Row;
 use std::collections::HashMap;
+use uuid::Uuid;
 
 #[derive(Debug, Deserialize)]
 pub struct WebVitalsMetadata {
@@ -59,20 +60,12 @@ pub async fn vitals(
         .and_then(|value| value.to_str().ok())
         .map(String::from);
 
-    if let Err(e) = insert_web_vital(&state.pool, project_id, &req, country).await {
-        return e;
-    }
+    insert_web_vital_batched(&state.batcher, project_id, &req, country).await;
 
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({ "status": "success" })),
-    )
+    (StatusCode::OK, Json(json!({ "status": "success" })))
 }
 
-async fn get_project_id(
-    pool: &sqlx::PgPool,
-    token: &str,
-) -> Result<sqlx::types::Uuid, HandlerResponse> {
+async fn get_project_id(pool: &sqlx::PgPool, token: &str) -> Result<Uuid, HandlerResponse> {
     let row = sqlx::query("SELECT id FROM project WHERE token = $1")
         .bind(token)
         .fetch_optional(pool)
@@ -87,30 +80,45 @@ async fn get_project_id(
     }
 }
 
-async fn insert_web_vital(
-    pool: &sqlx::PgPool,
-    project_id: sqlx::types::Uuid,
+async fn insert_web_vital_batched(
+    batcher: &std::sync::Arc<crate::batcher::Batcher>,
+    project_id: Uuid,
     req: &WebVitalRequest,
     country: Option<String>,
-) -> Result<(), HandlerResponse> {
-    let attributes_json = req.attributes.as_ref().map(sqlx::types::Json);
+) {
+    let id = Uuid::new_v4();
+    let attributes_str = req
+        .attributes
+        .as_ref()
+        .map(|attrs| serde_json::to_string(attrs).unwrap_or_else(|_| "{}".to_string()))
+        .unwrap_or_else(|| "{}".to_string());
 
-    sqlx::query(
-        "INSERT INTO web_vitals (project_id, metric, value, label, attributes, browser, os, device, country, url) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
-    )
-    .bind(project_id)
-    .bind(&req.metric)
-    .bind(req.value)
-    .bind(&req.label)
-    .bind(attributes_json)
-    .bind(req.metadata.as_ref().and_then(|m| m.browser.as_ref()))
-    .bind(req.metadata.as_ref().and_then(|m| m.os.as_ref()))
-    .bind(req.metadata.as_ref().and_then(|m| m.device.as_ref()))
-    .bind(country)
-    .bind(req.metadata.as_ref().and_then(|m| m.url.as_ref()))
-    .execute(pool)
-    .await
-    .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error"))?;
+    let row = crate::batcher::WebVitalRow {
+        id,
+        project_id,
+        metric: req.metric.clone(),
+        value: req.value,
+        label: req.label.clone(),
+        device: req
+            .metadata
+            .as_ref()
+            .and_then(|m| m.device.as_ref())
+            .cloned(),
+        country,
+        os: req.metadata.as_ref().and_then(|m| m.os.as_ref()).cloned(),
+        browser: req
+            .metadata
+            .as_ref()
+            .and_then(|m| m.browser.as_ref())
+            .cloned(),
+        url: req
+            .metadata
+            .as_ref()
+            .and_then(|m| m.url.as_ref())
+            .cloned()
+            .unwrap_or_default(),
+        attributes: attributes_str,
+    };
 
-    Ok(())
+    batcher.add_web_vital(row).await;
 }

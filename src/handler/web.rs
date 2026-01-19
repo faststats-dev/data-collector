@@ -1,7 +1,7 @@
 use super::{
     enrich_data_with_country, error_response, get_authorization, get_request_origin,
-    insert_data_entry, insert_error_entries, load_project_context, read_and_decompress_body,
-    success_response, validate_domain,
+    insert_error_entries_clickhouse, insert_event_clickhouse, load_project_context,
+    read_and_decompress_body, success_response, validate_domain,
 };
 use crate::debounce::should_debounce;
 use crate::models::{AppState, ErrorTracking};
@@ -111,7 +111,8 @@ pub async fn web(
     }
 
     let data_entry_id =
-        match insert_data_entry(&state.pool, ctx.project_id, server_id, &valid_data).await {
+        match insert_event_clickhouse(&state.batcher, ctx.project_id, server_id, &valid_data).await
+        {
             Ok(id) => id,
             Err(e) => return e,
         };
@@ -122,8 +123,13 @@ pub async fn web(
 
     if let Some(errors) = parsed.errors {
         for error in errors {
-            if let Err(e) =
-                insert_error_entries(&state.pool, ctx.project_id, data_entry_id, error).await
+            if let Err(e) = insert_error_entries_clickhouse(
+                &state.batcher,
+                ctx.project_id,
+                data_entry_id,
+                error,
+            )
+            .await
             {
                 return e;
             }

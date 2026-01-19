@@ -4,7 +4,9 @@ use axum::{
     routing::{get, post},
 };
 use sqlx::postgres::PgPoolOptions;
+use std::sync::Arc;
 use tower_http::cors::{AllowOrigin, CorsLayer};
+mod batcher;
 mod debounce;
 mod handler;
 mod models;
@@ -27,7 +29,34 @@ async fn main() {
         .await
         .expect("Failed to connect to database");
 
-    let state = models::AppState { pool };
+    let clickhouse_client = clickhouse::Client::default()
+        .with_url(
+            std::env::var("CLICKHOUSE_URL")
+                .expect("CLICKHOUSE_URL must be set in .env file or environment variables"),
+        )
+        .with_user(
+            std::env::var("CLICKHOUSE_USER")
+                .expect("CLICKHOUSE_USER must be set in .env file or environment variables"),
+        )
+        .with_password(
+            std::env::var("CLICKHOUSE_PASSWORD")
+                .expect("CLICKHOUSE_PASSWORD must be set in .env file or environment variables"),
+        )
+        .with_database(
+            std::env::var("CLICKHOUSE_DATABASE")
+                .expect("CLICKHOUSE_DATABASE must be set in .env file or environment variables"),
+        )
+        .with_option("input_format_binary_read_json_as_string", "1");
+
+    let batcher = Arc::new(batcher::Batcher::new(clickhouse_client, 5));
+
+    // Start the batcher background task
+    let batcher_clone = batcher.clone();
+    tokio::spawn(async move {
+        batcher_clone.start().await;
+    });
+
+    let state = models::AppState { pool, batcher };
 
     let cors = CorsLayer::new()
         .allow_origin(AllowOrigin::mirror_request())

@@ -6,8 +6,8 @@ pub use collect::collect;
 pub use vitals::vitals;
 pub use web::web;
 
-use crate::batcher::{ErrorRow, ErrorTrackingRow, EventRow};
 use crate::models::{DataSource, Error, ErrorTracking};
+use crate::tinybird::{ErrorRow, ErrorTrackingRow, EventRow, TinybirdClient};
 use axum::Json;
 use axum::body::Body;
 use axum::http::{HeaderMap, StatusCode};
@@ -221,11 +221,11 @@ pub fn enrich_data_with_country(data: &mut HashMap<String, Value>, headers: &Hea
     }
 }
 
-// ClickHouse insert functions
+// Tinybird insert functions
 static ERROR_ID_COUNTER: AtomicU32 = AtomicU32::new(1);
 
-pub async fn insert_event_clickhouse(
-    batcher: &Arc<crate::batcher::Batcher>,
+pub async fn insert_event(
+    tinybird: &Arc<TinybirdClient>,
     project_id: Uuid,
     server_id: Uuid,
     data: &HashMap<String, Value>,
@@ -250,11 +250,14 @@ pub async fn insert_event_clickhouse(
         created_at: chrono::Utc::now(),
     };
 
-    batcher.add_event(event).await;
+    tinybird.insert_event(event).await.map_err(|e| {
+        eprintln!("Failed to insert event: {}", e);
+        error_response(StatusCode::INTERNAL_SERVER_ERROR, "Failed to insert event")
+    })?;
     Ok(event_id)
 }
 
-/// Recursively build error rows for insertion into ClickHouse.
+/// Recursively build error rows for insertion.
 /// Returns the ID of the root error and all error rows to be inserted.
 fn build_error_rows(error: &Error, errors: &mut Vec<ErrorRow>) -> u32 {
     let error_id = ERROR_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -275,8 +278,8 @@ fn build_error_rows(error: &Error, errors: &mut Vec<ErrorRow>) -> u32 {
     error_id
 }
 
-pub async fn insert_error_entries_clickhouse(
-    batcher: &Arc<crate::batcher::Batcher>,
+pub async fn insert_error_entries(
+    tinybird: &Arc<TinybirdClient>,
     project_id: Uuid,
     data_entry_id: Uuid,
     data: ErrorTracking,
@@ -284,9 +287,12 @@ pub async fn insert_error_entries_clickhouse(
     let mut error_rows = Vec::new();
     let error_id = build_error_rows(&data.error, &mut error_rows);
 
-    // Add all error rows to the batcher
+    // Insert all error rows
     for error_row in error_rows {
-        batcher.add_error(error_row).await;
+        tinybird.insert_error(error_row).await.map_err(|e| {
+            eprintln!("Failed to insert error: {}", e);
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Failed to insert error")
+        })?;
     }
 
     let error_tracking = ErrorTrackingRow {
@@ -296,9 +302,19 @@ pub async fn insert_error_entries_clickhouse(
         error_id,
         count: data.count.unwrap_or(1) as u32,
         data_entry_id,
+        created_at: chrono::Utc::now(),
     };
 
-    batcher.add_error_tracking(error_tracking).await;
+    tinybird
+        .insert_error_tracking(error_tracking)
+        .await
+        .map_err(|e| {
+            eprintln!("Failed to insert error tracking: {}", e);
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to insert error tracking",
+            )
+        })?;
     Ok(())
 }
 

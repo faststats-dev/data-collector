@@ -1,4 +1,4 @@
-use crate::batcher::Batcher;
+use crate::tinybird::TinybirdClient;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::PgPool;
@@ -8,7 +8,7 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct AppState {
     pub pool: PgPool,
-    pub batcher: Arc<Batcher>,
+    pub tinybird: Arc<TinybirdClient>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

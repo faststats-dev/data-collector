@@ -1,5 +1,6 @@
 use super::{HandlerResponse, error_response, get_authorization, read_and_decompress_body};
 use crate::models::AppState;
+use crate::tinybird::{TinybirdClient, WebVitalRow};
 use axum::Json;
 use axum::body::Body;
 use axum::extract::State;
@@ -9,6 +10,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::Row;
 use std::collections::HashMap;
+use std::sync::Arc;
 use uuid::Uuid;
 
 #[derive(Debug, Deserialize)]
@@ -60,7 +62,9 @@ pub async fn vitals(
         .and_then(|value| value.to_str().ok())
         .map(String::from);
 
-    insert_web_vital_batched(&state.batcher, project_id, &req, country).await;
+    if let Err(e) = insert_web_vital(&state.tinybird, project_id, &req, country).await {
+        return e;
+    }
 
     (StatusCode::OK, Json(json!({ "status": "success" })))
 }
@@ -80,12 +84,12 @@ async fn get_project_id(pool: &sqlx::PgPool, token: &str) -> Result<Uuid, Handle
     }
 }
 
-async fn insert_web_vital_batched(
-    batcher: &std::sync::Arc<crate::batcher::Batcher>,
+async fn insert_web_vital(
+    tinybird: &Arc<TinybirdClient>,
     project_id: Uuid,
     req: &WebVitalRequest,
     country: Option<String>,
-) {
+) -> Result<(), HandlerResponse> {
     let id = Uuid::new_v4();
     let attributes_str = req
         .attributes
@@ -93,7 +97,7 @@ async fn insert_web_vital_batched(
         .map(|attrs| serde_json::to_string(attrs).unwrap_or_else(|_| "{}".to_string()))
         .unwrap_or_else(|| "{}".to_string());
 
-    let row = crate::batcher::WebVitalRow {
+    let row = WebVitalRow {
         id,
         project_id,
         metric: req.metric.clone(),
@@ -118,7 +122,15 @@ async fn insert_web_vital_batched(
             .cloned()
             .unwrap_or_default(),
         attributes: attributes_str,
+        created_at: chrono::Utc::now(),
     };
 
-    batcher.add_web_vital(row).await;
+    tinybird.insert_web_vital(row).await.map_err(|e| {
+        eprintln!("Failed to insert web vital: {}", e);
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to insert web vital",
+        )
+    })?;
+    Ok(())
 }

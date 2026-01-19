@@ -1,6 +1,6 @@
 use super::{
-    enrich_data_with_country, error_response, get_authorization, insert_error_entries_clickhouse,
-    insert_event_clickhouse, load_project_context, read_and_decompress_body, success_response,
+    enrich_data_with_country, error_response, get_authorization, insert_error_entries,
+    insert_event, load_project_context, read_and_decompress_body, success_response,
 };
 use crate::models::{AppState, Request};
 use crate::validation::validate_and_filter_payload;
@@ -48,8 +48,7 @@ pub async fn collect(
     let (valid_data, warnings) = validate_and_filter_payload(&data_map, &ctx.datasources);
 
     let data_entry_id =
-        match insert_event_clickhouse(&state.batcher, ctx.project_id, server_id, &valid_data).await
-        {
+        match insert_event(&state.tinybird, ctx.project_id, server_id, &valid_data).await {
             Ok(id) => id,
             Err(e) => return e,
         };
@@ -60,13 +59,8 @@ pub async fn collect(
 
     if let Some(errors) = req.errors {
         for error in errors {
-            if let Err(e) = insert_error_entries_clickhouse(
-                &state.batcher,
-                ctx.project_id,
-                data_entry_id,
-                error,
-            )
-            .await
+            if let Err(e) =
+                insert_error_entries(&state.tinybird, ctx.project_id, data_entry_id, error).await
             {
                 return e;
             }

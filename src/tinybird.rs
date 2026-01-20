@@ -112,7 +112,7 @@ impl TinybirdClient {
         datasource: &str,
         row: &T,
     ) -> Result<(), TinybirdError> {
-        let url = format!("{}/v0/events?name={}&wait=true", self.base_url, datasource);
+        let url = format!("{}/v0/events?name={}&wait=false", self.base_url, datasource);
         let body = serde_json::to_string(row).expect("Failed to serialize row");
 
         let response = self

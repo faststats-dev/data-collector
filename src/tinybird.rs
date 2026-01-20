@@ -115,12 +115,6 @@ impl TinybirdClient {
         let url = format!("{}/v0/events?name={}&wait=true", self.base_url, datasource);
         let body = serde_json::to_string(row).expect("Failed to serialize row");
 
-        eprintln!(
-            "Tinybird: sending to {} - body: {}",
-            datasource,
-            &body[..body.len().min(200)]
-        );
-
         let response = self
             .client
             .post(&url)
@@ -132,11 +126,6 @@ impl TinybirdClient {
 
         let status = response.status().as_u16();
         let response_body = response.text().await.unwrap_or_default();
-
-        eprintln!(
-            "Tinybird: {} responded with status {} - {}",
-            datasource, status, response_body
-        );
 
         if status != 200 && status != 202 {
             return Err(TinybirdError::Api {

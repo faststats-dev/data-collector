@@ -38,6 +38,7 @@ pub struct ErrorTrackingRow {
     pub error_id: u32,
     pub count: u32,
     pub data_entry_id: Uuid,
+    pub session_id: Option<String>,
     #[serde(with = "chrono::serde::ts_milliseconds")]
     pub created_at: DateTime<Utc>,
 }
@@ -59,6 +60,17 @@ pub struct WebVitalRow {
     pub browser: Option<String>,
     pub url: String,
     pub attributes: String,
+    pub session_id: Option<String>,
+    #[serde(with = "chrono::serde::ts_milliseconds")]
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ReplayRow {
+    pub id: Uuid,
+    pub project_id: Uuid,
+    pub session_id: String,
+    pub events: String,
     #[serde(with = "chrono::serde::ts_milliseconds")]
     pub created_at: DateTime<Utc>,
 }
@@ -153,5 +165,9 @@ impl TinybirdClient {
 
     pub async fn insert_web_vital(&self, web_vital: WebVitalRow) -> Result<(), TinybirdError> {
         self.send_event("web_vitals", &web_vital).await
+    }
+
+    pub async fn insert_replay(&self, replay: ReplayRow) -> Result<(), TinybirdError> {
+        self.send_event("session_replays", &replay).await
     }
 }

@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 dotenvy = "0.15.7"
 axum = "0.8.7"
-chrono = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
 flate2 = "1.1.5"
 rand = "0.9"
 regex = "1.12.2"
@@ -19,3 +19,5 @@ zstd = "0.13.3"
 tower-http = { version = "0.6.8", features = ["cors"] }
 url = "2"
 moka = { version = "0.12.12", features = ["sync"] }
+reqwest = { version = "0.12", features = ["json"] }
+uuid = { version = "1.19.0", features = ["serde", "v4"] }

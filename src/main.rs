@@ -4,11 +4,13 @@ use axum::{
     routing::{get, post},
 };
 use sqlx::postgres::PgPoolOptions;
+use std::sync::Arc;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 mod debounce;
 mod handler;
 mod models;
 mod salt;
+mod tinybird;
 mod validation;
 
 #[tokio::main]
@@ -27,7 +29,17 @@ async fn main() {
         .await
         .expect("Failed to connect to database");
 
-    let state = models::AppState { pool };
+    let tinybird_client = Arc::new(tinybird::TinybirdClient::new(
+        std::env::var("TINYBIRD_URL")
+            .expect("TINYBIRD_URL must be set in .env file or environment variables"),
+        std::env::var("TINYBIRD_TOKEN")
+            .expect("TINYBIRD_TOKEN must be set in .env file or environment variables"),
+    ));
+
+    let state = models::AppState {
+        pool,
+        tinybird: tinybird_client,
+    };
 
     let cors = CorsLayer::new()
         .allow_origin(AllowOrigin::mirror_request())
@@ -42,6 +54,7 @@ async fn main() {
         .route("/v1/health", get(|| async { (StatusCode::OK, "OK") }))
         .route("/v1/collect", post(handler::collect))
         .route("/v1/web", post(handler::web))
+        .route("/v1/vitals", post(handler::vitals))
         .layer(cors)
         .with_state(state);
 

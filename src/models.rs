@@ -1,11 +1,14 @@
+use crate::tinybird::TinybirdClient;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::PgPool;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct AppState {
     pub pool: PgPool,
+    pub tinybird: Arc<TinybirdClient>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

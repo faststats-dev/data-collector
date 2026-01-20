@@ -1,10 +1,13 @@
 mod collect;
+mod vitals;
 mod web;
 
 pub use collect::collect;
+pub use vitals::vitals;
 pub use web::web;
 
 use crate::models::{DataSource, Error, ErrorTracking};
+use crate::tinybird::{ErrorRow, ErrorTrackingRow, EventRow, TinybirdClient};
 use axum::Json;
 use axum::body::Body;
 use axum::http::{HeaderMap, StatusCode};
@@ -13,6 +16,8 @@ use serde_json::Value;
 use sqlx::{Row, types::Uuid};
 use std::collections::HashMap;
 use std::io::Read;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 pub type HandlerResponse = (StatusCode, Json<Value>);
 
@@ -216,8 +221,11 @@ pub fn enrich_data_with_country(data: &mut HashMap<String, Value>, headers: &Hea
     }
 }
 
-pub async fn insert_data_entry(
-    pool: &sqlx::PgPool,
+// Tinybird insert functions
+static ERROR_ID_COUNTER: AtomicU32 = AtomicU32::new(1);
+
+pub async fn insert_event(
+    tinybird: &Arc<TinybirdClient>,
     project_id: Uuid,
     server_id: Uuid,
     data: &HashMap<String, Value>,
@@ -226,74 +234,87 @@ pub async fn insert_data_entry(
         return Ok(Uuid::nil());
     }
 
-    let data_json = sqlx::types::Json(data);
-    let row = sqlx::query(
-        "INSERT INTO data_entries (project_id, server_id, data) VALUES ($1, $2, $3) RETURNING id",
-    )
-    .bind(project_id)
-    .bind(server_id)
-    .bind(data_json)
-    .fetch_one(pool)
-    .await
-    .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error"))?;
+    let event_id = Uuid::new_v4();
+    let data_json = serde_json::to_string(data).map_err(|_| {
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to serialize data",
+        )
+    })?;
 
-    let id: Uuid = row
-        .try_get("id")
-        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error"))?;
-
-    Ok(id)
-}
-
-/// Recursively insert an error and its cause chain into the error table.
-/// Returns the ID of the root error.
-async fn insert_error(pool: &sqlx::PgPool, error: &Error) -> Result<i32, HandlerResponse> {
-    // First, recursively insert the cause if present
-    let cause_id: Option<i32> = match &error.cause {
-        Some(cause) => Some(Box::pin(insert_error(pool, cause)).await?),
-        None => None,
+    let event = EventRow {
+        id: event_id,
+        project_id,
+        server_id,
+        data: data_json,
+        created_at: chrono::Utc::now(),
     };
 
-    let row = sqlx::query(
-        "INSERT INTO error (name, message, stack, cause_id) VALUES ($1, $2, $3, $4) RETURNING id",
-    )
-    .bind(&error.error)
-    .bind(error.message.as_deref().unwrap_or(""))
-    .bind(error.stack.clone().unwrap_or_default())
-    .bind(cause_id)
-    .fetch_one(pool)
-    .await
-    .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error"))?;
+    tinybird.insert_event(event).await.map_err(|e| {
+        eprintln!("Failed to insert event: {}", e);
+        error_response(StatusCode::INTERNAL_SERVER_ERROR, "Failed to insert event")
+    })?;
+    Ok(event_id)
+}
 
-    let id: i32 = row
-        .try_get("id")
-        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error"))?;
+/// Recursively build error rows for insertion.
+/// Returns the ID of the root error and all error rows to be inserted.
+fn build_error_rows(error: &Error, errors: &mut Vec<ErrorRow>) -> u32 {
+    let error_id = ERROR_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
 
-    Ok(id)
+    let cause_id = error
+        .cause
+        .as_ref()
+        .map(|cause| build_error_rows(cause, errors));
+
+    errors.push(ErrorRow {
+        id: error_id,
+        name: error.error.clone(),
+        message: error.message.clone().unwrap_or_default(),
+        stack: error.stack.clone().unwrap_or_default(),
+        cause_id,
+    });
+
+    error_id
 }
 
 pub async fn insert_error_entries(
-    pool: &sqlx::PgPool,
+    tinybird: &Arc<TinybirdClient>,
     project_id: Uuid,
     data_entry_id: Uuid,
     data: ErrorTracking,
 ) -> Result<(), HandlerResponse> {
-    let error_id = insert_error(pool, &data.error).await?;
+    let mut error_rows = Vec::new();
+    let error_id = build_error_rows(&data.error, &mut error_rows);
 
-    sqlx::query(
-        "INSERT INTO error_tracking (hash, project_id, error_id, count, data_entry_id) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (project_id, hash) DO UPDATE SET count = error_tracking.count + EXCLUDED.count"
-    )
-        .bind(&data.hash)
-        .bind(project_id)
-        .bind(error_id)
-        .bind(data.count.unwrap_or(1))
-        .bind(data_entry_id)
-        .execute(pool)
+    // Insert all error rows
+    for error_row in error_rows {
+        tinybird.insert_error(error_row).await.map_err(|e| {
+            eprintln!("Failed to insert error: {}", e);
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Failed to insert error")
+        })?;
+    }
+
+    let error_tracking = ErrorTrackingRow {
+        id: Uuid::new_v4(),
+        project_id,
+        hash: data.hash,
+        error_id,
+        count: data.count.unwrap_or(1) as u32,
+        data_entry_id,
+        created_at: chrono::Utc::now(),
+    };
+
+    tinybird
+        .insert_error_tracking(error_tracking)
         .await
         .map_err(|e| {
-            eprintln!("Error inserting error tracking: {:?}", e);
-            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error")
+            eprintln!("Failed to insert error tracking: {}", e);
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to insert error tracking",
+            )
         })?;
-
     Ok(())
 }
 

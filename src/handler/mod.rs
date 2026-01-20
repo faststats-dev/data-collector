@@ -1,10 +1,12 @@
 mod collect;
+mod replay;
 mod vitals;
 mod web;
 
 pub use collect::collect;
+pub use replay::replay;
 pub use vitals::vitals;
-pub use web::web;
+pub use web::{web, web_metadata};
 
 use crate::models::{DataSource, Error, ErrorTracking};
 use crate::tinybird::{ErrorRow, ErrorTrackingRow, EventRow, TinybirdClient};
@@ -118,7 +120,7 @@ pub async fn load_project_context(
         "
         SELECT
             p.id,
-            p.properties->>'domain' AS domain,
+            p.domain,
             d.reference_id,
             d.name,
             d.data_type::text AS data_type,
@@ -302,6 +304,7 @@ pub async fn insert_error_entries(
         error_id,
         count: data.count.unwrap_or(1) as u32,
         data_entry_id,
+        session_id: data.session_id,
         created_at: chrono::Utc::now(),
     };
 

@@ -22,6 +22,7 @@ pub struct WebVitalsMetadata {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WebVitalRequest {
     pub metric: String,
     pub value: f64,
@@ -30,6 +31,8 @@ pub struct WebVitalRequest {
     pub attributes: Option<HashMap<String, Value>>,
     #[serde(default)]
     pub metadata: Option<WebVitalsMetadata>,
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 pub async fn vitals(
@@ -122,6 +125,7 @@ async fn insert_web_vital(
             .cloned()
             .unwrap_or_default(),
         attributes: attributes_str,
+        session_id: req.session_id.clone(),
         created_at: chrono::Utc::now(),
     };
 

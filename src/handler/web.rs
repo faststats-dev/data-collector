@@ -1,18 +1,20 @@
 use super::{
-    enrich_data_with_country, error_response, get_authorization, get_request_origin,
-    insert_error_entries, insert_event, load_project_context, read_and_decompress_body,
-    success_response, validate_domain,
+    HandlerResponse, enrich_data_with_country, error_response, get_authorization,
+    get_request_origin, insert_error_entries, insert_event, load_project_context,
+    read_and_decompress_body, success_response, validate_domain,
 };
 use crate::debounce::should_debounce;
 use crate::models::{AppState, ErrorTracking};
 use crate::salt::get_daily_salt;
 use crate::validation::validate_and_filter_payload;
 use axum::body::Body;
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
+use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use sqlx::Row;
 use sqlx::types::Uuid;
 use std::collections::HashMap;
 
@@ -21,6 +23,7 @@ struct WebRequest {
     token: Option<String>,
     data: HashMap<String, Value>,
     errors: Option<Vec<ErrorTracking>>,
+    session_id: Option<String>,
 }
 
 /// Generate a privacy-safe visitor identifier using daily salted hashing
@@ -96,6 +99,13 @@ pub async fn web(
     let mut data_map = parsed.data;
     enrich_data_with_country(&mut data_map, &headers);
 
+    let session_id = parsed.session_id.or_else(|| {
+        data_map
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+    });
+
     let (valid_data, warnings) = validate_and_filter_payload(&data_map, &ctx.datasources);
 
     let ip = get_client_ip(&headers);
@@ -121,7 +131,11 @@ pub async fn web(
     }
 
     if let Some(errors) = parsed.errors {
-        for error in errors {
+        for mut error in errors {
+            // Use error's sessionId if present, otherwise fall back to request-level sessionId
+            if error.session_id.is_none() {
+                error.session_id = session_id.clone();
+            }
             if let Err(e) =
                 insert_error_entries(&state.tinybird, ctx.project_id, data_entry_id, error).await
             {
@@ -131,4 +145,60 @@ pub async fn web(
     }
 
     success_response(warnings)
+}
+
+#[derive(Deserialize)]
+pub struct MetadataQuery {
+    token: String,
+}
+
+pub async fn web_metadata(
+    State(state): State<AppState>,
+    Query(query): Query<MetadataQuery>,
+) -> HandlerResponse {
+    let row = sqlx::query(
+        "SELECT
+            error_tracking_enabled,
+            web_vitals_enabled,
+            session_replays_enabled,
+            web_vitals_sampling,
+            session_replays_sampling
+         FROM project
+         WHERE token = $1",
+    )
+    .bind(&query.token)
+    .fetch_optional(&state.pool)
+    .await;
+
+    let row = match row {
+        Ok(Some(r)) => r,
+        Ok(None) => return error_response(StatusCode::NOT_FOUND, "Project not found"),
+        Err(_) => {
+            return error_response(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error");
+        }
+    };
+
+    let error_tracking_enabled: bool = row.try_get("error_tracking_enabled").unwrap_or(false);
+    let web_vitals_enabled: bool = row.try_get("web_vitals_enabled").unwrap_or(false);
+    let session_replays_enabled: bool = row.try_get("session_replays_enabled").unwrap_or(false);
+    let web_vitals_sampling: Option<Value> = row.try_get("web_vitals_sampling").unwrap_or(None);
+    let session_replays_sampling: Option<Value> =
+        row.try_get("session_replays_sampling").unwrap_or(None);
+
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({
+            "errorTracking": {
+                "enabled": error_tracking_enabled
+            },
+            "webVitals": {
+                "enabled": web_vitals_enabled,
+                "sampling": web_vitals_sampling
+            },
+            "sessionReplays": {
+                "enabled": session_replays_enabled,
+                "sampling": session_replays_sampling
+            }
+        })),
+    )
 }

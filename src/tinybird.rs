@@ -52,7 +52,6 @@ pub struct WebVitalRow {
     pub project_id: Uuid,
     pub metric: String,
     pub value: f64,
-    pub label: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub device: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

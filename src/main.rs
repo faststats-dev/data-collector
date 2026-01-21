@@ -4,8 +4,10 @@ use axum::{
     routing::{get, post},
 };
 use sqlx::postgres::PgPoolOptions;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tower_http::cors::{AllowOrigin, CorsLayer};
+mod batch_queue;
 mod debounce;
 mod handler;
 mod models;
@@ -36,9 +38,19 @@ async fn main() {
             .expect("TINYBIRD_TOKEN must be set in .env file or environment variables"),
     ));
 
+    // Initialize batch queue with SQLite backup path
+    let backup_path = std::env::var("BACKUP_DB_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/data/backup.db"));
+
+    let batch_queue = batch_queue::BatchQueue::new(Arc::clone(&tinybird_client), &backup_path)
+        .await
+        .expect("Failed to initialize batch queue");
+
     let state = models::AppState {
         pool,
         tinybird: tinybird_client,
+        batch_queue,
     };
 
     let cors = CorsLayer::new()

@@ -8,8 +8,9 @@ pub use replay::replay;
 pub use vitals::vitals;
 pub use web::{web, web_metadata};
 
+use crate::batch_queue::{BatchQueue, QueuedEvent};
 use crate::models::{DataSource, Error, ErrorTracking};
-use crate::tinybird::{ErrorRow, ErrorTrackingRow, EventRow, TinybirdClient};
+use crate::tinybird::{ErrorRow, ErrorTrackingRow, EventRow};
 use axum::Json;
 use axum::body::Body;
 use axum::http::{HeaderMap, StatusCode};
@@ -227,7 +228,7 @@ pub fn enrich_data_with_country(data: &mut HashMap<String, Value>, headers: &Hea
 static ERROR_ID_COUNTER: AtomicU32 = AtomicU32::new(1);
 
 pub async fn insert_event(
-    tinybird: &Arc<TinybirdClient>,
+    batch_queue: &Arc<BatchQueue>,
     project_id: Uuid,
     server_id: Uuid,
     data: &HashMap<String, Value>,
@@ -252,10 +253,13 @@ pub async fn insert_event(
         created_at: chrono::Utc::now(),
     };
 
-    tinybird.insert_event(event).await.map_err(|e| {
-        eprintln!("Failed to insert event: {}", e);
-        error_response(StatusCode::INTERNAL_SERVER_ERROR, "Failed to insert event")
-    })?;
+    batch_queue
+        .queue_event(QueuedEvent::Event(event))
+        .await
+        .map_err(|e| {
+            eprintln!("Failed to queue event: {}", e);
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Failed to queue event")
+        })?;
     Ok(event_id)
 }
 
@@ -281,7 +285,7 @@ fn build_error_rows(error: &Error, errors: &mut Vec<ErrorRow>) -> u32 {
 }
 
 pub async fn insert_error_entries(
-    tinybird: &Arc<TinybirdClient>,
+    batch_queue: &Arc<BatchQueue>,
     project_id: Uuid,
     data_entry_id: Uuid,
     data: ErrorTracking,
@@ -289,12 +293,15 @@ pub async fn insert_error_entries(
     let mut error_rows = Vec::new();
     let error_id = build_error_rows(&data.error, &mut error_rows);
 
-    // Insert all error rows
+    // Queue all error rows
     for error_row in error_rows {
-        tinybird.insert_error(error_row).await.map_err(|e| {
-            eprintln!("Failed to insert error: {}", e);
-            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Failed to insert error")
-        })?;
+        batch_queue
+            .queue_event(QueuedEvent::Error(error_row))
+            .await
+            .map_err(|e| {
+                eprintln!("Failed to queue error: {}", e);
+                error_response(StatusCode::INTERNAL_SERVER_ERROR, "Failed to queue error")
+            })?;
     }
 
     let error_tracking = ErrorTrackingRow {
@@ -308,14 +315,14 @@ pub async fn insert_error_entries(
         created_at: chrono::Utc::now(),
     };
 
-    tinybird
-        .insert_error_tracking(error_tracking)
+    batch_queue
+        .queue_event(QueuedEvent::ErrorTracking(error_tracking))
         .await
         .map_err(|e| {
-            eprintln!("Failed to insert error tracking: {}", e);
+            eprintln!("Failed to queue error tracking: {}", e);
             error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to insert error tracking",
+                "Failed to queue error tracking",
             )
         })?;
     Ok(())

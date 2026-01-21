@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use reqwest::Client;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -10,7 +10,7 @@ pub struct TinybirdClient {
     token: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventRow {
     pub id: Uuid,
     pub project_id: Uuid,
@@ -20,7 +20,7 @@ pub struct EventRow {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorRow {
     pub id: u32,
     pub name: String,
@@ -30,7 +30,7 @@ pub struct ErrorRow {
     pub cause_id: Option<u32>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorTrackingRow {
     pub id: Uuid,
     pub project_id: Uuid,
@@ -43,7 +43,7 @@ pub struct ErrorTrackingRow {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebVitalRow {
     pub id: Uuid,
     pub project_id: Uuid,
@@ -65,7 +65,7 @@ pub struct WebVitalRow {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReplayRow {
     pub id: Uuid,
     pub project_id: Uuid,
@@ -98,6 +98,16 @@ impl std::fmt::Display for TinybirdError {
     }
 }
 
+impl TinybirdError {
+    /// Returns true if this error is transient and the request should be retried.
+    pub fn is_transient(&self) -> bool {
+        match self {
+            TinybirdError::Request(e) => e.is_timeout() || e.is_connect() || e.is_request(),
+            TinybirdError::Api { status, .. } => *status == 429 || *status >= 500,
+        }
+    }
+}
+
 impl TinybirdClient {
     pub fn new(base_url: String, token: String) -> Self {
         Self {
@@ -107,19 +117,28 @@ impl TinybirdClient {
         }
     }
 
-    async fn send_event<T: Serialize + std::fmt::Debug>(
+    async fn send_batch<T: Serialize>(
         &self,
         datasource: &str,
-        row: &T,
+        rows: &[T],
     ) -> Result<(), TinybirdError> {
-        let url = format!("{}/v0/events?name={}&wait=false", self.base_url, datasource);
-        let body = serde_json::to_string(row).expect("Failed to serialize row");
+        if rows.is_empty() {
+            return Ok(());
+        }
+
+        let url = format!("{}/v0/events?name={}&wait=true", self.base_url, datasource);
+
+        let body = rows
+            .iter()
+            .map(|row| serde_json::to_string(row).expect("Failed to serialize row"))
+            .collect::<Vec<_>>()
+            .join("\n");
 
         let response = self
             .client
             .post(&url)
             .header("Authorization", format!("Bearer {}", self.token))
-            .header("Content-Type", "application/json")
+            .header("Content-Type", "application/x-ndjson")
             .body(body)
             .send()
             .await?;
@@ -137,26 +156,26 @@ impl TinybirdClient {
         Ok(())
     }
 
-    pub async fn insert_event(&self, event: EventRow) -> Result<(), TinybirdError> {
-        self.send_event("events", &event).await
+    pub async fn insert_events(&self, events: &[EventRow]) -> Result<(), TinybirdError> {
+        self.send_batch("events", events).await
     }
 
-    pub async fn insert_error(&self, error: ErrorRow) -> Result<(), TinybirdError> {
-        self.send_event("error_", &error).await
+    pub async fn insert_errors(&self, errors: &[ErrorRow]) -> Result<(), TinybirdError> {
+        self.send_batch("error_", errors).await
     }
 
-    pub async fn insert_error_tracking(
+    pub async fn insert_error_trackings(
         &self,
-        error_tracking: ErrorTrackingRow,
+        error_trackings: &[ErrorTrackingRow],
     ) -> Result<(), TinybirdError> {
-        self.send_event("error_tracking", &error_tracking).await
+        self.send_batch("error_tracking", error_trackings).await
     }
 
-    pub async fn insert_web_vital(&self, web_vital: WebVitalRow) -> Result<(), TinybirdError> {
-        self.send_event("web_vitals", &web_vital).await
+    pub async fn insert_web_vitals(&self, web_vitals: &[WebVitalRow]) -> Result<(), TinybirdError> {
+        self.send_batch("web_vitals", web_vitals).await
     }
 
-    pub async fn insert_replay(&self, replay: ReplayRow) -> Result<(), TinybirdError> {
-        self.send_event("session_replays", &replay).await
+    pub async fn insert_replays(&self, replays: &[ReplayRow]) -> Result<(), TinybirdError> {
+        self.send_batch("session_replays", replays).await
     }
 }

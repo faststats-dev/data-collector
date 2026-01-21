@@ -1,6 +1,7 @@
 use super::{HandlerResponse, error_response, get_authorization, read_and_decompress_body};
+use crate::batch_queue::{BatchQueue, QueuedEvent};
 use crate::models::AppState;
-use crate::tinybird::{TinybirdClient, WebVitalRow};
+use crate::tinybird::WebVitalRow;
 use axum::Json;
 use axum::body::Body;
 use axum::extract::State;
@@ -22,13 +23,18 @@ pub struct WebVitalsMetadata {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WebVitalRequest {
+pub struct WebVitalMetric {
     pub metric: String,
     pub value: f64,
     pub label: String,
     #[serde(default)]
     pub attributes: Option<HashMap<String, Value>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebVitalRequest {
+    pub vitals: Vec<WebVitalMetric>,
     #[serde(default)]
     pub metadata: Option<WebVitalsMetadata>,
     #[serde(default)]
@@ -60,12 +66,16 @@ pub async fn vitals(
         Err(_) => return error_response(StatusCode::BAD_REQUEST, "Invalid JSON"),
     };
 
+    if req.vitals.is_empty() {
+        return error_response(StatusCode::BAD_REQUEST, "No vitals provided");
+    }
+
     let country = headers
         .get("CF-IPCountry")
         .and_then(|value| value.to_str().ok())
         .map(String::from);
 
-    if let Err(e) = insert_web_vital(&state.tinybird, project_id, &req, country).await {
+    if let Err(e) = insert_web_vitals(&state.batch_queue, project_id, &req, country).await {
         return e;
     }
 
@@ -87,54 +97,61 @@ async fn get_project_id(pool: &sqlx::PgPool, token: &str) -> Result<Uuid, Handle
     }
 }
 
-async fn insert_web_vital(
-    tinybird: &Arc<TinybirdClient>,
+async fn insert_web_vitals(
+    batch_queue: &Arc<BatchQueue>,
     project_id: Uuid,
     req: &WebVitalRequest,
     country: Option<String>,
 ) -> Result<(), HandlerResponse> {
-    let id = Uuid::new_v4();
-    let attributes_str = req
-        .attributes
-        .as_ref()
-        .map(|attrs| serde_json::to_string(attrs).unwrap_or_else(|_| "{}".to_string()))
-        .unwrap_or_else(|| "{}".to_string());
+    let now = chrono::Utc::now();
 
-    let row = WebVitalRow {
-        id,
-        project_id,
-        metric: req.metric.clone(),
-        value: req.value,
-        label: req.label.clone(),
-        device: req
-            .metadata
+    for vital in &req.vitals {
+        let attributes_str = vital
+            .attributes
             .as_ref()
-            .and_then(|m| m.device.as_ref())
-            .cloned(),
-        country,
-        os: req.metadata.as_ref().and_then(|m| m.os.as_ref()).cloned(),
-        browser: req
-            .metadata
-            .as_ref()
-            .and_then(|m| m.browser.as_ref())
-            .cloned(),
-        url: req
-            .metadata
-            .as_ref()
-            .and_then(|m| m.url.as_ref())
-            .cloned()
-            .unwrap_or_default(),
-        attributes: attributes_str,
-        session_id: req.session_id.clone(),
-        created_at: chrono::Utc::now(),
-    };
+            .map(|attrs| serde_json::to_string(attrs).unwrap_or_else(|_| "{}".to_string()))
+            .unwrap_or_else(|| "{}".to_string());
 
-    tinybird.insert_web_vital(row).await.map_err(|e| {
-        eprintln!("Failed to insert web vital: {}", e);
-        error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to insert web vital",
-        )
-    })?;
+        let row = WebVitalRow {
+            id: Uuid::new_v4(),
+            project_id,
+            metric: vital.metric.clone(),
+            value: vital.value,
+            label: vital.label.clone(),
+            device: req
+                .metadata
+                .as_ref()
+                .and_then(|m| m.device.as_ref())
+                .cloned(),
+            country: country.clone(),
+            os: req.metadata.as_ref().and_then(|m| m.os.as_ref()).cloned(),
+            browser: req
+                .metadata
+                .as_ref()
+                .and_then(|m| m.browser.as_ref())
+                .cloned(),
+            url: req
+                .metadata
+                .as_ref()
+                .and_then(|m| m.url.as_ref())
+                .cloned()
+                .unwrap_or_default(),
+            attributes: attributes_str,
+            session_id: req.session_id.clone(),
+            created_at: now,
+        };
+
+        batch_queue
+            .queue_event(QueuedEvent::WebVital(row))
+            .await
+            .map_err(|e| {
+                eprintln!("Failed to queue web vital: {}", e);
+                error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to queue web vital",
+                )
+            })?;
+    }
+
     Ok(())
 }

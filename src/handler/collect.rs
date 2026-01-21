@@ -48,7 +48,7 @@ pub async fn collect(
     let (valid_data, warnings) = validate_and_filter_payload(&data_map, &ctx.datasources);
 
     let data_entry_id =
-        match insert_event(&state.tinybird, ctx.project_id, server_id, &valid_data).await {
+        match insert_event(&state.batch_queue, ctx.project_id, server_id, &valid_data).await {
             Ok(id) => id,
             Err(e) => return e,
         };
@@ -60,7 +60,7 @@ pub async fn collect(
     if let Some(errors) = req.errors {
         for error in errors {
             if let Err(e) =
-                insert_error_entries(&state.tinybird, ctx.project_id, data_entry_id, error).await
+                insert_error_entries(&state.batch_queue, ctx.project_id, data_entry_id, error).await
             {
                 return e;
             }

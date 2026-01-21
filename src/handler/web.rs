@@ -121,7 +121,7 @@ pub async fn web(
     }
 
     let data_entry_id =
-        match insert_event(&state.tinybird, ctx.project_id, server_id, &valid_data).await {
+        match insert_event(&state.batch_queue, ctx.project_id, server_id, &valid_data).await {
             Ok(id) => id,
             Err(e) => return e,
         };
@@ -137,7 +137,7 @@ pub async fn web(
                 error.session_id = session_id.clone();
             }
             if let Err(e) =
-                insert_error_entries(&state.tinybird, ctx.project_id, data_entry_id, error).await
+                insert_error_entries(&state.batch_queue, ctx.project_id, data_entry_id, error).await
             {
                 return e;
             }

@@ -154,13 +154,15 @@ impl BackupStore {
     pub async fn new(path: &Path) -> Result<Self, sqlx::Error> {
         // Ensure parent directory exists
         if let Some(parent) = path.parent()
-            && !parent.exists() {
-                std::fs::create_dir_all(parent).map_err(|e| {
-                    sqlx::Error::Io(std::io::Error::other(
-                        format!("Failed to create backup directory: {}", e),
-                    ))
-                })?;
-            }
+            && !parent.exists()
+        {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                sqlx::Error::Io(std::io::Error::other(format!(
+                    "Failed to create backup directory: {}",
+                    e
+                )))
+            })?;
+        }
 
         let options = SqliteConnectOptions::new()
             .filename(path)

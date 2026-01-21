@@ -1,6 +1,9 @@
 use chrono::{DateTime, Utc};
+use flate2::Compression;
+use flate2::write::GzEncoder;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::io::Write;
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -79,11 +82,18 @@ pub struct ReplayRow {
 pub enum TinybirdError {
     Request(reqwest::Error),
     Api { status: u16, message: String },
+    Compression(std::io::Error),
 }
 
 impl From<reqwest::Error> for TinybirdError {
     fn from(err: reqwest::Error) -> Self {
         TinybirdError::Request(err)
+    }
+}
+
+impl From<std::io::Error> for TinybirdError {
+    fn from(err: std::io::Error) -> Self {
+        TinybirdError::Compression(err)
     }
 }
 
@@ -94,18 +104,25 @@ impl std::fmt::Display for TinybirdError {
             TinybirdError::Api { status, message } => {
                 write!(f, "Tinybird API error ({}): {}", status, message)
             }
+            TinybirdError::Compression(e) => write!(f, "Compression error: {}", e),
         }
     }
 }
 
 impl TinybirdError {
-    /// Returns true if this error is transient and the request should be retried.
     pub fn is_transient(&self) -> bool {
         match self {
             TinybirdError::Request(e) => e.is_timeout() || e.is_connect() || e.is_request(),
             TinybirdError::Api { status, .. } => *status == 429 || *status >= 500,
+            TinybirdError::Compression(_) => false,
         }
     }
+}
+
+fn gzip_compress(data: &[u8]) -> Result<Vec<u8>, std::io::Error> {
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(data)?;
+    encoder.finish()
 }
 
 impl TinybirdClient {
@@ -134,23 +151,23 @@ impl TinybirdClient {
             .collect::<Vec<_>>()
             .join("\n");
 
+        let compressed = gzip_compress(body.as_bytes())?;
+
         let response = self
             .client
             .post(&url)
             .header("Authorization", format!("Bearer {}", self.token))
             .header("Content-Type", "application/x-ndjson")
-            .body(body)
+            .header("Content-Encoding", "gzip")
+            .body(compressed)
             .send()
             .await?;
 
         let status = response.status().as_u16();
-        let response_body = response.text().await.unwrap_or_default();
 
         if status != 200 && status != 202 {
-            return Err(TinybirdError::Api {
-                status,
-                message: response_body,
-            });
+            let message = response.text().await.unwrap_or_default();
+            return Err(TinybirdError::Api { status, message });
         }
 
         Ok(())
@@ -166,16 +183,16 @@ impl TinybirdClient {
 
     pub async fn insert_error_trackings(
         &self,
-        error_trackings: &[ErrorTrackingRow],
+        rows: &[ErrorTrackingRow],
     ) -> Result<(), TinybirdError> {
-        self.send_batch("error_tracking", error_trackings).await
+        self.send_batch("error_tracking", rows).await
     }
 
-    pub async fn insert_web_vitals(&self, web_vitals: &[WebVitalRow]) -> Result<(), TinybirdError> {
-        self.send_batch("web_vitals", web_vitals).await
+    pub async fn insert_web_vitals(&self, rows: &[WebVitalRow]) -> Result<(), TinybirdError> {
+        self.send_batch("web_vitals", rows).await
     }
 
-    pub async fn insert_replays(&self, replays: &[ReplayRow]) -> Result<(), TinybirdError> {
-        self.send_batch("session_replays", replays).await
+    pub async fn insert_replays(&self, rows: &[ReplayRow]) -> Result<(), TinybirdError> {
+        self.send_batch("session_replays", rows).await
     }
 }

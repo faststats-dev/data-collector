@@ -2,6 +2,7 @@ use super::{
     enrich_data_with_country, error_response, get_authorization, insert_error_entries,
     insert_event, load_project_context, read_and_decompress_body, success_response,
 };
+use crate::batch_queue::{FailedRequest, RequestType};
 use crate::models::{AppState, Request};
 use crate::validation::validate_and_filter_payload;
 use axum::body::Body;
@@ -9,6 +10,7 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use sqlx::types::Uuid;
+use std::collections::HashMap;
 
 pub async fn collect(
     State(state): State<AppState>,
@@ -20,14 +22,39 @@ pub async fn collect(
         None => return error_response(StatusCode::UNAUTHORIZED, "Unauthorized"),
     };
 
-    let ctx = match load_project_context(&state.pool, &token).await {
-        Ok(ctx) => ctx,
-        Err(e) => return e,
-    };
-
     let decompressed = match read_and_decompress_body(&headers, body).await {
         Ok(d) => d,
         Err(e) => return e,
+    };
+
+    let ctx = match load_project_context(&state.pool, &token).await {
+        Ok(ctx) => ctx,
+        Err(_) => {
+            let country = headers
+                .get("CF-IPCountry")
+                .and_then(|v| v.to_str().ok())
+                .map(String::from);
+
+            let failed = FailedRequest {
+                request_type: RequestType::Collect,
+                token,
+                body: decompressed,
+                country,
+                client_ip: None,
+                user_agent: None,
+                origin: None,
+            };
+
+            if let Err(e) = state.batch_queue.backup_store.backup_request(&failed).await {
+                eprintln!("Failed to store failed request: {}", e);
+                return error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Service temporarily unavailable",
+                );
+            }
+
+            return success_response(HashMap::new());
+        }
     };
 
     let req: Request = match serde_json::from_slice(&decompressed) {
@@ -48,7 +75,7 @@ pub async fn collect(
     let (valid_data, warnings) = validate_and_filter_payload(&data_map, &ctx.datasources);
 
     let data_entry_id =
-        match insert_event(&state.tinybird, ctx.project_id, server_id, &valid_data).await {
+        match insert_event(&state.batch_queue, ctx.project_id, server_id, &valid_data).await {
             Ok(id) => id,
             Err(e) => return e,
         };
@@ -60,7 +87,7 @@ pub async fn collect(
     if let Some(errors) = req.errors {
         for error in errors {
             if let Err(e) =
-                insert_error_entries(&state.tinybird, ctx.project_id, data_entry_id, error).await
+                insert_error_entries(&state.batch_queue, ctx.project_id, data_entry_id, error).await
             {
                 return e;
             }

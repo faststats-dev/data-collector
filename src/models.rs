@@ -1,3 +1,4 @@
+use crate::batch_queue::BatchQueue;
 use crate::tinybird::TinybirdClient;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -8,7 +9,9 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct AppState {
     pub pool: PgPool,
+    #[allow(dead_code)]
     pub tinybird: Arc<TinybirdClient>,
+    pub batch_queue: Arc<BatchQueue>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

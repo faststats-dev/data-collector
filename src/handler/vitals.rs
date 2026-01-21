@@ -1,6 +1,7 @@
 use super::{HandlerResponse, error_response, get_authorization, read_and_decompress_body};
+use crate::batch_queue::{BatchQueue, FailedRequest, QueuedEvent, RequestType};
 use crate::models::AppState;
-use crate::tinybird::{TinybirdClient, WebVitalRow};
+use crate::tinybird::WebVitalRow;
 use axum::Json;
 use axum::body::Body;
 use axum::extract::State;
@@ -22,13 +23,18 @@ pub struct WebVitalsMetadata {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WebVitalRequest {
+pub struct WebVitalMetric {
     pub metric: String,
     pub value: f64,
     pub label: String,
     #[serde(default)]
     pub attributes: Option<HashMap<String, Value>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebVitalRequest {
+    pub vitals: Vec<WebVitalMetric>,
     #[serde(default)]
     pub metadata: Option<WebVitalsMetadata>,
     #[serde(default)]
@@ -45,14 +51,42 @@ pub async fn vitals(
         None => return error_response(StatusCode::UNAUTHORIZED, "Unauthorized"),
     };
 
-    let project_id = match get_project_id(&state.pool, &token).await {
-        Ok(id) => id,
-        Err(e) => return e,
-    };
-
     let decompressed = match read_and_decompress_body(&headers, body).await {
         Ok(d) => d,
         Err(e) => return e,
+    };
+
+    let project_id = match get_project_id(&state.pool, &token).await {
+        Ok(id) => id,
+        Err(is_db_error) => {
+            if is_db_error {
+                let country = headers
+                    .get("CF-IPCountry")
+                    .and_then(|v| v.to_str().ok())
+                    .map(String::from);
+
+                let failed = FailedRequest {
+                    request_type: RequestType::Vitals,
+                    token,
+                    body: decompressed,
+                    country,
+                    client_ip: None,
+                    user_agent: None,
+                    origin: None,
+                };
+
+                if let Err(e) = state.batch_queue.backup_store.backup_request(&failed).await {
+                    eprintln!("Failed to store failed request: {}", e);
+                    return error_response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "Service temporarily unavailable",
+                    );
+                }
+
+                return (StatusCode::OK, Json(json!({ "status": "success" })));
+            }
+            return error_response(StatusCode::UNAUTHORIZED, "Unauthorized");
+        }
     };
 
     let req: WebVitalRequest = match serde_json::from_slice(&decompressed) {
@@ -60,81 +94,91 @@ pub async fn vitals(
         Err(_) => return error_response(StatusCode::BAD_REQUEST, "Invalid JSON"),
     };
 
+    if req.vitals.is_empty() {
+        return error_response(StatusCode::BAD_REQUEST, "No vitals provided");
+    }
+
     let country = headers
         .get("CF-IPCountry")
         .and_then(|value| value.to_str().ok())
         .map(String::from);
 
-    if let Err(e) = insert_web_vital(&state.tinybird, project_id, &req, country).await {
+    if let Err(e) = insert_web_vitals(&state.batch_queue, project_id, &req, country).await {
         return e;
     }
 
     (StatusCode::OK, Json(json!({ "status": "success" })))
 }
 
-async fn get_project_id(pool: &sqlx::PgPool, token: &str) -> Result<Uuid, HandlerResponse> {
+/// Returns Ok(project_id) on success, Err(true) for DB errors, Err(false) for not found
+async fn get_project_id(pool: &sqlx::PgPool, token: &str) -> Result<Uuid, bool> {
     let row = sqlx::query("SELECT id FROM project WHERE token = $1")
         .bind(token)
         .fetch_optional(pool)
         .await
-        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error"))?;
+        .map_err(|_| true)?; // DB error
 
     match row {
-        Some(row) => row.try_get("id").map_err(|_| {
-            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error")
-        }),
-        None => Err(error_response(StatusCode::UNAUTHORIZED, "Unauthorized")),
+        Some(row) => row.try_get("id").map_err(|_| true),
+        None => Err(false), // Not found
     }
 }
 
-async fn insert_web_vital(
-    tinybird: &Arc<TinybirdClient>,
+async fn insert_web_vitals(
+    batch_queue: &Arc<BatchQueue>,
     project_id: Uuid,
     req: &WebVitalRequest,
     country: Option<String>,
 ) -> Result<(), HandlerResponse> {
-    let id = Uuid::new_v4();
-    let attributes_str = req
-        .attributes
-        .as_ref()
-        .map(|attrs| serde_json::to_string(attrs).unwrap_or_else(|_| "{}".to_string()))
-        .unwrap_or_else(|| "{}".to_string());
+    let now = chrono::Utc::now();
 
-    let row = WebVitalRow {
-        id,
-        project_id,
-        metric: req.metric.clone(),
-        value: req.value,
-        label: req.label.clone(),
-        device: req
-            .metadata
+    for vital in &req.vitals {
+        let attributes_str = vital
+            .attributes
             .as_ref()
-            .and_then(|m| m.device.as_ref())
-            .cloned(),
-        country,
-        os: req.metadata.as_ref().and_then(|m| m.os.as_ref()).cloned(),
-        browser: req
-            .metadata
-            .as_ref()
-            .and_then(|m| m.browser.as_ref())
-            .cloned(),
-        url: req
-            .metadata
-            .as_ref()
-            .and_then(|m| m.url.as_ref())
-            .cloned()
-            .unwrap_or_default(),
-        attributes: attributes_str,
-        session_id: req.session_id.clone(),
-        created_at: chrono::Utc::now(),
-    };
+            .map(|attrs| serde_json::to_string(attrs).unwrap_or_else(|_| "{}".to_string()))
+            .unwrap_or_else(|| "{}".to_string());
 
-    tinybird.insert_web_vital(row).await.map_err(|e| {
-        eprintln!("Failed to insert web vital: {}", e);
-        error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to insert web vital",
-        )
-    })?;
+        let row = WebVitalRow {
+            id: Uuid::new_v4(),
+            project_id,
+            metric: vital.metric.clone(),
+            value: vital.value,
+            label: vital.label.clone(),
+            device: req
+                .metadata
+                .as_ref()
+                .and_then(|m| m.device.as_ref())
+                .cloned(),
+            country: country.clone(),
+            os: req.metadata.as_ref().and_then(|m| m.os.as_ref()).cloned(),
+            browser: req
+                .metadata
+                .as_ref()
+                .and_then(|m| m.browser.as_ref())
+                .cloned(),
+            url: req
+                .metadata
+                .as_ref()
+                .and_then(|m| m.url.as_ref())
+                .cloned()
+                .unwrap_or_default(),
+            attributes: attributes_str,
+            session_id: req.session_id.clone(),
+            created_at: now,
+        };
+
+        batch_queue
+            .queue_event(QueuedEvent::WebVital(row))
+            .await
+            .map_err(|e| {
+                eprintln!("Failed to queue web vital: {}", e);
+                error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to queue web vital",
+                )
+            })?;
+    }
+
     Ok(())
 }

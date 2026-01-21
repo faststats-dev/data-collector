@@ -3,6 +3,7 @@ use super::{
     get_request_origin, insert_error_entries, insert_event, load_project_context,
     read_and_decompress_body, success_response, validate_domain,
 };
+use crate::batch_queue::{FailedRequest, RequestType};
 use crate::debounce::should_debounce;
 use crate::models::{AppState, ErrorTracking};
 use crate::salt::get_daily_salt;
@@ -81,17 +82,49 @@ pub async fn web(
         Err(_) => return error_response(StatusCode::BAD_REQUEST, "Invalid JSON"),
     };
 
-    let token = match parsed.token.or(header_token) {
+    let token = match parsed.token.clone().or(header_token) {
         Some(t) => t,
         None => return error_response(StatusCode::UNAUTHORIZED, "Unauthorized"),
     };
 
+    let request_origin = get_request_origin(&headers);
+
     let ctx = match load_project_context(&state.pool, &token).await {
         Ok(ctx) => ctx,
-        Err(e) => return e,
+        Err(_) => {
+            let country = headers
+                .get("CF-IPCountry")
+                .and_then(|v| v.to_str().ok())
+                .map(String::from);
+
+            let client_ip = get_client_ip(&headers);
+            let user_agent = headers
+                .get("User-Agent")
+                .and_then(|v| v.to_str().ok())
+                .map(String::from);
+
+            let failed = FailedRequest {
+                request_type: RequestType::Web,
+                token,
+                body: decompressed,
+                country,
+                client_ip: Some(client_ip),
+                user_agent,
+                origin: request_origin,
+            };
+
+            if let Err(e) = state.batch_queue.backup_store.backup_request(&failed).await {
+                eprintln!("Failed to store failed request: {}", e);
+                return error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Service temporarily unavailable",
+                );
+            }
+
+            return success_response(HashMap::new());
+        }
     };
 
-    let request_origin = get_request_origin(&headers);
     if !validate_domain(ctx.domain.as_deref(), request_origin.as_deref()) {
         return error_response(StatusCode::FORBIDDEN, "Origin not allowed");
     }
@@ -121,7 +154,7 @@ pub async fn web(
     }
 
     let data_entry_id =
-        match insert_event(&state.tinybird, ctx.project_id, server_id, &valid_data).await {
+        match insert_event(&state.batch_queue, ctx.project_id, server_id, &valid_data).await {
             Ok(id) => id,
             Err(e) => return e,
         };
@@ -137,7 +170,7 @@ pub async fn web(
                 error.session_id = session_id.clone();
             }
             if let Err(e) =
-                insert_error_entries(&state.tinybird, ctx.project_id, data_entry_id, error).await
+                insert_error_entries(&state.batch_queue, ctx.project_id, data_entry_id, error).await
             {
                 return e;
             }

@@ -1,6 +1,7 @@
 use super::{HandlerResponse, error_response, get_authorization, read_and_decompress_body};
 use crate::batch_queue::{BatchQueue, QueuedEvent};
 use crate::models::AppState;
+use crate::pending_requests::{PendingRequest, RequestType};
 use crate::tinybird::WebVitalRow;
 use axum::Json;
 use axum::body::Body;
@@ -51,14 +52,43 @@ pub async fn vitals(
         None => return error_response(StatusCode::UNAUTHORIZED, "Unauthorized"),
     };
 
-    let project_id = match get_project_id(&state.pool, &token).await {
-        Ok(id) => id,
-        Err(e) => return e,
-    };
-
     let decompressed = match read_and_decompress_body(&headers, body).await {
         Ok(d) => d,
         Err(e) => return e,
+    };
+
+    let project_id = match get_project_id(&state.pool, &token).await {
+        Ok(id) => id,
+        Err(is_db_error) => {
+            if is_db_error {
+                // Database error - store for later retry
+                let country = headers
+                    .get("CF-IPCountry")
+                    .and_then(|v| v.to_str().ok())
+                    .map(String::from);
+
+                let pending = PendingRequest {
+                    request_type: RequestType::Vitals,
+                    token,
+                    body: decompressed,
+                    country,
+                    client_ip: None,
+                    user_agent: None,
+                    origin: None,
+                };
+
+                if let Err(e) = state.pending_requests.store(&pending).await {
+                    eprintln!("Failed to store pending request: {}", e);
+                    return error_response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "Service temporarily unavailable",
+                    );
+                }
+
+                return (StatusCode::OK, Json(json!({ "status": "success" })));
+            }
+            return error_response(StatusCode::UNAUTHORIZED, "Unauthorized");
+        }
     };
 
     let req: WebVitalRequest = match serde_json::from_slice(&decompressed) {
@@ -82,18 +112,17 @@ pub async fn vitals(
     (StatusCode::OK, Json(json!({ "status": "success" })))
 }
 
-async fn get_project_id(pool: &sqlx::PgPool, token: &str) -> Result<Uuid, HandlerResponse> {
+/// Returns Ok(project_id) on success, Err(true) for DB errors, Err(false) for not found
+async fn get_project_id(pool: &sqlx::PgPool, token: &str) -> Result<Uuid, bool> {
     let row = sqlx::query("SELECT id FROM project WHERE token = $1")
         .bind(token)
         .fetch_optional(pool)
         .await
-        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error"))?;
+        .map_err(|_| true)?; // DB error
 
     match row {
-        Some(row) => row.try_get("id").map_err(|_| {
-            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error")
-        }),
-        None => Err(error_response(StatusCode::UNAUTHORIZED, "Unauthorized")),
+        Some(row) => row.try_get("id").map_err(|_| true),
+        None => Err(false), // Not found
     }
 }
 

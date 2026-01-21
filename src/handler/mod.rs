@@ -1,9 +1,11 @@
 mod collect;
+mod pending;
 mod replay;
 mod vitals;
 mod web;
 
 pub use collect::collect;
+pub use pending::process_pending_request;
 pub use replay::replay;
 pub use vitals::vitals;
 pub use web::{web, web_metadata};

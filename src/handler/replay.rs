@@ -1,6 +1,7 @@
 use super::{decompress, error_response, load_project_context, success_response};
 use crate::batch_queue::QueuedEvent;
 use crate::models::AppState;
+use crate::pending_requests::{PendingRequest, RequestType};
 use crate::tinybird::ReplayRow;
 use axum::body::Body;
 use axum::extract::State;
@@ -71,7 +72,28 @@ pub async fn replay(
 
     let context = match load_project_context(&state.pool, &parsed.token).await {
         Ok(ctx) => ctx,
-        Err(response) => return response,
+        Err(_) => {
+            // Database error - store for later retry
+            let pending = PendingRequest {
+                request_type: RequestType::Replay,
+                token: parsed.token.clone(),
+                body: decompressed,
+                country: None,
+                client_ip: None,
+                user_agent: None,
+                origin: None,
+            };
+
+            if let Err(e) = state.pending_requests.store(&pending).await {
+                eprintln!("Failed to store pending request: {}", e);
+                return error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Service temporarily unavailable",
+                );
+            }
+
+            return success_response(HashMap::new());
+        }
     };
 
     let events_json = match serde_json::to_string(&parsed.events) {

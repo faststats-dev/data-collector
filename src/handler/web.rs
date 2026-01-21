@@ -5,6 +5,7 @@ use super::{
 };
 use crate::debounce::should_debounce;
 use crate::models::{AppState, ErrorTracking};
+use crate::pending_requests::{PendingRequest, RequestType};
 use crate::salt::get_daily_salt;
 use crate::validation::validate_and_filter_payload;
 use axum::body::Body;
@@ -81,17 +82,50 @@ pub async fn web(
         Err(_) => return error_response(StatusCode::BAD_REQUEST, "Invalid JSON"),
     };
 
-    let token = match parsed.token.or(header_token) {
+    let token = match parsed.token.clone().or(header_token) {
         Some(t) => t,
         None => return error_response(StatusCode::UNAUTHORIZED, "Unauthorized"),
     };
 
+    let request_origin = get_request_origin(&headers);
+
     let ctx = match load_project_context(&state.pool, &token).await {
         Ok(ctx) => ctx,
-        Err(e) => return e,
+        Err(_) => {
+            // Database error - store for later retry
+            let country = headers
+                .get("CF-IPCountry")
+                .and_then(|v| v.to_str().ok())
+                .map(String::from);
+
+            let client_ip = get_client_ip(&headers);
+            let user_agent = headers
+                .get("User-Agent")
+                .and_then(|v| v.to_str().ok())
+                .map(String::from);
+
+            let pending = PendingRequest {
+                request_type: RequestType::Web,
+                token,
+                body: decompressed,
+                country,
+                client_ip: Some(client_ip),
+                user_agent,
+                origin: request_origin,
+            };
+
+            if let Err(e) = state.pending_requests.store(&pending).await {
+                eprintln!("Failed to store pending request: {}", e);
+                return error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Service temporarily unavailable",
+                );
+            }
+
+            return success_response(HashMap::new());
+        }
     };
 
-    let request_origin = get_request_origin(&headers);
     if !validate_domain(ctx.domain.as_deref(), request_origin.as_deref()) {
         return error_response(StatusCode::FORBIDDEN, "Origin not allowed");
     }

@@ -11,6 +11,7 @@ mod batch_queue;
 mod debounce;
 mod handler;
 mod models;
+mod pending_requests;
 mod salt;
 mod tinybird;
 mod validation;
@@ -47,11 +48,26 @@ async fn main() {
         .await
         .expect("Failed to initialize batch queue");
 
+    // Initialize pending requests store (for database failover)
+    let pending_path = std::env::var("PENDING_DB_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/data/pending.db"));
+
+    let pending_requests = Arc::new(
+        pending_requests::PendingRequestStore::new(&pending_path)
+            .await
+            .expect("Failed to initialize pending requests store"),
+    );
+
     let state = models::AppState {
-        pool,
+        pool: pool.clone(),
         tinybird: tinybird_client,
         batch_queue,
+        pending_requests: Arc::clone(&pending_requests),
     };
+
+    // Start pending request replayer
+    start_pending_replayer(pool, pending_requests, Arc::clone(&state.batch_queue));
 
     let cors = CorsLayer::new()
         .allow_origin(AllowOrigin::mirror_request())
@@ -82,4 +98,67 @@ async fn main() {
         .unwrap();
     println!("Listening on {}", listener.local_addr().unwrap());
     axum::serve(listener, app).await.unwrap();
+}
+
+fn start_pending_replayer(
+    pool: sqlx::PgPool,
+    store: Arc<pending_requests::PendingRequestStore>,
+    batch_queue: Arc<batch_queue::BatchQueue>,
+) {
+    tokio::spawn(async move {
+        let replay_interval = std::time::Duration::from_secs(60);
+
+        loop {
+            tokio::time::sleep(replay_interval).await;
+
+            // Cleanup stale requests first
+            if let Ok(count) = store.cleanup_stale().await
+                && count > 0 {
+                    eprintln!("Cleaned up {} stale pending requests", count);
+                }
+
+            // Check if database is available
+            if sqlx::query("SELECT 1").fetch_one(&pool).await.is_err() {
+                continue;
+            }
+
+            let pending = match store.get_pending(100).await {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("Failed to get pending requests: {}", e);
+                    continue;
+                }
+            };
+
+            if pending.is_empty() {
+                continue;
+            }
+
+            eprintln!("Replaying {} pending requests", pending.len());
+
+            for (id, request) in pending {
+                let result = handler::process_pending_request(&pool, &batch_queue, &request).await;
+
+                match result {
+                    Ok(()) => {
+                        if let Err(e) = store.remove(id).await {
+                            eprintln!("Failed to remove pending request: {}", e);
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to replay pending request: {}", e);
+                        // If it's a DB error, stop processing this batch
+                        if e.contains("database") || e.contains("connection") {
+                            break;
+                        }
+                        // For validation errors, remove the request (it won't succeed on retry)
+                        if (e.contains("Unauthorized") || e.contains("Invalid"))
+                            && let Err(e) = store.remove(id).await {
+                                eprintln!("Failed to remove invalid pending request: {}", e);
+                            }
+                    }
+                }
+            }
+        }
+    });
 }

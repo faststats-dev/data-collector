@@ -111,13 +111,12 @@ fn start_pending_replayer(
         loop {
             tokio::time::sleep(replay_interval).await;
 
-            // Cleanup stale requests first
             if let Ok(count) = store.cleanup_stale().await
-                && count > 0 {
-                    eprintln!("Cleaned up {} stale pending requests", count);
-                }
+                && count > 0
+            {
+                eprintln!("Cleaned up {} stale pending requests", count);
+            }
 
-            // Check if database is available
             if sqlx::query("SELECT 1").fetch_one(&pool).await.is_err() {
                 continue;
             }
@@ -151,11 +150,11 @@ fn start_pending_replayer(
                         if e.contains("database") || e.contains("connection") {
                             break;
                         }
-                        // For validation errors, remove the request (it won't succeed on retry)
                         if (e.contains("Unauthorized") || e.contains("Invalid"))
-                            && let Err(e) = store.remove(id).await {
-                                eprintln!("Failed to remove invalid pending request: {}", e);
-                            }
+                            && let Err(e) = store.remove(id).await
+                        {
+                            eprintln!("Failed to remove invalid pending request: {}", e);
+                        }
                     }
                 }
             }

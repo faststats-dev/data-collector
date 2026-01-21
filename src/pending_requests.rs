@@ -33,14 +33,15 @@ pub struct PendingRequestStore {
 impl PendingRequestStore {
     pub async fn new(path: &Path) -> Result<Self, sqlx::Error> {
         if let Some(parent) = path.parent()
-            && !parent.exists() {
-                std::fs::create_dir_all(parent).map_err(|e| {
-                    sqlx::Error::Io(std::io::Error::other(format!(
-                        "Failed to create directory: {}",
-                        e
-                    )))
-                })?;
-            }
+            && !parent.exists()
+        {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                sqlx::Error::Io(std::io::Error::other(format!(
+                    "Failed to create directory: {}",
+                    e
+                )))
+            })?;
+        }
 
         let options = SqliteConnectOptions::new()
             .filename(path)

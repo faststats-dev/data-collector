@@ -54,7 +54,6 @@ impl QueuedEvent {
     }
 }
 
-/// Events grouped by their datasource for efficient batch sending
 #[derive(Debug, Default)]
 struct GroupedEvents {
     events: Vec<EventRow>,
@@ -91,7 +90,6 @@ impl GroupedEvents {
         }
     }
 
-    /// Convert back to QueuedEvent vec for backup purposes
     fn into_queued_events(self) -> Vec<QueuedEvent> {
         let mut result = Vec::with_capacity(self.total_count());
         result.extend(self.events.into_iter().map(QueuedEvent::Event));
@@ -107,7 +105,6 @@ impl GroupedEvents {
     }
 }
 
-/// Result of sending a batch - tracks which event types failed
 #[derive(Debug, Default)]
 struct BatchSendResult {
     failed_events: Vec<EventRow>,
@@ -152,7 +149,6 @@ pub struct BackupStore {
 
 impl BackupStore {
     pub async fn new(path: &Path) -> Result<Self, sqlx::Error> {
-        // Ensure parent directory exists
         if let Some(parent) = path.parent()
             && !parent.exists()
         {
@@ -188,7 +184,6 @@ impl BackupStore {
         .execute(&pool)
         .await?;
 
-        // Add index for efficient querying
         sqlx::query(
             r#"
             CREATE INDEX IF NOT EXISTS idx_failed_events_created_at
@@ -235,7 +230,6 @@ impl BackupStore {
 
         let now = Utc::now().to_rfc3339();
 
-        // Use a transaction for bulk insert
         let mut tx = self.pool.begin().await?;
 
         for event in events {
@@ -281,7 +275,6 @@ impl BackupStore {
             return Ok(());
         }
 
-        // Build placeholders for IN clause
         let placeholders: Vec<String> = ids.iter().map(|_| "?".to_string()).collect();
         let query = format!(
             "DELETE FROM failed_events WHERE id IN ({})",
@@ -306,7 +299,6 @@ impl BackupStore {
         Ok(())
     }
 
-    /// Remove events older than MAX_EVENT_AGE_SECS
     pub async fn cleanup_stale_events(&self) -> Result<u64, sqlx::Error> {
         let cutoff = Utc::now() - chrono::Duration::seconds(MAX_EVENT_AGE_SECS);
         let cutoff_str = cutoff.to_rfc3339();
@@ -566,6 +558,11 @@ impl BatchQueue {
 
     async fn backup_failed_events(&self, batch: GroupedEvents, error_msg: &str) {
         let events = batch.into_queued_events();
+        eprintln!(
+            "Backing up {} events to SQLite: {}",
+            events.len(),
+            error_msg
+        );
         if let Err(e) = self
             .backup_store
             .store_events(&events, Some(error_msg))
@@ -576,6 +573,8 @@ impl BatchQueue {
                 events.len(),
                 e
             );
+        } else {
+            eprintln!("Successfully backed up {} events to SQLite", events.len());
         }
     }
 
@@ -621,7 +620,11 @@ impl BatchQueue {
             return;
         }
 
-        // Group events for batch sending
+        eprintln!(
+            "Starting restore of {} events from SQLite backup",
+            events.len()
+        );
+
         let mut grouped = GroupedEvents::default();
         let mut event_ids: Vec<i64> = Vec::with_capacity(events.len());
 
@@ -634,12 +637,12 @@ impl BatchQueue {
         let result = self.send_grouped_batch(&grouped).await;
 
         if !result.has_failures() {
-            // All successful - remove from backup
+            eprintln!("Restoring {} events from SQLite backup", event_ids.len());
             if let Err(e) = self.backup_store.remove_events(&event_ids).await {
                 eprintln!("Failed to remove replayed events from backup: {}", e);
             } else {
                 eprintln!(
-                    "Successfully replayed {} events from backup",
+                    "Successfully restored {} events from SQLite backup",
                     event_ids.len()
                 );
             }

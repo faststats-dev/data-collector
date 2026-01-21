@@ -64,13 +64,14 @@ async fn process_collect(
         .map_err(|_| "Failed to queue event".to_string())?;
 
     if ctx.error_tracking_enabled
-        && let Some(errors) = req.errors {
-            for error in errors {
-                insert_error_entries(batch_queue, ctx.project_id, data_entry_id, error)
-                    .await
-                    .map_err(|_| "Failed to queue error".to_string())?;
-            }
+        && let Some(errors) = req.errors
+    {
+        for error in errors {
+            insert_error_entries(batch_queue, ctx.project_id, data_entry_id, error)
+                .await
+                .map_err(|_| "Failed to queue error".to_string())?;
         }
+    }
 
     Ok(())
 }
@@ -149,16 +150,17 @@ async fn process_web(
         .map_err(|_| "Failed to queue event".to_string())?;
 
     if ctx.error_tracking_enabled
-        && let Some(errors) = parsed.errors {
-            for mut error in errors {
-                if error.session_id.is_none() {
-                    error.session_id = session_id.clone();
-                }
-                insert_error_entries(batch_queue, ctx.project_id, data_entry_id, error)
-                    .await
-                    .map_err(|_| "Failed to queue error".to_string())?;
+        && let Some(errors) = parsed.errors
+    {
+        for mut error in errors {
+            if error.session_id.is_none() {
+                error.session_id = session_id.clone();
             }
+            insert_error_entries(batch_queue, ctx.project_id, data_entry_id, error)
+                .await
+                .map_err(|_| "Failed to queue error".to_string())?;
         }
+    }
 
     Ok(())
 }

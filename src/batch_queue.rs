@@ -741,9 +741,10 @@ impl BatchQueue {
                 Err(e) => {
                     eprintln!("Failed to replay request {}: {}", id, e);
                     if (e.contains("Unauthorized") || e.contains("Invalid"))
-                        && let Err(e) = self.backup_store.remove_failed_request(id).await {
-                            eprintln!("Failed to remove invalid request: {}", e);
-                        }
+                        && let Err(e) = self.backup_store.remove_failed_request(id).await
+                    {
+                        eprintln!("Failed to remove invalid request: {}", e);
+                    }
                 }
             }
         }

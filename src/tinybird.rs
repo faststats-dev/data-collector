@@ -25,12 +25,12 @@ pub struct EventRow {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorRow {
-    pub id: u32,
+    pub id: Uuid,
     pub name: String,
     pub message: String,
     pub stack: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub cause_id: Option<u32>,
+    pub cause_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,7 +38,7 @@ pub struct ErrorTrackingRow {
     pub id: Uuid,
     pub project_id: Uuid,
     pub hash: String,
-    pub error_id: u32,
+    pub error_id: Uuid,
     pub count: u32,
     pub data_entry_id: Uuid,
     pub session_id: Option<String>,

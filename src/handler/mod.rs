@@ -19,7 +19,6 @@ use serde_json::Value;
 use sqlx::{Row, types::Uuid};
 use std::collections::HashMap;
 use std::io::Read;
-use std::sync::atomic::{AtomicU32, Ordering};
 
 pub type HandlerResponse = (StatusCode, Json<Value>);
 
@@ -224,7 +223,6 @@ pub fn enrich_data_with_country(data: &mut HashMap<String, Value>, headers: &Hea
 }
 
 // Tinybird insert functions
-static ERROR_ID_COUNTER: AtomicU32 = AtomicU32::new(1);
 
 pub async fn insert_event(
     batch_queue: &BatchQueue,
@@ -264,8 +262,8 @@ pub async fn insert_event(
 
 /// Recursively build error rows for insertion.
 /// Returns the ID of the root error and all error rows to be inserted.
-fn build_error_rows(error: &Error, errors: &mut Vec<ErrorRow>) -> u32 {
-    let error_id = ERROR_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+fn build_error_rows(error: &Error, errors: &mut Vec<ErrorRow>) -> Uuid {
+    let error_id = Uuid::new_v4();
 
     let cause_id = error
         .cause

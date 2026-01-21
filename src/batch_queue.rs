@@ -342,6 +342,11 @@ impl BatchQueue {
             current_batch,
         });
 
+        let startup_queue = Arc::clone(&queue);
+        tokio::spawn(async move {
+            startup_queue.replay_cached_events().await;
+        });
+
         queue.start_batch_processor(receiver);
         queue.start_batch_flusher();
         queue.start_cache_replayer();

@@ -39,7 +39,6 @@ async fn main() {
             .expect("TINYBIRD_TOKEN must be set in .env file or environment variables"),
     ));
 
-    // Initialize batch queue with SQLite backup path
     let backup_path = std::env::var("BACKUP_DB_PATH")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("/data/backup.db"));
@@ -48,7 +47,6 @@ async fn main() {
         .await
         .expect("Failed to initialize batch queue");
 
-    // Initialize pending requests store (for database failover)
     let pending_path = std::env::var("PENDING_DB_PATH")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("/data/pending.db"));
@@ -66,7 +64,6 @@ async fn main() {
         pending_requests: Arc::clone(&pending_requests),
     };
 
-    // Start pending request replayer
     start_pending_replayer(pool, pending_requests, Arc::clone(&state.batch_queue));
 
     let cors = CorsLayer::new()

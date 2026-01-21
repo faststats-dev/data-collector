@@ -1070,7 +1070,7 @@ mod tests {
             );
             assert_eq!(
                 QueuedEvent::Error(ErrorRow {
-                    id: 1,
+                    id: Uuid::new_v4(),
                     name: "E".to_string(),
                     message: "M".to_string(),
                     stack: vec![],
@@ -1079,12 +1079,13 @@ mod tests {
                 .datasource(),
                 "error_"
             );
+            let error_id = Uuid::new_v4();
             assert_eq!(
                 QueuedEvent::ErrorTracking(ErrorTrackingRow {
                     id: Uuid::new_v4(),
                     project_id: Uuid::new_v4(),
                     hash: "hash".to_string(),
-                    error_id: 1,
+                    error_id,
                     count: 1,
                     data_entry_id: Uuid::new_v4(),
                     session_id: None,

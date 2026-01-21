@@ -16,9 +16,10 @@ use axum::body::Body;
 use axum::http::{HeaderMap, StatusCode};
 use flate2::read::GzDecoder;
 use serde_json::Value;
-use sqlx::{Row, types::Uuid};
+use sqlx::Row;
 use std::collections::HashMap;
 use std::io::Read;
+use uuid::Uuid;
 
 pub type HandlerResponse = (StatusCode, Json<Value>);
 

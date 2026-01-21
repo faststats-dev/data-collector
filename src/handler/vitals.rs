@@ -26,7 +26,6 @@ pub struct WebVitalsMetadata {
 pub struct WebVitalMetric {
     pub metric: String,
     pub value: f64,
-    pub label: String,
     #[serde(default)]
     pub attributes: Option<HashMap<String, Value>>,
 }
@@ -144,7 +143,6 @@ async fn insert_web_vitals(
             project_id,
             metric: vital.metric.clone(),
             value: vital.value,
-            label: vital.label.clone(),
             device: req
                 .metadata
                 .as_ref()

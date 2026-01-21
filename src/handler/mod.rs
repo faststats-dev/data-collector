@@ -477,7 +477,6 @@ async fn process_vitals_request(
     struct WebVitalMetric {
         metric: String,
         value: f64,
-        label: String,
         #[serde(default)]
         attributes: Option<HashMap<String, Value>>,
     }
@@ -517,7 +516,6 @@ async fn process_vitals_request(
             project_id: ctx.project_id,
             metric: vital.metric.clone(),
             value: vital.value,
-            label: vital.label.clone(),
             device: req
                 .metadata
                 .as_ref()

@@ -1,14 +1,14 @@
 use super::{
     HandlerResponse, enrich_data_with_country, error_response, get_authorization,
-    get_request_origin, insert_error_entries, insert_event, load_project_context,
-    read_and_decompress_body, success_response, validate_domain,
+    get_request_origin, insert_error_entries, insert_event, load_project_context, success_response,
+    validate_domain,
 };
 use crate::batch_queue::{FailedRequest, RequestType};
-use crate::debounce::should_debounce;
 use crate::models::{AppState, ErrorTracking};
 use crate::salt::get_daily_salt;
+use crate::utils::debounce::should_debounce;
 use crate::validation::validate_and_filter_payload;
-use axum::body::Body;
+use axum::body::Bytes;
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
@@ -68,16 +68,11 @@ fn get_client_ip(headers: &HeaderMap) -> String {
 pub async fn web(
     State(state): State<AppState>,
     headers: HeaderMap,
-    body: Body,
+    body: Bytes,
 ) -> impl IntoResponse {
     let header_token = get_authorization(&headers);
 
-    let decompressed = match read_and_decompress_body(&headers, body).await {
-        Ok(d) => d,
-        Err(e) => return e,
-    };
-
-    let parsed: WebRequest = match serde_json::from_slice(&decompressed) {
+    let parsed: WebRequest = match serde_json::from_slice(&body) {
         Ok(req) => req,
         Err(_) => return error_response(StatusCode::BAD_REQUEST, "Invalid JSON"),
     };
@@ -106,7 +101,7 @@ pub async fn web(
             let failed = FailedRequest {
                 request_type: RequestType::Web,
                 token,
-                body: decompressed,
+                body: body.to_vec(),
                 country,
                 client_ip: Some(client_ip),
                 user_agent,

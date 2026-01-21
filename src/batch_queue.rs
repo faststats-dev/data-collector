@@ -851,7 +851,7 @@ mod tests {
             store.backup_events(&[event], None).await.unwrap();
 
             let error = QueuedEvent::Error(ErrorRow {
-                id: 1,
+                id: Uuid::new_v4(),
                 name: "TestError".to_string(),
                 message: "Test message".to_string(),
                 stack: vec!["line1".to_string()],
@@ -968,7 +968,7 @@ mod tests {
             batch.push(QueuedEvent::Event(create_test_event()));
             batch.push(QueuedEvent::Event(create_test_event()));
             batch.push(QueuedEvent::Error(ErrorRow {
-                id: 1,
+                id: Uuid::new_v4(),
                 name: "E".to_string(),
                 message: "M".to_string(),
                 stack: vec![],
@@ -984,7 +984,7 @@ mod tests {
 
             batch.push(QueuedEvent::Event(create_test_event()));
             batch.push(QueuedEvent::Error(ErrorRow {
-                id: 1,
+                id: Uuid::new_v4(),
                 name: "E".to_string(),
                 message: "M".to_string(),
                 stack: vec![],
@@ -1018,7 +1018,7 @@ mod tests {
             let mut batch = InMemoryBatch::default();
             batch.push(QueuedEvent::Event(create_test_event()));
             batch.push(QueuedEvent::Error(ErrorRow {
-                id: 1,
+                id: Uuid::new_v4(),
                 name: "E".to_string(),
                 message: "M".to_string(),
                 stack: vec![],

@@ -12,40 +12,13 @@ use crate::batch_queue::{BatchQueue, FailedRequest, QueuedEvent, RequestType};
 use crate::models::{DataSource, Error, ErrorTracking};
 use crate::tinybird::{ErrorRow, ErrorTrackingRow, EventRow};
 use axum::Json;
-use axum::body::Body;
 use axum::http::{HeaderMap, StatusCode};
-use flate2::read::GzDecoder;
 use serde_json::Value;
 use sqlx::Row;
 use std::collections::HashMap;
-use std::io::Read;
 use uuid::Uuid;
 
 pub type HandlerResponse = (StatusCode, Json<Value>);
-
-#[derive(Debug, PartialEq)]
-pub enum DecompressionError {
-    InvalidZstd,
-    InvalidGzip,
-}
-
-pub fn decompress(
-    data: &[u8],
-    content_encoding: Option<&str>,
-) -> Result<Vec<u8>, DecompressionError> {
-    match content_encoding.unwrap_or_default() {
-        "zstd" => zstd::decode_all(data).map_err(|_| DecompressionError::InvalidZstd),
-        "gzip" => {
-            let mut decoder = GzDecoder::new(data);
-            let mut out = Vec::new();
-            decoder
-                .read_to_end(&mut out)
-                .map_err(|_| DecompressionError::InvalidGzip)?;
-            Ok(out)
-        }
-        _ => Ok(data.to_vec()),
-    }
-}
 
 pub fn get_authorization(headers: &HeaderMap) -> Option<String> {
     headers
@@ -81,28 +54,6 @@ pub fn success_response(warnings: HashMap<String, String>) -> HandlerResponse {
             Json(serde_json::json!({ "warnings": warnings_obj })),
         )
     }
-}
-
-pub async fn read_and_decompress_body(
-    headers: &HeaderMap,
-    body: Body,
-) -> Result<Vec<u8>, HandlerResponse> {
-    let bytes = axum::body::to_bytes(body, 1024 * 1024)
-        .await
-        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error"))?;
-
-    let content_encoding = headers
-        .get("Content-Encoding")
-        .and_then(|v| v.to_str().ok());
-
-    decompress(&bytes, content_encoding).map_err(|e| match e {
-        DecompressionError::InvalidZstd => {
-            error_response(StatusCode::BAD_REQUEST, "Invalid zstd encoding")
-        }
-        DecompressionError::InvalidGzip => {
-            error_response(StatusCode::BAD_REQUEST, "Invalid gzip encoding")
-        }
-    })
 }
 
 pub struct ProjectContext {
@@ -415,8 +366,8 @@ async fn process_web_request(
     let ip = request.client_ip.as_deref().unwrap_or("");
     let user_agent = request.user_agent.as_deref().unwrap_or("");
 
-    use crate::debounce::should_debounce;
     use crate::salt::get_daily_salt;
+    use crate::utils::debounce::should_debounce;
     use sha2::{Digest, Sha256};
 
     let get_daily_salt_fn = || {
@@ -592,9 +543,6 @@ async fn process_replay_request(
 mod tests {
     use super::*;
     use axum::http::HeaderValue;
-    use flate2::Compression;
-    use flate2::write::GzEncoder;
-    use std::io::Write;
 
     mod domain_validation {
         use super::*;
@@ -709,128 +657,5 @@ mod tests {
                 Some("example.com".to_string())
             );
         }
-    }
-
-    fn compress_gzip(data: &[u8]) -> Vec<u8> {
-        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-        encoder.write_all(data).unwrap();
-        encoder.finish().unwrap()
-    }
-
-    fn compress_zstd(data: &[u8]) -> Vec<u8> {
-        zstd::encode_all(data, 3).unwrap()
-    }
-
-    #[test]
-    fn test_decompress_no_encoding() {
-        let data = b"hello world";
-        let result = decompress(data, None).unwrap();
-        assert_eq!(result, data);
-    }
-
-    #[test]
-    fn test_decompress_empty_encoding() {
-        let data = b"hello world";
-        let result = decompress(data, Some("")).unwrap();
-        assert_eq!(result, data);
-    }
-
-    #[test]
-    fn test_decompress_unknown_encoding() {
-        let data = b"hello world";
-        let result = decompress(data, Some("unknown")).unwrap();
-        assert_eq!(result, data);
-    }
-
-    #[test]
-    fn test_decompress_gzip_valid() {
-        let original = b"hello world";
-        let compressed = compress_gzip(original);
-        let result = decompress(&compressed, Some("gzip")).unwrap();
-        assert_eq!(result, original);
-    }
-
-    #[test]
-    fn test_decompress_gzip_large_payload() {
-        let original: Vec<u8> = (0..10000).map(|i| (i % 256) as u8).collect();
-        let compressed = compress_gzip(&original);
-        let result = decompress(&compressed, Some("gzip")).unwrap();
-        assert_eq!(result, original);
-    }
-
-    #[test]
-    fn test_decompress_gzip_json_payload() {
-        let json = br#"{"server_id": "123", "data": {"key": "value"}}"#;
-        let compressed = compress_gzip(json);
-        let result = decompress(&compressed, Some("gzip")).unwrap();
-        assert_eq!(result, json);
-    }
-
-    #[test]
-    fn test_decompress_gzip_invalid() {
-        let invalid_data = b"not valid gzip data";
-        let result = decompress(invalid_data, Some("gzip"));
-        assert_eq!(result, Err(DecompressionError::InvalidGzip));
-    }
-
-    #[test]
-    fn test_decompress_gzip_truncated() {
-        let original = b"hello world";
-        let mut compressed = compress_gzip(original);
-        compressed.truncate(compressed.len() / 2);
-        let result = decompress(&compressed, Some("gzip"));
-        assert_eq!(result, Err(DecompressionError::InvalidGzip));
-    }
-
-    #[test]
-    fn test_decompress_gzip_empty() {
-        let result = decompress(&[], Some("gzip"));
-        assert_eq!(result, Err(DecompressionError::InvalidGzip));
-    }
-
-    #[test]
-    fn test_decompress_zstd_valid() {
-        let original = b"hello world";
-        let compressed = compress_zstd(original);
-        let result = decompress(&compressed, Some("zstd")).unwrap();
-        assert_eq!(result, original);
-    }
-
-    #[test]
-    fn test_decompress_zstd_large_payload() {
-        let original: Vec<u8> = (0..10000).map(|i| (i % 256) as u8).collect();
-        let compressed = compress_zstd(&original);
-        let result = decompress(&compressed, Some("zstd")).unwrap();
-        assert_eq!(result, original);
-    }
-
-    #[test]
-    fn test_decompress_zstd_json_payload() {
-        let json = br#"{"server_id": "123", "data": {"key": "value"}}"#;
-        let compressed = compress_zstd(json);
-        let result = decompress(&compressed, Some("zstd")).unwrap();
-        assert_eq!(result, json);
-    }
-
-    #[test]
-    fn test_decompress_zstd_invalid() {
-        let invalid_data = b"not valid zstd data";
-        let result = decompress(invalid_data, Some("zstd"));
-        assert_eq!(result, Err(DecompressionError::InvalidZstd));
-    }
-
-    #[test]
-    fn test_decompress_zstd_truncated() {
-        let original = b"hello world";
-        let mut compressed = compress_zstd(original);
-        compressed.truncate(compressed.len() / 2);
-        let result = decompress(&compressed, Some("zstd"));
-        assert_eq!(result, Err(DecompressionError::InvalidZstd));
-    }
-
-    #[test]
-    fn test_decompress_zstd_empty() {
-        let result = decompress(&[], Some("zstd"));
-        assert_eq!(result, Err(DecompressionError::InvalidZstd));
     }
 }

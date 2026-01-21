@@ -8,12 +8,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::signal;
 use tower_http::cors::{AllowOrigin, CorsLayer};
+use tower_http::decompression::RequestDecompressionLayer;
 mod batch_queue;
-mod debounce;
 mod handler;
+mod middleware;
 mod models;
 mod salt;
 mod tinybird;
+mod utils;
 mod validation;
 
 async fn shutdown_signal() {
@@ -92,6 +94,8 @@ async fn main() {
         .route("/v1/web/metadata", get(handler::web_metadata))
         .route("/v1/vitals", post(handler::vitals))
         .route("/v1/replay", post(handler::replay))
+        .layer(RequestDecompressionLayer::new())
+        .layer(middleware::DetectEncodingLayer)
         .layer(cors)
         .with_state(state);
 

@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 const MAX_RETRIES: u32 = 5;
 const INITIAL_RETRY_DELAY: Duration = Duration::from_secs(1);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
-const BATCH_WINDOW: Duration = Duration::from_secs(60);
+const BATCH_WINDOW: Duration = Duration::from_secs(4);
 const BACKUP_REPLAY_INTERVAL: Duration = Duration::from_secs(600);
 const MAX_REPLAY_BATCH_SIZE: i64 = 500;
 const MAX_BACKUP_AGE_SECS: i64 = 86400;

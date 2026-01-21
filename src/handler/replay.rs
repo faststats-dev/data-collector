@@ -1,10 +1,11 @@
-use super::{decompress, error_response, load_project_context, success_response};
+use super::{error_response, load_project_context, success_response};
 use crate::batch_queue::{FailedRequest, QueuedEvent, RequestType};
 use crate::models::AppState;
 use crate::tinybird::ReplayRow;
-use axum::body::Body;
+use crate::utils::RrwebEvent;
+use axum::body::Bytes;
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use serde::Deserialize;
 use serde_json::Value;
@@ -25,45 +26,14 @@ pub struct ReplayRequest {
     pub events: Vec<Value>,
 }
 
-fn detect_encoding(data: &[u8]) -> Option<&'static str> {
-    if data.len() >= 2 && data[0] == 0x1f && data[1] == 0x8b {
-        Some("gzip")
-    } else if data.len() >= 4 && data[0..4] == [0x28, 0xb5, 0x2f, 0xfd] {
-        Some("zstd")
-    } else {
-        None
-    }
-}
-
-pub async fn replay(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    body: Body,
-) -> impl IntoResponse {
-    let bytes = match axum::body::to_bytes(body, 1024 * 1024).await {
-        Ok(b) => b,
-        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "Failed to read body"),
-    };
-
-    // Check Content-Encoding header first, then detect from magic bytes
-    // This handles sendBeacon which can't send custom headers
-    let content_encoding = headers
-        .get("Content-Encoding")
-        .and_then(|v| v.to_str().ok())
-        .or_else(|| detect_encoding(&bytes));
-
-    let decompressed = match decompress(&bytes, content_encoding) {
-        Ok(data) => data,
-        Err(_) => return error_response(StatusCode::BAD_REQUEST, "Invalid encoding"),
-    };
-
-    let parsed: ReplayRequest = match serde_json::from_slice(&decompressed) {
+pub async fn replay(State(state): State<AppState>, body: Bytes) -> impl IntoResponse {
+    let parsed: ReplayRequest = match serde_json::from_slice(&body) {
         Ok(p) => p,
         Err(e) => {
             eprintln!(
                 "[Replay] JSON parse error: {}. Body preview: {}",
                 e,
-                String::from_utf8_lossy(&decompressed[..decompressed.len().min(500)])
+                String::from_utf8_lossy(&body[..body.len().min(500)])
             );
             return error_response(StatusCode::BAD_REQUEST, &format!("Invalid JSON: {}", e));
         }
@@ -75,7 +45,7 @@ pub async fn replay(
             let failed = FailedRequest {
                 request_type: RequestType::Replay,
                 token: parsed.token.clone(),
-                body: decompressed,
+                body: body.to_vec(),
                 country: None,
                 client_ip: None,
                 user_agent: None,
@@ -94,7 +64,17 @@ pub async fn replay(
         }
     };
 
-    let events_json = match serde_json::to_string(&parsed.events) {
+    let valid_events: Vec<Value> = parsed
+        .events
+        .into_iter()
+        .filter(|event| serde_json::from_value::<RrwebEvent>(event.clone()).is_ok())
+        .collect();
+
+    if valid_events.is_empty() {
+        return error_response(StatusCode::BAD_REQUEST, "No valid events");
+    }
+
+    let events_json = match serde_json::to_string(&valid_events) {
         Ok(json) => json,
         Err(_) => {
             return error_response(

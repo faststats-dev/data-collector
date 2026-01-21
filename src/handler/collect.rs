@@ -1,11 +1,11 @@
 use super::{
     enrich_data_with_country, error_response, get_authorization, insert_error_entries,
-    insert_event, load_project_context, read_and_decompress_body, success_response,
+    insert_event, load_project_context, success_response,
 };
 use crate::batch_queue::{FailedRequest, RequestType};
 use crate::models::{AppState, Request};
 use crate::validation::validate_and_filter_payload;
-use axum::body::Body;
+use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
@@ -15,16 +15,11 @@ use std::collections::HashMap;
 pub async fn collect(
     State(state): State<AppState>,
     headers: HeaderMap,
-    body: Body,
+    body: Bytes,
 ) -> impl IntoResponse {
     let token = match get_authorization(&headers) {
         Some(t) => t,
         None => return error_response(StatusCode::UNAUTHORIZED, "Unauthorized"),
-    };
-
-    let decompressed = match read_and_decompress_body(&headers, body).await {
-        Ok(d) => d,
-        Err(e) => return e,
     };
 
     let ctx = match load_project_context(&state.pool, &token).await {
@@ -38,7 +33,7 @@ pub async fn collect(
             let failed = FailedRequest {
                 request_type: RequestType::Collect,
                 token,
-                body: decompressed,
+                body: body.to_vec(),
                 country,
                 client_ip: None,
                 user_agent: None,
@@ -57,7 +52,7 @@ pub async fn collect(
         }
     };
 
-    let req: Request = match serde_json::from_slice(&decompressed) {
+    let req: Request = match serde_json::from_slice(&body) {
         Ok(req) => req,
         Err(_) => return error_response(StatusCode::BAD_REQUEST, "Invalid JSON"),
     };

@@ -1,9 +1,9 @@
-use super::{HandlerResponse, error_response, get_authorization, read_and_decompress_body};
+use super::{HandlerResponse, error_response, get_authorization};
 use crate::batch_queue::{BatchQueue, FailedRequest, QueuedEvent, RequestType};
 use crate::models::AppState;
 use crate::tinybird::WebVitalRow;
 use axum::Json;
-use axum::body::Body;
+use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
@@ -43,16 +43,11 @@ pub struct WebVitalRequest {
 pub async fn vitals(
     State(state): State<AppState>,
     headers: HeaderMap,
-    body: Body,
+    body: Bytes,
 ) -> impl IntoResponse {
     let token = match get_authorization(&headers) {
         Some(t) => t,
         None => return error_response(StatusCode::UNAUTHORIZED, "Unauthorized"),
-    };
-
-    let decompressed = match read_and_decompress_body(&headers, body).await {
-        Ok(d) => d,
-        Err(e) => return e,
     };
 
     let project_id = match get_project_id(&state.pool, &token).await {
@@ -67,7 +62,7 @@ pub async fn vitals(
                 let failed = FailedRequest {
                     request_type: RequestType::Vitals,
                     token,
-                    body: decompressed,
+                    body: body.to_vec(),
                     country,
                     client_ip: None,
                     user_agent: None,
@@ -88,7 +83,7 @@ pub async fn vitals(
         }
     };
 
-    let req: WebVitalRequest = match serde_json::from_slice(&decompressed) {
+    let req: WebVitalRequest = match serde_json::from_slice(&body) {
         Ok(req) => req,
         Err(_) => return error_response(StatusCode::BAD_REQUEST, "Invalid JSON"),
     };

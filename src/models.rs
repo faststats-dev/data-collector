@@ -1,5 +1,4 @@
 use crate::batch_queue::BatchQueue;
-use crate::pending_requests::PendingRequestStore;
 use crate::tinybird::TinybirdClient;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -13,7 +12,6 @@ pub struct AppState {
     #[allow(dead_code)]
     pub tinybird: Arc<TinybirdClient>,
     pub batch_queue: Arc<BatchQueue>,
-    pub pending_requests: Arc<PendingRequestStore>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

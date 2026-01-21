@@ -3,9 +3,9 @@ use super::{
     get_request_origin, insert_error_entries, insert_event, load_project_context,
     read_and_decompress_body, success_response, validate_domain,
 };
+use crate::batch_queue::{FailedRequest, RequestType};
 use crate::debounce::should_debounce;
 use crate::models::{AppState, ErrorTracking};
-use crate::pending_requests::{PendingRequest, RequestType};
 use crate::salt::get_daily_salt;
 use crate::validation::validate_and_filter_payload;
 use axum::body::Body;
@@ -92,7 +92,6 @@ pub async fn web(
     let ctx = match load_project_context(&state.pool, &token).await {
         Ok(ctx) => ctx,
         Err(_) => {
-            // Database error - store for later retry
             let country = headers
                 .get("CF-IPCountry")
                 .and_then(|v| v.to_str().ok())
@@ -104,7 +103,7 @@ pub async fn web(
                 .and_then(|v| v.to_str().ok())
                 .map(String::from);
 
-            let pending = PendingRequest {
+            let failed = FailedRequest {
                 request_type: RequestType::Web,
                 token,
                 body: decompressed,
@@ -114,8 +113,8 @@ pub async fn web(
                 origin: request_origin,
             };
 
-            if let Err(e) = state.pending_requests.store(&pending).await {
-                eprintln!("Failed to store pending request: {}", e);
+            if let Err(e) = state.batch_queue.backup_store.backup_request(&failed).await {
+                eprintln!("Failed to store failed request: {}", e);
                 return error_response(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "Service temporarily unavailable",

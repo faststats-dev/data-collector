@@ -2,8 +2,8 @@ use super::{
     enrich_data_with_country, error_response, get_authorization, insert_error_entries,
     insert_event, load_project_context, read_and_decompress_body, success_response,
 };
+use crate::batch_queue::{FailedRequest, RequestType};
 use crate::models::{AppState, Request};
-use crate::pending_requests::{PendingRequest, RequestType};
 use crate::validation::validate_and_filter_payload;
 use axum::body::Body;
 use axum::extract::State;
@@ -30,13 +30,12 @@ pub async fn collect(
     let ctx = match load_project_context(&state.pool, &token).await {
         Ok(ctx) => ctx,
         Err(_) => {
-            // Database error - store for later retry
             let country = headers
                 .get("CF-IPCountry")
                 .and_then(|v| v.to_str().ok())
                 .map(String::from);
 
-            let pending = PendingRequest {
+            let failed = FailedRequest {
                 request_type: RequestType::Collect,
                 token,
                 body: decompressed,
@@ -46,8 +45,8 @@ pub async fn collect(
                 origin: None,
             };
 
-            if let Err(e) = state.pending_requests.store(&pending).await {
-                eprintln!("Failed to store pending request: {}", e);
+            if let Err(e) = state.batch_queue.backup_store.backup_request(&failed).await {
+                eprintln!("Failed to store failed request: {}", e);
                 return error_response(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "Service temporarily unavailable",

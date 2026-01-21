@@ -1,7 +1,6 @@
 use super::{HandlerResponse, error_response, get_authorization, read_and_decompress_body};
-use crate::batch_queue::{BatchQueue, QueuedEvent};
+use crate::batch_queue::{BatchQueue, FailedRequest, QueuedEvent, RequestType};
 use crate::models::AppState;
-use crate::pending_requests::{PendingRequest, RequestType};
 use crate::tinybird::WebVitalRow;
 use axum::Json;
 use axum::body::Body;
@@ -61,13 +60,12 @@ pub async fn vitals(
         Ok(id) => id,
         Err(is_db_error) => {
             if is_db_error {
-                // Database error - store for later retry
                 let country = headers
                     .get("CF-IPCountry")
                     .and_then(|v| v.to_str().ok())
                     .map(String::from);
 
-                let pending = PendingRequest {
+                let failed = FailedRequest {
                     request_type: RequestType::Vitals,
                     token,
                     body: decompressed,
@@ -77,8 +75,8 @@ pub async fn vitals(
                     origin: None,
                 };
 
-                if let Err(e) = state.pending_requests.store(&pending).await {
-                    eprintln!("Failed to store pending request: {}", e);
+                if let Err(e) = state.batch_queue.backup_store.backup_request(&failed).await {
+                    eprintln!("Failed to store failed request: {}", e);
                     return error_response(
                         StatusCode::SERVICE_UNAVAILABLE,
                         "Service temporarily unavailable",

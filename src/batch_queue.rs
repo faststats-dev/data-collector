@@ -11,26 +11,34 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 
-/// Maximum number of retries before backing up to SQLite
 const MAX_RETRIES: u32 = 5;
-
-/// Initial retry delay (will be exponentially increased)
 const INITIAL_RETRY_DELAY: Duration = Duration::from_secs(1);
-
-/// Maximum retry delay cap
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
-
-/// Window for collecting events before flushing
 const BATCH_WINDOW: Duration = Duration::from_secs(60);
-
-/// Interval for replaying cached events from SQLite
-const CACHE_REPLAY_INTERVAL: Duration = Duration::from_secs(600);
-
-/// Maximum events to process from SQLite backup per replay cycle
+const BACKUP_REPLAY_INTERVAL: Duration = Duration::from_secs(600);
 const MAX_REPLAY_BATCH_SIZE: i64 = 500;
+const MAX_BACKUP_AGE_SECS: i64 = 86400;
+const MAX_REQUEST_AGE_SECS: i64 = 86400;
 
-/// Maximum time events can stay in SQLite before being considered stale (24 hours)
-const MAX_EVENT_AGE_SECS: i64 = 86400;
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum RequestType {
+    Collect,
+    Web,
+    Vitals,
+    Replay,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FailedRequest {
+    pub request_type: RequestType,
+    pub token: String,
+    pub body: Vec<u8>,
+    pub country: Option<String>,
+    pub client_ip: Option<String>,
+    pub user_agent: Option<String>,
+    pub origin: Option<String>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -55,7 +63,7 @@ impl QueuedEvent {
 }
 
 #[derive(Debug, Default)]
-struct GroupedEvents {
+struct InMemoryBatch {
     events: Vec<EventRow>,
     errors: Vec<ErrorRow>,
     error_trackings: Vec<ErrorTrackingRow>,
@@ -63,7 +71,7 @@ struct GroupedEvents {
     replays: Vec<ReplayRow>,
 }
 
-impl GroupedEvents {
+impl InMemoryBatch {
     fn is_empty(&self) -> bool {
         self.events.is_empty()
             && self.errors.is_empty()
@@ -124,8 +132,8 @@ impl BatchSendResult {
             || !self.failed_replays.is_empty()
     }
 
-    fn into_grouped_events(self) -> GroupedEvents {
-        GroupedEvents {
+    fn into_in_memory_batch(self) -> InMemoryBatch {
+        InMemoryBatch {
             events: self.failed_events,
             errors: self.failed_errors,
             error_trackings: self.failed_error_trackings,
@@ -171,12 +179,11 @@ impl BackupStore {
 
         sqlx::query(
             r#"
-            CREATE TABLE IF NOT EXISTS failed_events (
+            CREATE TABLE IF NOT EXISTS backed_up_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 event_data TEXT NOT NULL,
                 datasource TEXT NOT NULL,
                 created_at TEXT NOT NULL,
-                retry_count INTEGER DEFAULT 0,
                 last_error TEXT
             )
             "#,
@@ -186,8 +193,29 @@ impl BackupStore {
 
         sqlx::query(
             r#"
-            CREATE INDEX IF NOT EXISTS idx_failed_events_created_at
-            ON failed_events(created_at)
+            CREATE INDEX IF NOT EXISTS idx_backed_up_events_created_at
+            ON backed_up_events(created_at)
+            "#,
+        )
+        .execute(&pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS failed_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                request_data TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_failed_requests_created_at
+            ON failed_requests(created_at)
             "#,
         )
         .execute(&pool)
@@ -196,30 +224,7 @@ impl BackupStore {
         Ok(Self { pool })
     }
 
-    #[allow(dead_code)]
-    pub async fn store_event(
-        &self,
-        event: &QueuedEvent,
-        error_msg: Option<&str>,
-    ) -> Result<(), sqlx::Error> {
-        let event_data = serde_json::to_string(event).expect("Failed to serialize event");
-        let datasource = event.datasource();
-        let now = Utc::now().to_rfc3339();
-
-        sqlx::query(
-            "INSERT INTO failed_events (event_data, datasource, created_at, last_error) VALUES (?, ?, ?, ?)",
-        )
-        .bind(&event_data)
-        .bind(datasource)
-        .bind(&now)
-        .bind(error_msg)
-        .execute(&self.pool)
-        .await?;
-
-        Ok(())
-    }
-
-    pub async fn store_events(
+    pub async fn backup_events(
         &self,
         events: &[QueuedEvent],
         error_msg: Option<&str>,
@@ -237,7 +242,7 @@ impl BackupStore {
             let datasource = event.datasource();
 
             sqlx::query(
-                "INSERT INTO failed_events (event_data, datasource, created_at, last_error) VALUES (?, ?, ?, ?)",
+                "INSERT INTO backed_up_events (event_data, datasource, created_at, last_error) VALUES (?, ?, ?, ?)",
             )
             .bind(&event_data)
             .bind(datasource)
@@ -251,12 +256,12 @@ impl BackupStore {
         Ok(())
     }
 
-    pub async fn get_pending_events(
+    pub async fn get_backed_up_events(
         &self,
         limit: i64,
     ) -> Result<Vec<(i64, QueuedEvent)>, sqlx::Error> {
         let rows: Vec<(i64, String)> = sqlx::query_as(
-            "SELECT id, event_data FROM failed_events ORDER BY created_at ASC LIMIT ?",
+            "SELECT id, event_data FROM backed_up_events ORDER BY created_at ASC LIMIT ?",
         )
         .bind(limit)
         .fetch_all(&self.pool)
@@ -270,14 +275,14 @@ impl BackupStore {
         Ok(events)
     }
 
-    pub async fn remove_events(&self, ids: &[i64]) -> Result<(), sqlx::Error> {
+    pub async fn remove_backed_up_events(&self, ids: &[i64]) -> Result<(), sqlx::Error> {
         if ids.is_empty() {
             return Ok(());
         }
 
         let placeholders: Vec<String> = ids.iter().map(|_| "?".to_string()).collect();
         let query = format!(
-            "DELETE FROM failed_events WHERE id IN ({})",
+            "DELETE FROM backed_up_events WHERE id IN ({})",
             placeholders.join(", ")
         );
 
@@ -290,20 +295,11 @@ impl BackupStore {
         Ok(())
     }
 
-    #[allow(dead_code)]
-    pub async fn remove_event(&self, id: i64) -> Result<(), sqlx::Error> {
-        sqlx::query("DELETE FROM failed_events WHERE id = ?")
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-
-    pub async fn cleanup_stale_events(&self) -> Result<u64, sqlx::Error> {
-        let cutoff = Utc::now() - chrono::Duration::seconds(MAX_EVENT_AGE_SECS);
+    pub async fn cleanup_stale_backups(&self) -> Result<u64, sqlx::Error> {
+        let cutoff = Utc::now() - chrono::Duration::seconds(MAX_BACKUP_AGE_SECS);
         let cutoff_str = cutoff.to_rfc3339();
 
-        let result = sqlx::query("DELETE FROM failed_events WHERE created_at < ?")
+        let result = sqlx::query("DELETE FROM backed_up_events WHERE created_at < ?")
             .bind(&cutoff_str)
             .execute(&self.pool)
             .await?;
@@ -311,8 +307,69 @@ impl BackupStore {
         Ok(result.rows_affected())
     }
 
-    pub async fn count_pending(&self) -> Result<i64, sqlx::Error> {
-        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM failed_events")
+    pub async fn count_backed_up(&self) -> Result<i64, sqlx::Error> {
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM backed_up_events")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(count.0)
+    }
+
+    pub async fn backup_request(&self, request: &FailedRequest) -> Result<(), sqlx::Error> {
+        let data = serde_json::to_string(request).expect("Failed to serialize request");
+        let now = Utc::now().to_rfc3339();
+
+        sqlx::query("INSERT INTO failed_requests (request_data, created_at) VALUES (?, ?)")
+            .bind(&data)
+            .bind(&now)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(())
+    }
+
+    pub async fn get_failed_requests(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<(i64, FailedRequest)>, sqlx::Error> {
+        let rows: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT id, request_data FROM failed_requests ORDER BY created_at ASC LIMIT ?",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .filter_map(|(id, data)| {
+                serde_json::from_str(&data)
+                    .ok()
+                    .map(|request| (id, request))
+            })
+            .collect())
+    }
+
+    pub async fn remove_failed_request(&self, id: i64) -> Result<(), sqlx::Error> {
+        sqlx::query("DELETE FROM failed_requests WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn cleanup_stale_requests(&self) -> Result<u64, sqlx::Error> {
+        let cutoff = Utc::now() - chrono::Duration::seconds(MAX_REQUEST_AGE_SECS);
+        let cutoff_str = cutoff.to_rfc3339();
+
+        let result = sqlx::query("DELETE FROM failed_requests WHERE created_at < ?")
+            .bind(&cutoff_str)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(result.rows_affected())
+    }
+
+    pub async fn count_failed_requests(&self) -> Result<i64, sqlx::Error> {
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM failed_requests")
             .fetch_one(&self.pool)
             .await?;
         Ok(count.0)
@@ -321,9 +378,9 @@ impl BackupStore {
 
 pub struct BatchQueue {
     tinybird: Arc<TinybirdClient>,
-    backup_store: Arc<BackupStore>,
+    pub(crate) backup_store: Arc<BackupStore>,
     sender: mpsc::Sender<QueuedEvent>,
-    current_batch: Arc<Mutex<GroupedEvents>>,
+    in_memory_batch: Arc<Mutex<InMemoryBatch>>,
 }
 
 impl BatchQueue {
@@ -333,23 +390,23 @@ impl BatchQueue {
     ) -> Result<Arc<Self>, sqlx::Error> {
         let backup_store = Arc::new(BackupStore::new(backup_path).await?);
         let (sender, receiver) = mpsc::channel(10000);
-        let current_batch = Arc::new(Mutex::new(GroupedEvents::default()));
+        let in_memory_batch = Arc::new(Mutex::new(InMemoryBatch::default()));
 
         let queue = Arc::new(Self {
             tinybird,
             backup_store,
             sender,
-            current_batch,
+            in_memory_batch,
         });
 
         let startup_queue = Arc::clone(&queue);
         tokio::spawn(async move {
-            startup_queue.replay_cached_events().await;
+            startup_queue.replay_backed_up_events().await;
         });
 
         queue.start_batch_processor(receiver);
         queue.start_batch_flusher();
-        queue.start_cache_replayer();
+        queue.start_backup_replayer();
 
         Ok(queue)
     }
@@ -365,7 +422,7 @@ impl BatchQueue {
         let queue = Arc::clone(self);
         tokio::spawn(async move {
             while let Some(event) = receiver.recv().await {
-                let mut batch = queue.current_batch.lock().await;
+                let mut batch = queue.in_memory_batch.lock().await;
                 batch.push(event);
             }
         });
@@ -376,24 +433,24 @@ impl BatchQueue {
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(BATCH_WINDOW).await;
-                queue.flush_batch().await;
+                queue.flush_in_memory_batch().await;
             }
         });
     }
 
-    fn start_cache_replayer(self: &Arc<Self>) {
+    fn start_backup_replayer(self: &Arc<Self>) {
         let queue = Arc::clone(self);
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(CACHE_REPLAY_INTERVAL).await;
-                queue.replay_cached_events().await;
+                tokio::time::sleep(BACKUP_REPLAY_INTERVAL).await;
+                queue.replay_backed_up_events().await;
             }
         });
     }
 
-    async fn flush_batch(&self) {
+    pub(crate) async fn flush_in_memory_batch(&self) {
         let batch = {
-            let mut current = self.current_batch.lock().await;
+            let mut current = self.in_memory_batch.lock().await;
             if current.is_empty() {
                 return;
             }
@@ -401,21 +458,18 @@ impl BatchQueue {
         };
 
         let total = batch.total_count();
-        eprintln!("Flushing batch of {} events", total);
+        eprintln!("Flushing in-memory batch of {} events", total);
 
         self.send_batch_with_retry(batch).await;
     }
 
-    /// Calculate retry delay with exponential backoff and jitter
     fn calculate_retry_delay(retry_count: u32) -> Duration {
         let base_delay = INITIAL_RETRY_DELAY.as_millis() as u64;
         let exponential_delay = base_delay * 2u64.saturating_pow(retry_count);
         let capped_delay = exponential_delay.min(MAX_RETRY_DELAY.as_millis() as u64);
 
-        // Add jitter: ±25% randomization to prevent thundering herd
         let jitter_range = capped_delay / 4;
         let jitter = if jitter_range > 0 {
-            // Simple deterministic jitter based on retry count
             (retry_count as u64 * 7919) % (jitter_range * 2)
         } else {
             0
@@ -427,24 +481,22 @@ impl BatchQueue {
         Duration::from_millis(delay_with_jitter)
     }
 
-    async fn send_batch_with_retry(&self, mut batch: GroupedEvents) {
+    async fn send_batch_with_retry(&self, mut batch: InMemoryBatch) {
         let mut retry_count = 0u32;
 
         loop {
             let result = self.send_grouped_batch(&batch).await;
 
             if !result.has_failures() {
-                // All events sent successfully
                 return;
             }
 
-            // If we had a permanent failure (4xx error except 429), don't retry
             if result.had_permanent_failure {
                 eprintln!(
-                    "Permanent failure sending batch, backing up {} events to SQLite",
+                    "Permanent failure, backing up {} events",
                     result.failure_count()
                 );
-                self.backup_failed_events(result.into_grouped_events(), "Permanent API error")
+                self.backup_events(result.into_in_memory_batch(), "Permanent API error")
                     .await;
                 return;
             }
@@ -453,17 +505,16 @@ impl BatchQueue {
 
             if retry_count >= MAX_RETRIES {
                 eprintln!(
-                    "Batch failed after {} retries, backing up {} events to SQLite",
+                    "Batch failed after {} retries, backing up {} events",
                     retry_count,
                     result.failure_count()
                 );
-                self.backup_failed_events(result.into_grouped_events(), "Max retries exceeded")
+                self.backup_events(result.into_in_memory_batch(), "Max retries exceeded")
                     .await;
                 return;
             }
 
-            // Update batch to only contain failed events
-            batch = result.into_grouped_events();
+            batch = result.into_in_memory_batch();
 
             let delay = Self::calculate_retry_delay(retry_count);
             eprintln!(
@@ -477,11 +528,9 @@ impl BatchQueue {
         }
     }
 
-    /// Send all event types in parallel, each type as a single NDJSON request
-    async fn send_grouped_batch(&self, batch: &GroupedEvents) -> BatchSendResult {
+    async fn send_grouped_batch(&self, batch: &InMemoryBatch) -> BatchSendResult {
         let mut result = BatchSendResult::default();
 
-        // Send all event types concurrently - each type is ONE network request
         let (events_res, errors_res, error_trackings_res, web_vitals_res, replays_res) = tokio::join!(
             async {
                 if batch.events.is_empty() {
@@ -522,7 +571,6 @@ impl BatchQueue {
             },
         );
 
-        // Process results
         if let Err(e) = events_res {
             if !e.is_transient() {
                 result.had_permanent_failure = true;
@@ -561,62 +609,53 @@ impl BatchQueue {
         result
     }
 
-    async fn backup_failed_events(&self, batch: GroupedEvents, error_msg: &str) {
+    async fn backup_events(&self, batch: InMemoryBatch, error_msg: &str) {
         let events = batch.into_queued_events();
-        eprintln!(
-            "Backing up {} events to SQLite: {}",
-            events.len(),
-            error_msg
-        );
+        eprintln!("Backing up {} events: {}", events.len(), error_msg);
         if let Err(e) = self
             .backup_store
-            .store_events(&events, Some(error_msg))
+            .backup_events(&events, Some(error_msg))
             .await
         {
-            eprintln!(
-                "CRITICAL: Failed to backup {} events to SQLite: {}",
-                events.len(),
-                e
-            );
+            eprintln!("CRITICAL: Failed to backup {} events: {}", events.len(), e);
         } else {
-            eprintln!("Successfully backed up {} events to SQLite", events.len());
+            eprintln!("Successfully backed up {} events", events.len());
         }
     }
 
-    async fn replay_cached_events(&self) {
-        // First, cleanup stale events
-        match self.backup_store.cleanup_stale_events().await {
+    async fn replay_backed_up_events(&self) {
+        match self.backup_store.cleanup_stale_backups().await {
             Ok(count) if count > 0 => {
-                eprintln!("Cleaned up {} stale events from backup", count);
+                eprintln!("Cleaned up {} stale backups", count);
             }
             Err(e) => {
-                eprintln!("Failed to cleanup stale events: {}", e);
+                eprintln!("Failed to cleanup stale backups: {}", e);
             }
             _ => {}
         }
 
-        let pending_count = match self.backup_store.count_pending().await {
+        let backed_up_count = match self.backup_store.count_backed_up().await {
             Ok(count) => count,
             Err(e) => {
-                eprintln!("Failed to count pending events: {}", e);
+                eprintln!("Failed to count backed up events: {}", e);
                 return;
             }
         };
 
-        if pending_count == 0 {
+        if backed_up_count == 0 {
             return;
         }
 
-        eprintln!("Replaying {} cached events from SQLite", pending_count);
+        eprintln!("Replaying {} backed up events", backed_up_count);
 
         let events = match self
             .backup_store
-            .get_pending_events(MAX_REPLAY_BATCH_SIZE)
+            .get_backed_up_events(MAX_REPLAY_BATCH_SIZE)
             .await
         {
             Ok(events) => events,
             Err(e) => {
-                eprintln!("Failed to get pending events: {}", e);
+                eprintln!("Failed to get backed up events: {}", e);
                 return;
             }
         };
@@ -625,50 +664,104 @@ impl BatchQueue {
             return;
         }
 
-        eprintln!(
-            "Starting restore of {} events from SQLite backup",
-            events.len()
-        );
+        eprintln!("Restoring {} events from backup", events.len());
 
-        let mut grouped = GroupedEvents::default();
+        let mut batch = InMemoryBatch::default();
         let mut event_ids: Vec<i64> = Vec::with_capacity(events.len());
 
         for (id, event) in events {
             event_ids.push(id);
-            grouped.push(event);
+            batch.push(event);
         }
 
-        // Send as batch
-        let result = self.send_grouped_batch(&grouped).await;
+        let result = self.send_grouped_batch(&batch).await;
 
         if !result.has_failures() {
-            eprintln!("Restoring {} events from SQLite backup", event_ids.len());
-            if let Err(e) = self.backup_store.remove_events(&event_ids).await {
-                eprintln!("Failed to remove replayed events from backup: {}", e);
+            if let Err(e) = self.backup_store.remove_backed_up_events(&event_ids).await {
+                eprintln!("Failed to remove restored events: {}", e);
             } else {
-                eprintln!(
-                    "Successfully restored {} events from SQLite backup",
-                    event_ids.len()
-                );
+                eprintln!("Successfully restored {} events", event_ids.len());
             }
         } else {
-            // Partial or full failure - only remove successful ones
             eprintln!(
                 "Replay partially failed: {} events still need retry",
                 result.failure_count()
             );
-            // Leave events in SQLite for next replay cycle
+        }
+    }
+
+    pub(crate) async fn replay_failed_requests(&self, pool: &sqlx::PgPool) {
+        match self.backup_store.cleanup_stale_requests().await {
+            Ok(count) if count > 0 => {
+                eprintln!("Cleaned up {} stale failed requests", count);
+            }
+            Err(e) => {
+                eprintln!("Failed to cleanup stale requests: {}", e);
+            }
+            _ => {}
+        }
+
+        let failed_count = match self.backup_store.count_failed_requests().await {
+            Ok(count) => count,
+            Err(e) => {
+                eprintln!("Failed to count failed requests: {}", e);
+                return;
+            }
+        };
+
+        if failed_count == 0 {
+            return;
+        }
+
+        eprintln!("Replaying {} failed requests", failed_count);
+
+        let requests = match self.backup_store.get_failed_requests(100).await {
+            Ok(requests) => requests,
+            Err(e) => {
+                eprintln!("Failed to get failed requests: {}", e);
+                return;
+            }
+        };
+
+        if requests.is_empty() {
+            return;
+        }
+
+        for (id, request) in requests {
+            let result = super::handler::process_failed_request(self, pool, &request).await;
+
+            match result {
+                Ok(()) => {
+                    if let Err(e) = self.backup_store.remove_failed_request(id).await {
+                        eprintln!("Failed to remove replayed request: {}", e);
+                    } else {
+                        eprintln!("Successfully replayed request {}", id);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Failed to replay request {}: {}", id, e);
+                    if (e.contains("Unauthorized") || e.contains("Invalid"))
+                        && let Err(e) = self.backup_store.remove_failed_request(id).await {
+                            eprintln!("Failed to remove invalid request: {}", e);
+                        }
+                }
+            }
         }
     }
 
     #[allow(dead_code)]
     pub async fn force_flush(&self) {
-        self.flush_batch().await;
+        self.flush_in_memory_batch().await;
     }
 
     #[allow(dead_code)]
     pub async fn backup_count(&self) -> Result<i64, sqlx::Error> {
-        self.backup_store.count_pending().await
+        self.backup_store.count_backed_up().await
+    }
+
+    #[allow(dead_code)]
+    pub async fn failed_request_count(&self) -> Result<i64, sqlx::Error> {
+        self.backup_store.count_failed_requests().await
     }
 }
 
@@ -692,15 +785,15 @@ mod tests {
         use super::*;
 
         #[tokio::test]
-        async fn test_store_and_retrieve_event() {
+        async fn test_backup_and_restore_events() {
             let dir = tempdir().unwrap();
             let db_path = dir.path().join("test.db");
             let store = BackupStore::new(&db_path).await.unwrap();
 
             let event = QueuedEvent::Event(create_test_event());
-            store.store_event(&event, None).await.unwrap();
+            store.backup_events(&[event], None).await.unwrap();
 
-            let events = store.get_pending_events(10).await.unwrap();
+            let events = store.get_backed_up_events(10).await.unwrap();
             assert_eq!(events.len(), 1);
 
             if let QueuedEvent::Event(e) = &events[0].1 {
@@ -711,68 +804,50 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn test_remove_event() {
-            let dir = tempdir().unwrap();
-            let db_path = dir.path().join("test.db");
-            let store = BackupStore::new(&db_path).await.unwrap();
-
-            let event = QueuedEvent::Event(create_test_event());
-            store.store_event(&event, None).await.unwrap();
-
-            let events = store.get_pending_events(10).await.unwrap();
-            assert_eq!(events.len(), 1);
-
-            store.remove_event(events[0].0).await.unwrap();
-
-            let events = store.get_pending_events(10).await.unwrap();
-            assert_eq!(events.len(), 0);
-        }
-
-        #[tokio::test]
         async fn test_remove_multiple_events() {
             let dir = tempdir().unwrap();
             let db_path = dir.path().join("test.db");
             let store = BackupStore::new(&db_path).await.unwrap();
 
-            for _ in 0..5 {
-                let event = QueuedEvent::Event(create_test_event());
-                store.store_event(&event, None).await.unwrap();
-            }
+            let events: Vec<QueuedEvent> = (0..5)
+                .map(|_| QueuedEvent::Event(create_test_event()))
+                .collect();
+            store.backup_events(&events, None).await.unwrap();
 
-            let events = store.get_pending_events(10).await.unwrap();
+            let events = store.get_backed_up_events(10).await.unwrap();
             assert_eq!(events.len(), 5);
 
             let ids_to_remove: Vec<i64> = events.iter().take(3).map(|(id, _)| *id).collect();
-            store.remove_events(&ids_to_remove).await.unwrap();
+            store.remove_backed_up_events(&ids_to_remove).await.unwrap();
 
-            let remaining = store.get_pending_events(10).await.unwrap();
+            let remaining = store.get_backed_up_events(10).await.unwrap();
             assert_eq!(remaining.len(), 2);
         }
 
         #[tokio::test]
-        async fn test_count_pending() {
+        async fn test_count_backed_up() {
             let dir = tempdir().unwrap();
             let db_path = dir.path().join("test.db");
             let store = BackupStore::new(&db_path).await.unwrap();
 
-            assert_eq!(store.count_pending().await.unwrap(), 0);
+            assert_eq!(store.count_backed_up().await.unwrap(), 0);
 
-            for _ in 0..5 {
-                let event = QueuedEvent::Event(create_test_event());
-                store.store_event(&event, None).await.unwrap();
-            }
+            let events: Vec<QueuedEvent> = (0..5)
+                .map(|_| QueuedEvent::Event(create_test_event()))
+                .collect();
+            store.backup_events(&events, None).await.unwrap();
 
-            assert_eq!(store.count_pending().await.unwrap(), 5);
+            assert_eq!(store.count_backed_up().await.unwrap(), 5);
         }
 
         #[tokio::test]
-        async fn test_store_different_event_types() {
+        async fn test_backup_different_event_types() {
             let dir = tempdir().unwrap();
             let db_path = dir.path().join("test.db");
             let store = BackupStore::new(&db_path).await.unwrap();
 
             let event = QueuedEvent::Event(create_test_event());
-            store.store_event(&event, None).await.unwrap();
+            store.backup_events(&[event], None).await.unwrap();
 
             let error = QueuedEvent::Error(ErrorRow {
                 id: 1,
@@ -781,7 +856,7 @@ mod tests {
                 stack: vec!["line1".to_string()],
                 cause_id: None,
             });
-            store.store_event(&error, None).await.unwrap();
+            store.backup_events(&[error], None).await.unwrap();
 
             let vital = QueuedEvent::WebVital(WebVitalRow {
                 id: Uuid::new_v4(),
@@ -798,11 +873,11 @@ mod tests {
                 session_id: None,
                 created_at: Utc::now(),
             });
-            store.store_event(&vital, None).await.unwrap();
+            store.backup_events(&[vital], None).await.unwrap();
 
-            assert_eq!(store.count_pending().await.unwrap(), 3);
+            assert_eq!(store.count_backed_up().await.unwrap(), 3);
 
-            let events = store.get_pending_events(10).await.unwrap();
+            let events = store.get_backed_up_events(10).await.unwrap();
             assert_eq!(events.len(), 3);
 
             assert!(matches!(events[0].1, QueuedEvent::Event(_)));
@@ -820,13 +895,13 @@ mod tests {
                 let mut event = create_test_event();
                 event.data = format!(r#"{{"order": {}}}"#, i);
                 store
-                    .store_event(&QueuedEvent::Event(event), None)
+                    .backup_events(&[QueuedEvent::Event(event)], None)
                     .await
                     .unwrap();
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
 
-            let events = store.get_pending_events(10).await.unwrap();
+            let events = store.get_backed_up_events(10).await.unwrap();
 
             for (i, (_, event)) in events.into_iter().enumerate() {
                 if let QueuedEvent::Event(e) = event {
@@ -836,24 +911,24 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn test_get_pending_events_limit() {
+        async fn test_get_backed_up_events_limit() {
             let dir = tempdir().unwrap();
             let db_path = dir.path().join("test.db");
             let store = BackupStore::new(&db_path).await.unwrap();
 
-            for _ in 0..10 {
-                let event = QueuedEvent::Event(create_test_event());
-                store.store_event(&event, None).await.unwrap();
-            }
+            let events: Vec<QueuedEvent> = (0..10)
+                .map(|_| QueuedEvent::Event(create_test_event()))
+                .collect();
+            store.backup_events(&events, None).await.unwrap();
 
-            let events = store.get_pending_events(3).await.unwrap();
+            let events = store.get_backed_up_events(3).await.unwrap();
             assert_eq!(events.len(), 3);
 
-            assert_eq!(store.count_pending().await.unwrap(), 10);
+            assert_eq!(store.count_backed_up().await.unwrap(), 10);
         }
 
         #[tokio::test]
-        async fn test_store_events_bulk() {
+        async fn test_backup_events_bulk() {
             let dir = tempdir().unwrap();
             let db_path = dir.path().join("test.db");
             let store = BackupStore::new(&db_path).await.unwrap();
@@ -863,35 +938,35 @@ mod tests {
                 .collect();
 
             store
-                .store_events(&events, Some("Test error"))
+                .backup_events(&events, Some("Test error"))
                 .await
                 .unwrap();
 
-            assert_eq!(store.count_pending().await.unwrap(), 10);
+            assert_eq!(store.count_backed_up().await.unwrap(), 10);
         }
     }
 
-    mod grouped_events_tests {
+    mod in_memory_batch_tests {
         use super::*;
 
         #[test]
         fn test_is_empty() {
-            let grouped = GroupedEvents::default();
-            assert!(grouped.is_empty());
+            let batch = InMemoryBatch::default();
+            assert!(batch.is_empty());
 
-            let mut grouped = GroupedEvents::default();
-            grouped.push(QueuedEvent::Event(create_test_event()));
-            assert!(!grouped.is_empty());
+            let mut batch = InMemoryBatch::default();
+            batch.push(QueuedEvent::Event(create_test_event()));
+            assert!(!batch.is_empty());
         }
 
         #[test]
         fn test_total_count() {
-            let mut grouped = GroupedEvents::default();
-            assert_eq!(grouped.total_count(), 0);
+            let mut batch = InMemoryBatch::default();
+            assert_eq!(batch.total_count(), 0);
 
-            grouped.push(QueuedEvent::Event(create_test_event()));
-            grouped.push(QueuedEvent::Event(create_test_event()));
-            grouped.push(QueuedEvent::Error(ErrorRow {
+            batch.push(QueuedEvent::Event(create_test_event()));
+            batch.push(QueuedEvent::Event(create_test_event()));
+            batch.push(QueuedEvent::Error(ErrorRow {
                 id: 1,
                 name: "E".to_string(),
                 message: "M".to_string(),
@@ -899,22 +974,22 @@ mod tests {
                 cause_id: None,
             }));
 
-            assert_eq!(grouped.total_count(), 3);
+            assert_eq!(batch.total_count(), 3);
         }
 
         #[test]
         fn test_push_groups_correctly() {
-            let mut grouped = GroupedEvents::default();
+            let mut batch = InMemoryBatch::default();
 
-            grouped.push(QueuedEvent::Event(create_test_event()));
-            grouped.push(QueuedEvent::Error(ErrorRow {
+            batch.push(QueuedEvent::Event(create_test_event()));
+            batch.push(QueuedEvent::Error(ErrorRow {
                 id: 1,
                 name: "E".to_string(),
                 message: "M".to_string(),
                 stack: vec![],
                 cause_id: None,
             }));
-            grouped.push(QueuedEvent::WebVital(WebVitalRow {
+            batch.push(QueuedEvent::WebVital(WebVitalRow {
                 id: Uuid::new_v4(),
                 project_id: Uuid::new_v4(),
                 metric: "LCP".to_string(),
@@ -930,18 +1005,18 @@ mod tests {
                 created_at: Utc::now(),
             }));
 
-            assert_eq!(grouped.events.len(), 1);
-            assert_eq!(grouped.errors.len(), 1);
-            assert_eq!(grouped.web_vitals.len(), 1);
-            assert!(grouped.error_trackings.is_empty());
-            assert!(grouped.replays.is_empty());
+            assert_eq!(batch.events.len(), 1);
+            assert_eq!(batch.errors.len(), 1);
+            assert_eq!(batch.web_vitals.len(), 1);
+            assert!(batch.error_trackings.is_empty());
+            assert!(batch.replays.is_empty());
         }
 
         #[test]
         fn test_into_queued_events() {
-            let mut grouped = GroupedEvents::default();
-            grouped.push(QueuedEvent::Event(create_test_event()));
-            grouped.push(QueuedEvent::Error(ErrorRow {
+            let mut batch = InMemoryBatch::default();
+            batch.push(QueuedEvent::Event(create_test_event()));
+            batch.push(QueuedEvent::Error(ErrorRow {
                 id: 1,
                 name: "E".to_string(),
                 message: "M".to_string(),
@@ -949,7 +1024,7 @@ mod tests {
                 cause_id: None,
             }));
 
-            let queued = grouped.into_queued_events();
+            let queued = batch.into_queued_events();
             assert_eq!(queued.len(), 2);
             assert!(matches!(queued[0], QueuedEvent::Event(_)));
             assert!(matches!(queued[1], QueuedEvent::Error(_)));
@@ -962,7 +1037,6 @@ mod tests {
         #[test]
         fn test_initial_delay_is_1_second() {
             let delay = BatchQueue::calculate_retry_delay(0);
-            // With jitter, should be around 1 second (±25%)
             assert!(delay >= Duration::from_millis(750));
             assert!(delay <= Duration::from_millis(1250));
         }
@@ -973,16 +1047,14 @@ mod tests {
             let delay_1 = BatchQueue::calculate_retry_delay(1);
             let delay_2 = BatchQueue::calculate_retry_delay(2);
 
-            // Each delay should roughly double (accounting for jitter)
             assert!(delay_1 > delay_0);
             assert!(delay_2 > delay_1);
         }
 
         #[test]
         fn test_max_delay_cap() {
-            // Even with high retry count, should not exceed MAX_RETRY_DELAY
             let delay = BatchQueue::calculate_retry_delay(10);
-            assert!(delay <= MAX_RETRY_DELAY + Duration::from_millis(100)); // Small buffer for jitter
+            assert!(delay <= MAX_RETRY_DELAY + Duration::from_millis(100));
         }
     }
 
@@ -1092,13 +1164,13 @@ mod tests {
         }
 
         #[test]
-        fn test_cache_replay_interval_is_600_seconds() {
-            assert_eq!(CACHE_REPLAY_INTERVAL, Duration::from_secs(600));
+        fn test_backup_replay_interval_is_600_seconds() {
+            assert_eq!(BACKUP_REPLAY_INTERVAL, Duration::from_secs(600));
         }
 
         #[test]
-        fn test_max_event_age_is_24_hours() {
-            assert_eq!(MAX_EVENT_AGE_SECS, 86400);
+        fn test_max_backup_age_is_24_hours() {
+            assert_eq!(MAX_BACKUP_AGE_SECS, 86400);
         }
     }
 }

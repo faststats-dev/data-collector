@@ -6,15 +6,36 @@ use axum::{
 use sqlx::postgres::PgPoolOptions;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::signal;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 mod batch_queue;
 mod debounce;
 mod handler;
 mod models;
-mod pending_requests;
 mod salt;
 mod tinybird;
 mod validation;
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        signal::unix::signal(signal::unix::SignalKind::terminate())
+            .expect("failed to install signal handler")
+            .recv()
+            .await;
+    };
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+}
 
 #[tokio::main]
 async fn main() {
@@ -47,24 +68,13 @@ async fn main() {
         .await
         .expect("Failed to initialize batch queue");
 
-    let pending_path = std::env::var("PENDING_DB_PATH")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/data/pending.db"));
-
-    let pending_requests = Arc::new(
-        pending_requests::PendingRequestStore::new(&pending_path)
-            .await
-            .expect("Failed to initialize pending requests store"),
-    );
-
     let state = models::AppState {
         pool: pool.clone(),
         tinybird: tinybird_client,
-        batch_queue,
-        pending_requests: Arc::clone(&pending_requests),
+        batch_queue: Arc::clone(&batch_queue),
     };
 
-    start_pending_replayer(pool, pending_requests, Arc::clone(&state.batch_queue));
+    start_failed_request_replayer(pool, Arc::clone(&batch_queue));
 
     let cors = CorsLayer::new()
         .allow_origin(AllowOrigin::mirror_request())
@@ -94,67 +104,24 @@ async fn main() {
         .await
         .unwrap();
     println!("Listening on {}", listener.local_addr().unwrap());
-    axum::serve(listener, app).await.unwrap();
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .expect("Server error");
+
+    eprintln!("Shutting down, flushing in-memory batch...");
+    batch_queue.flush_in_memory_batch().await;
+    eprintln!("Shutdown complete");
 }
 
-fn start_pending_replayer(
-    pool: sqlx::PgPool,
-    store: Arc<pending_requests::PendingRequestStore>,
-    batch_queue: Arc<batch_queue::BatchQueue>,
-) {
+fn start_failed_request_replayer(pool: sqlx::PgPool, batch_queue: Arc<batch_queue::BatchQueue>) {
     tokio::spawn(async move {
         let replay_interval = std::time::Duration::from_secs(60);
 
         loop {
             tokio::time::sleep(replay_interval).await;
-
-            if let Ok(count) = store.cleanup_stale().await
-                && count > 0
-            {
-                eprintln!("Cleaned up {} stale pending requests", count);
-            }
-
-            if sqlx::query("SELECT 1").fetch_one(&pool).await.is_err() {
-                continue;
-            }
-
-            let pending = match store.get_pending(100).await {
-                Ok(p) => p,
-                Err(e) => {
-                    eprintln!("Failed to get pending requests: {}", e);
-                    continue;
-                }
-            };
-
-            if pending.is_empty() {
-                continue;
-            }
-
-            eprintln!("Replaying {} pending requests", pending.len());
-
-            for (id, request) in pending {
-                let result = handler::process_pending_request(&pool, &batch_queue, &request).await;
-
-                match result {
-                    Ok(()) => {
-                        if let Err(e) = store.remove(id).await {
-                            eprintln!("Failed to remove pending request: {}", e);
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("Failed to replay pending request: {}", e);
-                        // If it's a DB error, stop processing this batch
-                        if e.contains("database") || e.contains("connection") {
-                            break;
-                        }
-                        if (e.contains("Unauthorized") || e.contains("Invalid"))
-                            && let Err(e) = store.remove(id).await
-                        {
-                            eprintln!("Failed to remove invalid pending request: {}", e);
-                        }
-                    }
-                }
-            }
+            batch_queue.replay_failed_requests(&pool).await;
         }
     });
 }

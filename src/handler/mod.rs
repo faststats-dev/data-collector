@@ -13,12 +13,51 @@ use crate::models::{DataSource, Error, ErrorTracking};
 use crate::tinybird::{ErrorRow, ErrorTrackingRow, EventRow};
 use axum::Json;
 use axum::http::{HeaderMap, StatusCode};
+use serde::Deserialize;
 use serde_json::Value;
 use sqlx::Row;
+use std::borrow::Cow;
 use std::collections::HashMap;
+use std::io::Read;
 use uuid::Uuid;
 
 pub type HandlerResponse = (StatusCode, Json<Value>);
+
+#[derive(Debug, Deserialize, Default)]
+pub struct EncodingQuery {
+    pub encoding: Option<String>,
+}
+
+pub fn decompress_body<'a>(
+    body: &'a [u8],
+    encoding: Option<&str>,
+) -> Result<Cow<'a, [u8]>, String> {
+    match encoding {
+        Some("gzip") => {
+            let mut decoder = flate2::read::GzDecoder::new(body);
+            let mut decompressed = Vec::new();
+            decoder
+                .read_to_end(&mut decompressed)
+                .map_err(|e| format!("Failed to decompress gzip: {}", e))?;
+            Ok(Cow::Owned(decompressed))
+        }
+        Some("zstd") => {
+            let decompressed = zstd::stream::decode_all(body)
+                .map_err(|e| format!("Failed to decompress zstd: {}", e))?;
+            Ok(Cow::Owned(decompressed))
+        }
+        Some("deflate") => {
+            let mut decoder = flate2::read::DeflateDecoder::new(body);
+            let mut decompressed = Vec::new();
+            decoder
+                .read_to_end(&mut decompressed)
+                .map_err(|e| format!("Failed to decompress deflate: {}", e))?;
+            Ok(Cow::Owned(decompressed))
+        }
+        Some(enc) => Err(format!("Unsupported encoding: {}", enc)),
+        None => Ok(Cow::Borrowed(body)),
+    }
+}
 
 pub fn get_authorization(headers: &HeaderMap) -> Option<String> {
     headers

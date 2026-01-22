@@ -1,10 +1,12 @@
-use super::{error_response, load_project_context, success_response};
+use super::{
+    EncodingQuery, decompress_body, error_response, load_project_context, success_response,
+};
 use crate::batch_queue::{FailedRequest, QueuedEvent, RequestType};
 use crate::models::AppState;
 use crate::tinybird::ReplayRow;
 use crate::utils::RrwebEvent;
 use axum::body::Bytes;
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use serde::Deserialize;
@@ -26,7 +28,16 @@ pub struct ReplayRequest {
     pub events: Vec<Value>,
 }
 
-pub async fn replay(State(state): State<AppState>, body: Bytes) -> impl IntoResponse {
+pub async fn replay(
+    State(state): State<AppState>,
+    Query(query): Query<EncodingQuery>,
+    body: Bytes,
+) -> impl IntoResponse {
+    let body = match decompress_body(&body, query.encoding.as_deref()) {
+        Ok(b) => b,
+        Err(e) => return error_response(StatusCode::BAD_REQUEST, &e),
+    };
+
     let parsed: ReplayRequest = match serde_json::from_slice(&body) {
         Ok(p) => p,
         Err(e) => {

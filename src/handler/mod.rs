@@ -409,8 +409,8 @@ async fn process_web_request(
     use crate::utils::debounce::should_debounce;
     use sha2::{Digest, Sha256};
 
-    let get_daily_salt_fn = || {
-        let salt = get_daily_salt();
+    let server_id = {
+        let salt = get_daily_salt().await;
         let mut hasher = Sha256::new();
         hasher.update(salt);
         hasher.update(token.as_bytes());
@@ -424,10 +424,8 @@ async fn process_web_request(
         Uuid::from_bytes(bytes)
     };
 
-    let server_id = get_daily_salt_fn();
-
     let url = valid_data.get("url").and_then(|v| v.as_str()).unwrap_or("");
-    if should_debounce(server_id, url) {
+    if should_debounce(server_id, url).await {
         return Ok(());
     }
 

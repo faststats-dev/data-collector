@@ -21,6 +21,7 @@ const MAX_BACKUP_AGE_SECS: i64 = 86400;
 const MAX_REQUEST_AGE_SECS: i64 = 86400;
 const CHANNEL_CAPACITY: usize = 10_000;
 const CHANNEL_BACKPRESSURE_THRESHOLD: usize = 8_000;
+const MAX_BATCH_SIZE: usize = 5000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -383,6 +384,7 @@ pub struct BatchQueue {
     pub(crate) backup_store: Arc<BackupStore>,
     sender: mpsc::Sender<QueuedEvent>,
     in_memory_batch: Arc<Mutex<InMemoryBatch>>,
+    flush_lock: Arc<Mutex<()>>,
 }
 
 impl BatchQueue {
@@ -399,12 +401,14 @@ impl BatchQueue {
         let backup_store = Arc::new(BackupStore::new(backup_path).await?);
         let (sender, receiver) = mpsc::channel(CHANNEL_CAPACITY);
         let in_memory_batch = Arc::new(Mutex::new(InMemoryBatch::default()));
+        let flush_lock = Arc::new(Mutex::new(()));
 
         let queue = Arc::new(Self {
             tinybird,
             backup_store,
             sender,
             in_memory_batch,
+            flush_lock,
         });
 
         let startup_queue = Arc::clone(&queue);
@@ -433,11 +437,12 @@ impl BatchQueue {
                 let should_flush = {
                     let mut batch = queue.in_memory_batch.lock().await;
                     batch.push(event);
-                    queue.is_channel_under_pressure() && batch.total_count() >= 100
+                    batch.total_count() >= MAX_BATCH_SIZE
+                        || (queue.is_channel_under_pressure() && batch.total_count() >= 100)
                 };
 
                 if should_flush {
-                    eprintln!("Channel backpressure detected, triggering early flush");
+                    eprintln!("Batch size limit or backpressure detected, triggering early flush");
                     queue.flush_in_memory_batch().await;
                 }
             }
@@ -465,6 +470,8 @@ impl BatchQueue {
     }
 
     pub(crate) async fn flush_in_memory_batch(&self) {
+        let _flush_guard = self.flush_lock.lock().await;
+
         let batch = {
             let mut current = self.in_memory_batch.lock().await;
             if current.is_empty() {
@@ -689,27 +696,28 @@ impl BatchQueue {
 
         eprintln!("Restoring {} events from backup", events.len());
 
-        let mut batch = InMemoryBatch::default();
-        let mut event_ids: Vec<i64> = Vec::with_capacity(events.len());
+        let event_ids: Vec<i64> = events.iter().map(|(id, _)| *id).collect();
 
-        for (id, event) in events {
-            event_ids.push(id);
+        if let Err(e) = self.backup_store.remove_backed_up_events(&event_ids).await {
+            eprintln!("Failed to remove events before replay: {}", e);
+            return;
+        }
+
+        let mut batch = InMemoryBatch::default();
+        for (_id, event) in events {
             batch.push(event);
         }
 
         let result = self.send_grouped_batch(batch).await;
 
         if !result.has_failures() {
-            if let Err(e) = self.backup_store.remove_backed_up_events(&event_ids).await {
-                eprintln!("Failed to remove restored events: {}", e);
-            } else {
-                eprintln!("Successfully restored {} events", event_ids.len());
-            }
+            eprintln!("Successfully restored {} events", event_ids.len());
         } else {
-            eprintln!(
-                "Replay partially failed: {} events still need retry",
-                result.failure_count()
-            );
+            self.backup_events(
+                result.into_in_memory_batch(),
+                "Replay failed, re-backing up",
+            )
+            .await;
         }
     }
 

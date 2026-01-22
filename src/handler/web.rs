@@ -28,8 +28,8 @@ struct WebRequest {
 }
 
 /// Generate a privacy-safe visitor identifier using daily salted hashing
-fn generate_visitor_id(token: &str, ip: &str, user_agent: &str) -> Uuid {
-    let salt = get_daily_salt();
+async fn generate_visitor_id(token: &str, ip: &str, user_agent: &str) -> Uuid {
+    let salt = get_daily_salt().await;
 
     let mut hasher = Sha256::new();
     hasher.update(salt);
@@ -38,7 +38,6 @@ fn generate_visitor_id(token: &str, ip: &str, user_agent: &str) -> Uuid {
     hasher.update(user_agent.as_bytes());
     let hash = hasher.finalize();
 
-    // Use first 16 bytes of SHA256 hash to create a UUID
     let mut bytes = [0u8; 16];
     bytes.copy_from_slice(&hash[..16]);
     bytes[6] = (bytes[6] & 0x0f) | 0x40; // Version 4
@@ -151,10 +150,10 @@ pub async fn web(
         .get("User-Agent")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let server_id = generate_visitor_id(&token, &ip, user_agent);
+    let server_id = generate_visitor_id(&token, &ip, user_agent).await;
 
     let url = valid_data.get("url").and_then(|v| v.as_str()).unwrap_or("");
-    if should_debounce(server_id, url) {
+    if should_debounce(server_id, url).await {
         return success_response(warnings);
     }
 

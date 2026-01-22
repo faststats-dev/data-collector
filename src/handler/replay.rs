@@ -4,7 +4,6 @@ use super::{
 use crate::batch_queue::{FailedRequest, QueuedEvent, RequestType};
 use crate::models::AppState;
 use crate::tinybird::ReplayRow;
-use crate::utils::RrwebEvent;
 use axum::body::Bytes;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
@@ -13,6 +12,19 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
 use uuid::Uuid;
+
+fn is_valid_rrweb_event(event: &Value) -> bool {
+    let obj = match event.as_object() {
+        Some(o) => o,
+        None => return false,
+    };
+
+    if obj.get("timestamp").and_then(|v| v.as_u64()).is_none() {
+        return false;
+    }
+
+    matches!(obj.get("type").and_then(|v| v.as_u64()), Some(t) if t <= 6)
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -82,7 +94,7 @@ pub async fn replay(
     let valid_events: Vec<Value> = parsed
         .events
         .into_iter()
-        .filter(|event| serde_json::from_value::<RrwebEvent>(event.clone()).is_ok())
+        .filter(is_valid_rrweb_event)
         .collect();
 
     if valid_events.is_empty() {

@@ -14,11 +14,13 @@ use tokio::sync::mpsc;
 const MAX_RETRIES: u32 = 5;
 const INITIAL_RETRY_DELAY: Duration = Duration::from_secs(1);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
-const BATCH_WINDOW: Duration = Duration::from_secs(60);
+const BATCH_WINDOW: Duration = Duration::from_secs(5);
 const BACKUP_REPLAY_INTERVAL: Duration = Duration::from_secs(600);
-const MAX_REPLAY_BATCH_SIZE: i64 = 500;
+const MAX_REPLAY_BATCH_SIZE: i64 = 50;
 const MAX_BACKUP_AGE_SECS: i64 = 86400;
 const MAX_REQUEST_AGE_SECS: i64 = 86400;
+const CHANNEL_CAPACITY: usize = 10_000;
+const CHANNEL_BACKPRESSURE_THRESHOLD: usize = 8_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -384,12 +386,18 @@ pub struct BatchQueue {
 }
 
 impl BatchQueue {
+    fn is_channel_under_pressure(&self) -> bool {
+        self.sender.capacity() < (CHANNEL_CAPACITY - CHANNEL_BACKPRESSURE_THRESHOLD)
+    }
+}
+
+impl BatchQueue {
     pub async fn new(
         tinybird: Arc<TinybirdClient>,
         backup_path: &Path,
     ) -> Result<Arc<Self>, sqlx::Error> {
         let backup_store = Arc::new(BackupStore::new(backup_path).await?);
-        let (sender, receiver) = mpsc::channel(10000);
+        let (sender, receiver) = mpsc::channel(CHANNEL_CAPACITY);
         let in_memory_batch = Arc::new(Mutex::new(InMemoryBatch::default()));
 
         let queue = Arc::new(Self {
@@ -422,8 +430,16 @@ impl BatchQueue {
         let queue = Arc::clone(self);
         tokio::spawn(async move {
             while let Some(event) = receiver.recv().await {
-                let mut batch = queue.in_memory_batch.lock().await;
-                batch.push(event);
+                let should_flush = {
+                    let mut batch = queue.in_memory_batch.lock().await;
+                    batch.push(event);
+                    queue.is_channel_under_pressure() && batch.total_count() >= 100
+                };
+
+                if should_flush {
+                    eprintln!("Channel backpressure detected, triggering early flush");
+                    queue.flush_in_memory_batch().await;
+                }
             }
         });
     }
@@ -481,11 +497,12 @@ impl BatchQueue {
         Duration::from_millis(delay_with_jitter)
     }
 
-    async fn send_batch_with_retry(&self, mut batch: InMemoryBatch) {
+    async fn send_batch_with_retry(&self, batch: InMemoryBatch) {
         let mut retry_count = 0u32;
+        let mut current_batch = batch;
 
         loop {
-            let result = self.send_grouped_batch(&batch).await;
+            let result = self.send_grouped_batch(current_batch).await;
 
             if !result.has_failures() {
                 return;
@@ -514,13 +531,13 @@ impl BatchQueue {
                 return;
             }
 
-            batch = result.into_in_memory_batch();
+            current_batch = result.into_in_memory_batch();
 
             let delay = Self::calculate_retry_delay(retry_count);
             eprintln!(
                 "Batch send failed (attempt {}), retrying {} events in {:?}",
                 retry_count,
-                batch.total_count(),
+                current_batch.total_count(),
                 delay
             );
 
@@ -528,45 +545,51 @@ impl BatchQueue {
         }
     }
 
-    async fn send_grouped_batch(&self, batch: &InMemoryBatch) -> BatchSendResult {
+    async fn send_grouped_batch(&self, batch: InMemoryBatch) -> BatchSendResult {
         let mut result = BatchSendResult::default();
+
+        let InMemoryBatch {
+            events,
+            errors,
+            error_trackings,
+            web_vitals,
+            replays,
+        } = batch;
 
         let (events_res, errors_res, error_trackings_res, web_vitals_res, replays_res) = tokio::join!(
             async {
-                if batch.events.is_empty() {
+                if events.is_empty() {
                     Ok(())
                 } else {
-                    self.tinybird.insert_events(&batch.events).await
+                    self.tinybird.insert_events(&events).await
                 }
             },
             async {
-                if batch.errors.is_empty() {
+                if errors.is_empty() {
                     Ok(())
                 } else {
-                    self.tinybird.insert_errors(&batch.errors).await
+                    self.tinybird.insert_errors(&errors).await
                 }
             },
             async {
-                if batch.error_trackings.is_empty() {
+                if error_trackings.is_empty() {
                     Ok(())
                 } else {
-                    self.tinybird
-                        .insert_error_trackings(&batch.error_trackings)
-                        .await
+                    self.tinybird.insert_error_trackings(&error_trackings).await
                 }
             },
             async {
-                if batch.web_vitals.is_empty() {
+                if web_vitals.is_empty() {
                     Ok(())
                 } else {
-                    self.tinybird.insert_web_vitals(&batch.web_vitals).await
+                    self.tinybird.insert_web_vitals(&web_vitals).await
                 }
             },
             async {
-                if batch.replays.is_empty() {
+                if replays.is_empty() {
                     Ok(())
                 } else {
-                    self.tinybird.insert_replays(&batch.replays).await
+                    self.tinybird.insert_replays(&replays).await
                 }
             },
         );
@@ -575,35 +598,35 @@ impl BatchQueue {
             if !e.is_transient() {
                 result.had_permanent_failure = true;
             }
-            result.failed_events = batch.events.clone();
+            result.failed_events = events;
         }
 
         if let Err(e) = errors_res {
             if !e.is_transient() {
                 result.had_permanent_failure = true;
             }
-            result.failed_errors = batch.errors.clone();
+            result.failed_errors = errors;
         }
 
         if let Err(e) = error_trackings_res {
             if !e.is_transient() {
                 result.had_permanent_failure = true;
             }
-            result.failed_error_trackings = batch.error_trackings.clone();
+            result.failed_error_trackings = error_trackings;
         }
 
         if let Err(e) = web_vitals_res {
             if !e.is_transient() {
                 result.had_permanent_failure = true;
             }
-            result.failed_web_vitals = batch.web_vitals.clone();
+            result.failed_web_vitals = web_vitals;
         }
 
         if let Err(e) = replays_res {
             if !e.is_transient() {
                 result.had_permanent_failure = true;
             }
-            result.failed_replays = batch.replays.clone();
+            result.failed_replays = replays;
         }
 
         result
@@ -674,7 +697,7 @@ impl BatchQueue {
             batch.push(event);
         }
 
-        let result = self.send_grouped_batch(&batch).await;
+        let result = self.send_grouped_batch(batch).await;
 
         if !result.has_failures() {
             if let Err(e) = self.backup_store.remove_backed_up_events(&event_ids).await {
@@ -1158,8 +1181,8 @@ mod tests {
         }
 
         #[test]
-        fn test_batch_window_is_60_seconds() {
-            assert_eq!(BATCH_WINDOW, Duration::from_secs(60));
+        fn test_batch_window_is_5_seconds() {
+            assert_eq!(BATCH_WINDOW, Duration::from_secs(5));
         }
 
         #[test]

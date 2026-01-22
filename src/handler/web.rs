@@ -1,7 +1,7 @@
 use super::{
-    HandlerResponse, enrich_data_with_country, error_response, get_authorization,
-    get_request_origin, insert_error_entries, insert_event, load_project_context, success_response,
-    validate_domain,
+    EncodingQuery, HandlerResponse, decompress_body, enrich_data_with_country, error_response,
+    get_authorization, get_request_origin, insert_error_entries, insert_event,
+    load_project_context, success_response, validate_domain,
 };
 use crate::batch_queue::{FailedRequest, RequestType};
 use crate::models::{AppState, ErrorTracking};
@@ -68,8 +68,14 @@ fn get_client_ip(headers: &HeaderMap) -> String {
 pub async fn web(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(query): Query<EncodingQuery>,
     body: Bytes,
 ) -> impl IntoResponse {
+    let body = match decompress_body(&body, query.encoding.as_deref()) {
+        Ok(b) => b,
+        Err(e) => return error_response(StatusCode::BAD_REQUEST, &e),
+    };
+
     let header_token = get_authorization(&headers);
 
     let parsed: WebRequest = match serde_json::from_slice(&body) {

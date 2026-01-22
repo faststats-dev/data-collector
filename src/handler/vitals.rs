@@ -1,10 +1,10 @@
-use super::{HandlerResponse, error_response, get_authorization};
+use super::{EncodingQuery, HandlerResponse, decompress_body, error_response, get_authorization};
 use crate::batch_queue::{BatchQueue, FailedRequest, QueuedEvent, RequestType};
 use crate::models::AppState;
 use crate::tinybird::WebVitalRow;
 use axum::Json;
 use axum::body::Bytes;
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use serde::Deserialize;
@@ -43,8 +43,13 @@ pub struct WebVitalRequest {
 pub async fn vitals(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(query): Query<EncodingQuery>,
     body: Bytes,
 ) -> impl IntoResponse {
+    let body = match decompress_body(&body, query.encoding.as_deref()) {
+        Ok(b) => b,
+        Err(e) => return error_response(StatusCode::BAD_REQUEST, &e),
+    };
     let token = match get_authorization(&headers) {
         Some(t) => t,
         None => return error_response(StatusCode::UNAUTHORIZED, "Unauthorized"),

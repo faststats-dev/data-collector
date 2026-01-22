@@ -52,7 +52,11 @@ pub async fn replay(
 
     let context = match load_project_context(&state.pool, &parsed.token).await {
         Ok(ctx) => ctx,
-        Err(_) => {
+        Err(e) => {
+            if e.0 == StatusCode::UNAUTHORIZED {
+                return e;
+            }
+
             let failed = FailedRequest {
                 request_type: RequestType::Replay,
                 token: parsed.token.clone(),

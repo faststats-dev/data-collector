@@ -24,7 +24,11 @@ pub async fn collect(
 
     let ctx = match load_project_context(&state.pool, &token).await {
         Ok(ctx) => ctx,
-        Err(_) => {
+        Err(e) => {
+            if e.0 == StatusCode::UNAUTHORIZED {
+                return e;
+            }
+
             let country = headers
                 .get("CF-IPCountry")
                 .and_then(|v| v.to_str().ok())

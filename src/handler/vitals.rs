@@ -164,6 +164,11 @@ async fn insert_web_vitals(
     tracking_ctx: TrackingContext,
 ) -> Result<(), HandlerResponse> {
     let now = chrono::Utc::now();
+    let metadata = req.metadata.as_ref();
+    let device = metadata.and_then(|m| m.device.clone());
+    let os = metadata.and_then(|m| m.os.clone());
+    let browser = metadata.and_then(|m| m.browser.clone());
+    let url = metadata.and_then(|m| m.url.clone()).unwrap_or_default();
 
     for vital in &req.vitals {
         let attributes_str = vital
@@ -177,24 +182,11 @@ async fn insert_web_vitals(
             project_id,
             metric: vital.metric.clone(),
             value: vital.value,
-            device: req
-                .metadata
-                .as_ref()
-                .and_then(|m| m.device.as_ref())
-                .cloned(),
+            device: device.clone(),
             country: country.clone(),
-            os: req.metadata.as_ref().and_then(|m| m.os.as_ref()).cloned(),
-            browser: req
-                .metadata
-                .as_ref()
-                .and_then(|m| m.browser.as_ref())
-                .cloned(),
-            url: req
-                .metadata
-                .as_ref()
-                .and_then(|m| m.url.as_ref())
-                .cloned()
-                .unwrap_or_default(),
+            os: os.clone(),
+            browser: browser.clone(),
+            url: url.clone(),
             attributes: attributes_str,
             session_id: req.session_id.clone(),
             created_at: now,

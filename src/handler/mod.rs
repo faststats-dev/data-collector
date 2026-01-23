@@ -551,6 +551,17 @@ async fn process_vitals_request(
     }
 
     let now = chrono::Utc::now();
+    let metadata = req.metadata.as_ref();
+    let device = metadata.and_then(|m| m.device.clone());
+    let os = metadata.and_then(|m| m.os.clone());
+    let browser = metadata.and_then(|m| m.browser.clone());
+    let url = metadata.and_then(|m| m.url.clone()).unwrap_or_default();
+
+    let tracking_ctx = TrackingContext {
+        owner_id: ctx.owner_id.clone(),
+        token: request.token.clone(),
+        organization_id: ctx.organization_id.clone(),
+    };
 
     for vital in &req.vitals {
         let attributes_str = vital
@@ -564,39 +575,20 @@ async fn process_vitals_request(
             project_id: ctx.project_id,
             metric: vital.metric.clone(),
             value: vital.value,
-            device: req
-                .metadata
-                .as_ref()
-                .and_then(|m| m.device.as_ref())
-                .cloned(),
+            device: device.clone(),
             country: request.country.clone(),
-            os: req.metadata.as_ref().and_then(|m| m.os.as_ref()).cloned(),
-            browser: req
-                .metadata
-                .as_ref()
-                .and_then(|m| m.browser.as_ref())
-                .cloned(),
-            url: req
-                .metadata
-                .as_ref()
-                .and_then(|m| m.url.as_ref())
-                .cloned()
-                .unwrap_or_default(),
+            os: os.clone(),
+            browser: browser.clone(),
+            url: url.clone(),
             attributes: attributes_str,
             session_id: req.session_id.clone(),
             created_at: now,
         };
 
-        let tracking_ctx = TrackingContext {
-            owner_id: ctx.owner_id.clone(),
-            token: request.token.clone(),
-            organization_id: ctx.organization_id.clone(),
-        };
-
         batch_queue
             .queue_event(QueuedEvent::WebVital {
                 row,
-                tracking: Some(tracking_ctx),
+                tracking: Some(tracking_ctx.clone()),
             })
             .await
             .map_err(|_| "Failed to queue web vital".to_string())?;

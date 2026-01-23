@@ -3,7 +3,11 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+#[cfg(debug_assertions)]
+const POLAR_API_URL: &str = "https://sandbox-api.polar.sh";
+#[cfg(not(debug_assertions))]
 const POLAR_API_URL: &str = "https://api.polar.sh";
+
 const MAX_EVENTS_PER_REQUEST: usize = 500;
 
 #[derive(Clone)]

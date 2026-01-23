@@ -189,13 +189,10 @@ impl InMemoryBatch {
             }
         }
 
-        for (row, ctx) in &self.replays {
+        for (_, ctx) in &self.replays {
             if let Some(ctx) = ctx {
                 let counts = usage_by_owner.entry(ctx.owner_id.clone()).or_default();
-                let event_count = serde_json::from_str::<Vec<serde_json::Value>>(&row.events)
-                    .map(|v| v.len() as u64)
-                    .unwrap_or(1);
-                counts.session_replays += event_count;
+                counts.session_replays += 1;
                 token_by_owner
                     .entry(ctx.owner_id.clone())
                     .or_insert_with(|| ctx.token.clone());

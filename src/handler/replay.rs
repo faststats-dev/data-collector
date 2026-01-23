@@ -114,6 +114,7 @@ pub async fn replay(
     let tracking_ctx = TrackingContext {
         owner_id: context.owner_id,
         token: parsed.token.clone(),
+        organization_id: context.organization_id,
     };
 
     let replay_row = ReplayRow {

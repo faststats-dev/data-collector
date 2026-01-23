@@ -25,6 +25,13 @@ const CHANNEL_CAPACITY: usize = 10_000;
 const CHANNEL_BACKPRESSURE_THRESHOLD: usize = 8_000;
 const MAX_BATCH_SIZE: usize = 5000;
 
+/// Aggregated usage data: (usage_by_owner, token_by_owner, org_by_owner)
+type AggregatedUsage = (
+    HashMap<String, UsageCounts>,
+    HashMap<String, String>,
+    HashMap<String, Option<String>>,
+);
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum RequestType {
@@ -50,6 +57,8 @@ pub struct FailedRequest {
 pub struct TrackingContext {
     pub owner_id: String,
     pub token: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub organization_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -155,9 +164,10 @@ impl InMemoryBatch {
     }
 
     /// Aggregate usage counts by owner_id for billing
-    fn aggregate_usage(&self) -> (HashMap<String, UsageCounts>, HashMap<String, String>) {
+    fn aggregate_usage(&self) -> AggregatedUsage {
         let mut usage_by_owner: HashMap<String, UsageCounts> = HashMap::new();
         let mut token_by_owner: HashMap<String, String> = HashMap::new();
+        let mut org_by_owner: HashMap<String, Option<String>> = HashMap::new();
 
         for (_, ctx) in &self.events {
             if let Some(ctx) = ctx {
@@ -166,6 +176,9 @@ impl InMemoryBatch {
                 token_by_owner
                     .entry(ctx.owner_id.clone())
                     .or_insert_with(|| ctx.token.clone());
+                org_by_owner
+                    .entry(ctx.owner_id.clone())
+                    .or_insert_with(|| ctx.organization_id.clone());
             }
         }
 
@@ -176,6 +189,9 @@ impl InMemoryBatch {
                 token_by_owner
                     .entry(ctx.owner_id.clone())
                     .or_insert_with(|| ctx.token.clone());
+                org_by_owner
+                    .entry(ctx.owner_id.clone())
+                    .or_insert_with(|| ctx.organization_id.clone());
             }
         }
 
@@ -186,6 +202,9 @@ impl InMemoryBatch {
                 token_by_owner
                     .entry(ctx.owner_id.clone())
                     .or_insert_with(|| ctx.token.clone());
+                org_by_owner
+                    .entry(ctx.owner_id.clone())
+                    .or_insert_with(|| ctx.organization_id.clone());
             }
         }
 
@@ -196,10 +215,13 @@ impl InMemoryBatch {
                 token_by_owner
                     .entry(ctx.owner_id.clone())
                     .or_insert_with(|| ctx.token.clone());
+                org_by_owner
+                    .entry(ctx.owner_id.clone())
+                    .or_insert_with(|| ctx.organization_id.clone());
             }
         }
 
-        (usage_by_owner, token_by_owner)
+        (usage_by_owner, token_by_owner, org_by_owner)
     }
 }
 
@@ -574,7 +596,7 @@ impl BatchQueue {
         eprintln!("Flushing in-memory batch of {} events", total);
 
         // Aggregate usage before sending (we need the data before batch is consumed)
-        let (usage_by_owner, token_by_owner) = batch.aggregate_usage();
+        let (usage_by_owner, token_by_owner, org_by_owner) = batch.aggregate_usage();
 
         self.send_batch_with_retry(batch).await;
 
@@ -584,7 +606,10 @@ impl BatchQueue {
         {
             let polar = Arc::clone(polar);
             tokio::spawn(async move {
-                match polar.ingest_usage(&usage_by_owner, &token_by_owner).await {
+                match polar
+                    .ingest_usage(&usage_by_owner, &token_by_owner, &org_by_owner)
+                    .await
+                {
                     Ok(response) => {
                         eprintln!(
                             "Polar usage ingested: {} inserted, {} duplicates",

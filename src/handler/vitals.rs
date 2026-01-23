@@ -55,7 +55,8 @@ pub async fn vitals(
         None => return error_response(StatusCode::UNAUTHORIZED, "Unauthorized"),
     };
 
-    let (project_id, owner_id) = match get_project_info(&state.pool, &token).await {
+    let (project_id, owner_id, organization_id) = match get_project_info(&state.pool, &token).await
+    {
         Ok(info) => info,
         Err(is_db_error) => {
             if is_db_error {
@@ -91,6 +92,7 @@ pub async fn vitals(
     let tracking_ctx = TrackingContext {
         owner_id,
         token: token.clone(),
+        organization_id,
     };
 
     let req: WebVitalRequest = match serde_json::from_slice(&body) {
@@ -117,20 +119,40 @@ pub async fn vitals(
 }
 
 /// Returns Ok((project_id, owner_id)) on success, Err(true) for DB errors, Err(false) for not found
-async fn get_project_info(pool: &sqlx::PgPool, token: &str) -> Result<(Uuid, String), bool> {
-    let row = sqlx::query("SELECT id, owner_id FROM project WHERE token = $1")
-        .bind(token)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| true)?; // DB error
+async fn get_project_info(
+    pool: &sqlx::PgPool,
+    token: &str,
+) -> Result<(Uuid, String, Option<String>), bool> {
+    let row = sqlx::query(
+        "
+        SELECT
+            p.id,
+            CASE
+                WHEN u.id IS NOT NULL THEN p.owner_id
+                WHEN o.id IS NOT NULL THEN m.user_id
+                ELSE p.owner_id
+            END AS billing_customer_id,
+            o.id AS organization_id
+        FROM project p
+        LEFT JOIN \"user\" u ON u.id = p.owner_id
+        LEFT JOIN organization o ON o.id = p.owner_id
+        LEFT JOIN member m ON m.organization_id = o.id AND m.role = 'owner'
+        WHERE p.token = $1
+        ",
+    )
+    .bind(token)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| true)?;
 
     match row {
         Some(row) => {
             let id: Uuid = row.try_get("id").map_err(|_| true)?;
-            let owner_id: String = row.try_get("owner_id").map_err(|_| true)?;
-            Ok((id, owner_id))
+            let owner_id: String = row.try_get("billing_customer_id").map_err(|_| true)?;
+            let organization_id: Option<String> = row.try_get("organization_id").unwrap_or(None);
+            Ok((id, owner_id, organization_id))
         }
-        None => Err(false), // Not found
+        None => Err(false),
     }
 }
 

@@ -78,21 +78,32 @@ impl PolarClient {
     /// # Arguments
     /// * `usage_by_owner` - Map of owner_id (external_customer_id) to their usage counts
     /// * `token_by_owner` - Map of owner_id to the project token used (for metadata)
+    /// * `org_by_owner` - Map of owner_id to optional organization_id (for metadata)
     pub async fn ingest_usage(
         &self,
         usage_by_owner: &HashMap<String, UsageCounts>,
         token_by_owner: &HashMap<String, String>,
+        org_by_owner: &HashMap<String, Option<String>>,
     ) -> Result<EventsIngestResponse, PolarError> {
         let mut events = Vec::new();
         let timestamp = Utc::now();
 
         for (owner_id, counts) in usage_by_owner {
             let token = token_by_owner.get(owner_id).cloned();
-            let metadata = token.map(|t| {
+            let org_id = org_by_owner.get(owner_id).and_then(|o| o.clone());
+            let metadata = {
                 let mut map = HashMap::new();
-                map.insert("token".to_string(), serde_json::Value::String(t));
-                map
-            });
+                if let Some(t) = token {
+                    map.insert("token".to_string(), serde_json::Value::String(t));
+                }
+                if let Some(org) = org_id {
+                    map.insert(
+                        "organization_id".to_string(),
+                        serde_json::Value::String(org),
+                    );
+                }
+                if map.is_empty() { None } else { Some(map) }
+            };
 
             for _ in 0..counts.events {
                 events.push(EventCreateExternalCustomer {

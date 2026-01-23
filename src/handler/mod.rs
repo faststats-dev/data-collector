@@ -98,6 +98,7 @@ pub fn success_response(warnings: HashMap<String, String>) -> HandlerResponse {
 pub struct ProjectContext {
     pub project_id: Uuid,
     pub owner_id: String,
+    pub organization_id: Option<String>,
     pub domain: Option<String>,
     pub datasources: HashMap<String, DataSource>,
     pub error_tracking_enabled: bool,
@@ -122,9 +123,18 @@ pub async fn load_project_context(
             d.allow_float,
             d.min_value,
             d.max_value,
-            d.is_array
+            d.is_array,
+            CASE
+                WHEN u.id IS NOT NULL THEN p.owner_id
+                WHEN o.id IS NOT NULL THEN m.user_id
+                ELSE p.owner_id
+            END AS billing_customer_id,
+            o.id AS organization_id
         FROM project p
         LEFT JOIN data_sources d ON d.project_id = p.id
+        LEFT JOIN \"user\" u ON u.id = p.owner_id
+        LEFT JOIN organization o ON o.id = p.owner_id
+        LEFT JOIN member m ON m.organization_id = o.id AND m.role = 'owner'
         WHERE p.token = $1
         ",
     )
@@ -138,7 +148,10 @@ pub async fn load_project_context(
     }
 
     let project_id: Uuid = rows[0].try_get("id").unwrap();
-    let owner_id: String = rows[0].try_get("owner_id").unwrap();
+    let owner_id: String = rows[0]
+        .try_get("billing_customer_id")
+        .unwrap_or_else(|_| rows[0].try_get("owner_id").unwrap());
+    let organization_id: Option<String> = rows[0].try_get("organization_id").unwrap_or(None);
     let domain: Option<String> = rows[0].try_get("domain").unwrap_or(None);
     let error_tracking_enabled: bool = rows[0].try_get("error_tracking_enabled").unwrap_or(false);
 
@@ -176,6 +189,7 @@ pub async fn load_project_context(
     Ok(ProjectContext {
         project_id,
         owner_id,
+        organization_id,
         domain,
         datasources,
         error_tracking_enabled,
@@ -365,6 +379,7 @@ async fn process_collect_request(
     let tracking_ctx = TrackingContext {
         owner_id: ctx.owner_id.clone(),
         token: request.token.clone(),
+        organization_id: ctx.organization_id.clone(),
     };
 
     let data_entry_id = insert_event(
@@ -458,6 +473,7 @@ async fn process_web_request(
     let tracking_ctx = TrackingContext {
         owner_id: ctx.owner_id.clone(),
         token: token.clone(),
+        organization_id: ctx.organization_id.clone(),
     };
 
     let data_entry_id = insert_event(
@@ -574,6 +590,7 @@ async fn process_vitals_request(
         let tracking_ctx = TrackingContext {
             owner_id: ctx.owner_id.clone(),
             token: request.token.clone(),
+            organization_id: ctx.organization_id.clone(),
         };
 
         batch_queue
@@ -614,6 +631,7 @@ async fn process_replay_request(
     let tracking_ctx = TrackingContext {
         owner_id: ctx.owner_id,
         token: parsed.token.clone(),
+        organization_id: ctx.organization_id,
     };
 
     let replay_row = crate::tinybird::ReplayRow {

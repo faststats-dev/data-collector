@@ -76,6 +76,7 @@ pub async fn collect(
     let tracking_ctx = TrackingContext {
         owner_id: ctx.owner_id.clone(),
         token,
+        organization_id: ctx.organization_id.clone(),
     };
 
     let data_entry_id = match insert_event(

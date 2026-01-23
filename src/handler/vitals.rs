@@ -1,5 +1,5 @@
 use super::{EncodingQuery, HandlerResponse, decompress_body, error_response, get_authorization};
-use crate::batch_queue::{BatchQueue, FailedRequest, QueuedEvent, RequestType};
+use crate::batch_queue::{BatchQueue, FailedRequest, QueuedEvent, RequestType, TrackingContext};
 use crate::models::AppState;
 use crate::tinybird::WebVitalRow;
 use axum::Json;
@@ -55,8 +55,9 @@ pub async fn vitals(
         None => return error_response(StatusCode::UNAUTHORIZED, "Unauthorized"),
     };
 
-    let project_id = match get_project_id(&state.pool, &token).await {
-        Ok(id) => id,
+    let (project_id, owner_id, organization_id) = match get_project_info(&state.pool, &token).await
+    {
+        Ok(info) => info,
         Err(is_db_error) => {
             if is_db_error {
                 let country = headers
@@ -88,6 +89,12 @@ pub async fn vitals(
         }
     };
 
+    let tracking_ctx = TrackingContext {
+        owner_id,
+        token: token.clone(),
+        organization_id,
+    };
+
     let req: WebVitalRequest = match serde_json::from_slice(&body) {
         Ok(req) => req,
         Err(_) => return error_response(StatusCode::BAD_REQUEST, "Invalid JSON"),
@@ -102,24 +109,50 @@ pub async fn vitals(
         .and_then(|value| value.to_str().ok())
         .map(String::from);
 
-    if let Err(e) = insert_web_vitals(&state.batch_queue, project_id, &req, country).await {
+    if let Err(e) =
+        insert_web_vitals(&state.batch_queue, project_id, &req, country, tracking_ctx).await
+    {
         return e;
     }
 
     (StatusCode::OK, Json(json!({ "status": "success" })))
 }
 
-/// Returns Ok(project_id) on success, Err(true) for DB errors, Err(false) for not found
-async fn get_project_id(pool: &sqlx::PgPool, token: &str) -> Result<Uuid, bool> {
-    let row = sqlx::query("SELECT id FROM project WHERE token = $1")
-        .bind(token)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| true)?; // DB error
+/// Returns Ok((project_id, owner_id)) on success, Err(true) for DB errors, Err(false) for not found
+async fn get_project_info(
+    pool: &sqlx::PgPool,
+    token: &str,
+) -> Result<(Uuid, String, Option<String>), bool> {
+    let row = sqlx::query(
+        "
+        SELECT
+            p.id,
+            CASE
+                WHEN u.id IS NOT NULL THEN p.owner_id
+                WHEN o.id IS NOT NULL THEN m.user_id
+                ELSE p.owner_id
+            END AS billing_customer_id,
+            o.id AS organization_id
+        FROM project p
+        LEFT JOIN \"user\" u ON u.id = p.owner_id
+        LEFT JOIN organization o ON o.id = p.owner_id
+        LEFT JOIN member m ON m.organization_id = o.id AND m.role = 'owner'
+        WHERE p.token = $1
+        ",
+    )
+    .bind(token)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| true)?;
 
     match row {
-        Some(row) => row.try_get("id").map_err(|_| true),
-        None => Err(false), // Not found
+        Some(row) => {
+            let id: Uuid = row.try_get("id").map_err(|_| true)?;
+            let owner_id: String = row.try_get("billing_customer_id").map_err(|_| true)?;
+            let organization_id: Option<String> = row.try_get("organization_id").unwrap_or(None);
+            Ok((id, owner_id, organization_id))
+        }
+        None => Err(false),
     }
 }
 
@@ -128,8 +161,14 @@ async fn insert_web_vitals(
     project_id: Uuid,
     req: &WebVitalRequest,
     country: Option<String>,
+    tracking_ctx: TrackingContext,
 ) -> Result<(), HandlerResponse> {
     let now = chrono::Utc::now();
+    let metadata = req.metadata.as_ref();
+    let device = metadata.and_then(|m| m.device.clone());
+    let os = metadata.and_then(|m| m.os.clone());
+    let browser = metadata.and_then(|m| m.browser.clone());
+    let url = metadata.and_then(|m| m.url.clone()).unwrap_or_default();
 
     for vital in &req.vitals {
         let attributes_str = vital
@@ -143,31 +182,21 @@ async fn insert_web_vitals(
             project_id,
             metric: vital.metric.clone(),
             value: vital.value,
-            device: req
-                .metadata
-                .as_ref()
-                .and_then(|m| m.device.as_ref())
-                .cloned(),
+            device: device.clone(),
             country: country.clone(),
-            os: req.metadata.as_ref().and_then(|m| m.os.as_ref()).cloned(),
-            browser: req
-                .metadata
-                .as_ref()
-                .and_then(|m| m.browser.as_ref())
-                .cloned(),
-            url: req
-                .metadata
-                .as_ref()
-                .and_then(|m| m.url.as_ref())
-                .cloned()
-                .unwrap_or_default(),
+            os: os.clone(),
+            browser: browser.clone(),
+            url: url.clone(),
             attributes: attributes_str,
             session_id: req.session_id.clone(),
             created_at: now,
         };
 
         batch_queue
-            .queue_event(QueuedEvent::WebVital(row))
+            .queue_event(QueuedEvent::WebVital {
+                row,
+                tracking: Some(tracking_ctx.clone()),
+            })
             .await
             .map_err(|e| {
                 eprintln!("Failed to queue web vital: {}", e);

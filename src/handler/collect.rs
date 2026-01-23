@@ -2,7 +2,7 @@ use super::{
     enrich_data_with_country, error_response, get_authorization, insert_error_entries,
     insert_event, load_project_context, success_response,
 };
-use crate::batch_queue::{FailedRequest, RequestType};
+use crate::batch_queue::{FailedRequest, RequestType, TrackingContext};
 use crate::models::{AppState, Request};
 use crate::validation::validate_and_filter_payload;
 use axum::body::Bytes;
@@ -73,11 +73,24 @@ pub async fn collect(
 
     let (valid_data, warnings) = validate_and_filter_payload(&data_map, &ctx.datasources);
 
-    let data_entry_id =
-        match insert_event(&state.batch_queue, ctx.project_id, server_id, &valid_data).await {
-            Ok(id) => id,
-            Err(e) => return e,
-        };
+    let tracking_ctx = TrackingContext {
+        owner_id: ctx.owner_id.clone(),
+        token,
+        organization_id: ctx.organization_id.clone(),
+    };
+
+    let data_entry_id = match insert_event(
+        &state.batch_queue,
+        ctx.project_id,
+        server_id,
+        &valid_data,
+        Some(tracking_ctx.clone()),
+    )
+    .await
+    {
+        Ok(id) => id,
+        Err(e) => return e,
+    };
 
     if !ctx.error_tracking_enabled {
         return success_response(warnings);
@@ -85,8 +98,14 @@ pub async fn collect(
 
     if let Some(errors) = req.errors {
         for error in errors {
-            if let Err(e) =
-                insert_error_entries(&state.batch_queue, ctx.project_id, data_entry_id, error).await
+            if let Err(e) = insert_error_entries(
+                &state.batch_queue,
+                ctx.project_id,
+                data_entry_id,
+                error,
+                Some(tracking_ctx.clone()),
+            )
+            .await
             {
                 return e;
             }

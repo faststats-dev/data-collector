@@ -3,7 +3,7 @@ use super::{
     get_authorization, get_request_origin, insert_error_entries, insert_event,
     load_project_context, success_response, validate_domain,
 };
-use crate::batch_queue::{FailedRequest, RequestType};
+use crate::batch_queue::{FailedRequest, RequestType, TrackingContext};
 use crate::models::{AppState, ErrorTracking};
 use crate::salt::get_daily_salt;
 use crate::utils::debounce::should_debounce;
@@ -24,6 +24,7 @@ struct WebRequest {
     token: Option<String>,
     data: HashMap<String, Value>,
     errors: Option<Vec<ErrorTracking>>,
+    #[serde(rename = "sessionId")]
     session_id: Option<String>,
 }
 
@@ -153,28 +154,49 @@ pub async fn web(
     let server_id = generate_visitor_id(&token, &ip, user_agent).await;
 
     let url = valid_data.get("url").and_then(|v| v.as_str()).unwrap_or("");
-    if should_debounce(server_id, url).await {
-        return success_response(warnings);
-    }
+    let is_debounced = should_debounce(server_id, url).await;
 
-    let data_entry_id =
-        match insert_event(&state.batch_queue, ctx.project_id, server_id, &valid_data).await {
+    let tracking_ctx = TrackingContext {
+        owner_id: ctx.owner_id.clone(),
+        token,
+        organization_id: ctx.organization_id.clone(),
+    };
+
+    // Only insert pageview event if not debounced
+    let data_entry_id = if is_debounced {
+        Uuid::nil()
+    } else {
+        match insert_event(
+            &state.batch_queue,
+            ctx.project_id,
+            server_id,
+            &valid_data,
+            Some(tracking_ctx.clone()),
+        )
+        .await
+        {
             Ok(id) => id,
             Err(e) => return e,
-        };
+        }
+    };
 
-    if !ctx.error_tracking_enabled {
-        return success_response(warnings);
-    }
-
-    if let Some(errors) = parsed.errors {
+    // Always process errors, even if pageview was debounced
+    if ctx.error_tracking_enabled
+        && let Some(errors) = parsed.errors
+    {
         for mut error in errors {
             // Use error's sessionId if present, otherwise fall back to request-level sessionId
             if error.session_id.is_none() {
                 error.session_id = session_id.clone();
             }
-            if let Err(e) =
-                insert_error_entries(&state.batch_queue, ctx.project_id, data_entry_id, error).await
+            if let Err(e) = insert_error_entries(
+                &state.batch_queue,
+                ctx.project_id,
+                data_entry_id,
+                error,
+                Some(tracking_ctx.clone()),
+            )
+            .await
             {
                 return e;
             }

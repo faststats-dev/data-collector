@@ -1,7 +1,7 @@
 use super::{
     EncodingQuery, decompress_body, error_response, load_project_context, success_response,
 };
-use crate::batch_queue::{FailedRequest, QueuedEvent, RequestType};
+use crate::batch_queue::{FailedRequest, QueuedEvent, RequestType, TrackingContext};
 use crate::models::AppState;
 use crate::tinybird::ReplayRow;
 use axum::body::Bytes;
@@ -111,6 +111,12 @@ pub async fn replay(
         }
     };
 
+    let tracking_ctx = TrackingContext {
+        owner_id: context.owner_id,
+        token: parsed.token.clone(),
+        organization_id: context.organization_id,
+    };
+
     let replay_row = ReplayRow {
         id: Uuid::new_v4(),
         project_id: context.project_id,
@@ -121,7 +127,10 @@ pub async fn replay(
 
     if let Err(e) = state
         .batch_queue
-        .queue_event(QueuedEvent::Replay(replay_row))
+        .queue_event(QueuedEvent::Replay {
+            row: replay_row,
+            tracking: Some(tracking_ctx),
+        })
         .await
     {
         eprintln!("Failed to queue replay: {}", e);

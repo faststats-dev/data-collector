@@ -2,7 +2,7 @@ use super::{
     enrich_data_with_country, error_response, get_authorization, insert_error_entries,
     insert_event, load_project_context, success_response,
 };
-use crate::batch_queue::{FailedRequest, RequestType};
+use crate::batch_queue::{FailedRequest, RequestType, TrackingContext};
 use crate::models::{AppState, Request};
 use crate::validation::validate_and_filter_payload;
 use axum::body::Bytes;
@@ -83,10 +83,21 @@ pub async fn collect(
         return success_response(warnings);
     }
 
+    let tracking_ctx = TrackingContext {
+        owner_id: ctx.owner_id,
+        token,
+    };
+
     if let Some(errors) = req.errors {
         for error in errors {
-            if let Err(e) =
-                insert_error_entries(&state.batch_queue, ctx.project_id, data_entry_id, error).await
+            if let Err(e) = insert_error_entries(
+                &state.batch_queue,
+                ctx.project_id,
+                data_entry_id,
+                error,
+                Some(tracking_ctx.clone()),
+            )
+            .await
             {
                 return e;
             }

@@ -1,5 +1,5 @@
 use super::{EncodingQuery, HandlerResponse, decompress_body, error_response, get_authorization};
-use crate::batch_queue::{BatchQueue, FailedRequest, QueuedEvent, RequestType};
+use crate::batch_queue::{BatchQueue, FailedRequest, QueuedEvent, RequestType, TrackingContext};
 use crate::models::AppState;
 use crate::tinybird::WebVitalRow;
 use axum::Json;
@@ -55,8 +55,8 @@ pub async fn vitals(
         None => return error_response(StatusCode::UNAUTHORIZED, "Unauthorized"),
     };
 
-    let project_id = match get_project_id(&state.pool, &token).await {
-        Ok(id) => id,
+    let (project_id, owner_id) = match get_project_info(&state.pool, &token).await {
+        Ok(info) => info,
         Err(is_db_error) => {
             if is_db_error {
                 let country = headers
@@ -88,6 +88,11 @@ pub async fn vitals(
         }
     };
 
+    let tracking_ctx = TrackingContext {
+        owner_id,
+        token: token.clone(),
+    };
+
     let req: WebVitalRequest = match serde_json::from_slice(&body) {
         Ok(req) => req,
         Err(_) => return error_response(StatusCode::BAD_REQUEST, "Invalid JSON"),
@@ -102,23 +107,29 @@ pub async fn vitals(
         .and_then(|value| value.to_str().ok())
         .map(String::from);
 
-    if let Err(e) = insert_web_vitals(&state.batch_queue, project_id, &req, country).await {
+    if let Err(e) =
+        insert_web_vitals(&state.batch_queue, project_id, &req, country, tracking_ctx).await
+    {
         return e;
     }
 
     (StatusCode::OK, Json(json!({ "status": "success" })))
 }
 
-/// Returns Ok(project_id) on success, Err(true) for DB errors, Err(false) for not found
-async fn get_project_id(pool: &sqlx::PgPool, token: &str) -> Result<Uuid, bool> {
-    let row = sqlx::query("SELECT id FROM project WHERE token = $1")
+/// Returns Ok((project_id, owner_id)) on success, Err(true) for DB errors, Err(false) for not found
+async fn get_project_info(pool: &sqlx::PgPool, token: &str) -> Result<(Uuid, String), bool> {
+    let row = sqlx::query("SELECT id, owner_id FROM project WHERE token = $1")
         .bind(token)
         .fetch_optional(pool)
         .await
         .map_err(|_| true)?; // DB error
 
     match row {
-        Some(row) => row.try_get("id").map_err(|_| true),
+        Some(row) => {
+            let id: Uuid = row.try_get("id").map_err(|_| true)?;
+            let owner_id: String = row.try_get("owner_id").map_err(|_| true)?;
+            Ok((id, owner_id))
+        }
         None => Err(false), // Not found
     }
 }
@@ -128,6 +139,7 @@ async fn insert_web_vitals(
     project_id: Uuid,
     req: &WebVitalRequest,
     country: Option<String>,
+    tracking_ctx: TrackingContext,
 ) -> Result<(), HandlerResponse> {
     let now = chrono::Utc::now();
 
@@ -167,7 +179,10 @@ async fn insert_web_vitals(
         };
 
         batch_queue
-            .queue_event(QueuedEvent::WebVital(row))
+            .queue_event(QueuedEvent::WebVital {
+                row,
+                tracking: Some(tracking_ctx.clone()),
+            })
             .await
             .map_err(|e| {
                 eprintln!("Failed to queue web vital: {}", e);

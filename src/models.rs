@@ -73,3 +73,50 @@ impl RequestIdentifier {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_web_request_parsing() {
+        #[derive(serde::Deserialize, Debug)]
+        struct WebRequest {
+            token: Option<String>,
+            data: HashMap<String, Value>,
+            errors: Option<Vec<ErrorTracking>>,
+            #[serde(rename = "sessionId")]
+            session_id: Option<String>,
+        }
+
+        let json = r#"{
+            "token": "f2a2b1b24d739f57daa73ba95e4076da",
+            "identifier": "f2a2b1b24d739f57daa73ba95e4076da",
+            "data": {
+                "url": "http://localhost:5174/errors",
+                "page": "/errors"
+            },
+            "errors": [
+                {
+                    "hash": "err_3d39cc9f28fb81e8b7064481c7deb8c0bb349cb0877558cc73b677c1fb9a704d",
+                    "error": "Error",
+                    "message": "Uncaught Error: Render error",
+                    "stack": ["line1", "line2"],
+                    "count": 1
+                }
+            ],
+            "sessionId": "mkqsr2zu-rhhe8v3j"
+        }"#;
+
+        let result = serde_json::from_str::<WebRequest>(json);
+        println!("Parse result: {:?}", result);
+        assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+        let req = result.unwrap();
+        assert!(req.errors.is_some());
+        let errors = req.errors.unwrap();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].error.error, "Error");
+        assert_eq!(req.session_id, Some("mkqsr2zu-rhhe8v3j".to_string()));
+    }
+}

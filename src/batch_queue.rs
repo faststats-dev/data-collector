@@ -1,3 +1,4 @@
+use crate::polar::{PolarClient, UsageCounts};
 use crate::tinybird::{
     ErrorRow, ErrorTrackingRow, EventRow, ReplayRow, TinybirdClient, WebVitalRow,
 };
@@ -5,6 +6,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -43,14 +45,33 @@ pub struct FailedRequest {
     pub origin: Option<String>,
 }
 
+/// Tracking context for billing purposes
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrackingContext {
+    pub owner_id: String,
+    pub token: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum QueuedEvent {
     Event(EventRow),
     Error(ErrorRow),
-    ErrorTracking(ErrorTrackingRow),
-    WebVital(WebVitalRow),
-    Replay(ReplayRow),
+    ErrorTracking {
+        row: ErrorTrackingRow,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tracking: Option<TrackingContext>,
+    },
+    WebVital {
+        row: WebVitalRow,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tracking: Option<TrackingContext>,
+    },
+    Replay {
+        row: ReplayRow,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tracking: Option<TrackingContext>,
+    },
 }
 
 impl QueuedEvent {
@@ -58,9 +79,9 @@ impl QueuedEvent {
         match self {
             QueuedEvent::Event(_) => "events",
             QueuedEvent::Error(_) => "error_",
-            QueuedEvent::ErrorTracking(_) => "error_tracking",
-            QueuedEvent::WebVital(_) => "web_vitals",
-            QueuedEvent::Replay(_) => "session_replays",
+            QueuedEvent::ErrorTracking { .. } => "error_tracking",
+            QueuedEvent::WebVital { .. } => "web_vitals",
+            QueuedEvent::Replay { .. } => "session_replays",
         }
     }
 }
@@ -69,9 +90,9 @@ impl QueuedEvent {
 struct InMemoryBatch {
     events: Vec<EventRow>,
     errors: Vec<ErrorRow>,
-    error_trackings: Vec<ErrorTrackingRow>,
-    web_vitals: Vec<WebVitalRow>,
-    replays: Vec<ReplayRow>,
+    error_trackings: Vec<(ErrorTrackingRow, Option<TrackingContext>)>,
+    web_vitals: Vec<(WebVitalRow, Option<TrackingContext>)>,
+    replays: Vec<(ReplayRow, Option<TrackingContext>)>,
 }
 
 impl InMemoryBatch {
@@ -95,9 +116,11 @@ impl InMemoryBatch {
         match event {
             QueuedEvent::Event(e) => self.events.push(e),
             QueuedEvent::Error(e) => self.errors.push(e),
-            QueuedEvent::ErrorTracking(e) => self.error_trackings.push(e),
-            QueuedEvent::WebVital(e) => self.web_vitals.push(e),
-            QueuedEvent::Replay(e) => self.replays.push(e),
+            QueuedEvent::ErrorTracking { row, tracking } => {
+                self.error_trackings.push((row, tracking))
+            }
+            QueuedEvent::WebVital { row, tracking } => self.web_vitals.push((row, tracking)),
+            QueuedEvent::Replay { row, tracking } => self.replays.push((row, tracking)),
         }
     }
 
@@ -108,11 +131,57 @@ impl InMemoryBatch {
         result.extend(
             self.error_trackings
                 .into_iter()
-                .map(QueuedEvent::ErrorTracking),
+                .map(|(row, tracking)| QueuedEvent::ErrorTracking { row, tracking }),
         );
-        result.extend(self.web_vitals.into_iter().map(QueuedEvent::WebVital));
-        result.extend(self.replays.into_iter().map(QueuedEvent::Replay));
+        result.extend(
+            self.web_vitals
+                .into_iter()
+                .map(|(row, tracking)| QueuedEvent::WebVital { row, tracking }),
+        );
+        result.extend(
+            self.replays
+                .into_iter()
+                .map(|(row, tracking)| QueuedEvent::Replay { row, tracking }),
+        );
         result
+    }
+
+    /// Aggregate usage counts by owner_id for billing
+    fn aggregate_usage(&self) -> (HashMap<String, UsageCounts>, HashMap<String, String>) {
+        let mut usage_by_owner: HashMap<String, UsageCounts> = HashMap::new();
+        let mut token_by_owner: HashMap<String, String> = HashMap::new();
+
+        for (_, ctx) in &self.error_trackings {
+            if let Some(ctx) = ctx {
+                let counts = usage_by_owner.entry(ctx.owner_id.clone()).or_default();
+                counts.error_tracking += 1;
+                token_by_owner
+                    .entry(ctx.owner_id.clone())
+                    .or_insert_with(|| ctx.token.clone());
+            }
+        }
+
+        for (_, ctx) in &self.web_vitals {
+            if let Some(ctx) = ctx {
+                let counts = usage_by_owner.entry(ctx.owner_id.clone()).or_default();
+                counts.web_vitals += 1;
+                token_by_owner
+                    .entry(ctx.owner_id.clone())
+                    .or_insert_with(|| ctx.token.clone());
+            }
+        }
+
+        for (_, ctx) in &self.replays {
+            if let Some(ctx) = ctx {
+                let counts = usage_by_owner.entry(ctx.owner_id.clone()).or_default();
+                counts.session_replays += 1;
+                token_by_owner
+                    .entry(ctx.owner_id.clone())
+                    .or_insert_with(|| ctx.token.clone());
+            }
+        }
+
+        (usage_by_owner, token_by_owner)
     }
 }
 
@@ -120,9 +189,9 @@ impl InMemoryBatch {
 struct BatchSendResult {
     failed_events: Vec<EventRow>,
     failed_errors: Vec<ErrorRow>,
-    failed_error_trackings: Vec<ErrorTrackingRow>,
-    failed_web_vitals: Vec<WebVitalRow>,
-    failed_replays: Vec<ReplayRow>,
+    failed_error_trackings: Vec<(ErrorTrackingRow, Option<TrackingContext>)>,
+    failed_web_vitals: Vec<(WebVitalRow, Option<TrackingContext>)>,
+    failed_replays: Vec<(ReplayRow, Option<TrackingContext>)>,
     had_permanent_failure: bool,
 }
 
@@ -381,6 +450,7 @@ impl BackupStore {
 
 pub struct BatchQueue {
     tinybird: Arc<TinybirdClient>,
+    polar: Option<Arc<PolarClient>>,
     pub(crate) backup_store: Arc<BackupStore>,
     sender: mpsc::Sender<QueuedEvent>,
     in_memory_batch: Arc<Mutex<InMemoryBatch>>,
@@ -396,6 +466,7 @@ impl BatchQueue {
 impl BatchQueue {
     pub async fn new(
         tinybird: Arc<TinybirdClient>,
+        polar: Option<Arc<PolarClient>>,
         backup_path: &Path,
     ) -> Result<Arc<Self>, sqlx::Error> {
         let backup_store = Arc::new(BackupStore::new(backup_path).await?);
@@ -405,6 +476,7 @@ impl BatchQueue {
 
         let queue = Arc::new(Self {
             tinybird,
+            polar,
             backup_store,
             sender,
             in_memory_batch,
@@ -483,7 +555,29 @@ impl BatchQueue {
         let total = batch.total_count();
         eprintln!("Flushing in-memory batch of {} events", total);
 
+        // Aggregate usage before sending (we need the data before batch is consumed)
+        let (usage_by_owner, token_by_owner) = batch.aggregate_usage();
+
         self.send_batch_with_retry(batch).await;
+
+        // Send usage to Polar for billing (fire and forget, don't block on billing)
+        if let Some(polar) = &self.polar
+            && !usage_by_owner.is_empty() {
+                let polar = Arc::clone(polar);
+                tokio::spawn(async move {
+                    match polar.ingest_usage(&usage_by_owner, &token_by_owner).await {
+                        Ok(response) => {
+                            eprintln!(
+                                "Polar usage ingested: {} inserted, {} duplicates",
+                                response.inserted, response.duplicates
+                            );
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to ingest usage to Polar: {}", e);
+                        }
+                    }
+                });
+            }
     }
 
     fn calculate_retry_delay(retry_count: u32) -> Duration {
@@ -563,6 +657,11 @@ impl BatchQueue {
             replays,
         } = batch;
 
+        // Extract just the rows for Tinybird (without tracking context)
+        let error_tracking_rows: Vec<_> = error_trackings.iter().map(|(e, _)| e.clone()).collect();
+        let web_vital_rows: Vec<_> = web_vitals.iter().map(|(e, _)| e.clone()).collect();
+        let replay_rows: Vec<_> = replays.iter().map(|(e, _)| e.clone()).collect();
+
         let (events_res, errors_res, error_trackings_res, web_vitals_res, replays_res) = tokio::join!(
             async {
                 if events.is_empty() {
@@ -579,24 +678,26 @@ impl BatchQueue {
                 }
             },
             async {
-                if error_trackings.is_empty() {
+                if error_tracking_rows.is_empty() {
                     Ok(())
                 } else {
-                    self.tinybird.insert_error_trackings(&error_trackings).await
+                    self.tinybird
+                        .insert_error_trackings(&error_tracking_rows)
+                        .await
                 }
             },
             async {
-                if web_vitals.is_empty() {
+                if web_vital_rows.is_empty() {
                     Ok(())
                 } else {
-                    self.tinybird.insert_web_vitals(&web_vitals).await
+                    self.tinybird.insert_web_vitals(&web_vital_rows).await
                 }
             },
             async {
-                if replays.is_empty() {
+                if replay_rows.is_empty() {
                     Ok(())
                 } else {
-                    self.tinybird.insert_replays(&replays).await
+                    self.tinybird.insert_replays(&replay_rows).await
                 }
             },
         );
@@ -890,20 +991,23 @@ mod tests {
             });
             store.backup_events(&[error], None).await.unwrap();
 
-            let vital = QueuedEvent::WebVital(WebVitalRow {
-                id: Uuid::new_v4(),
-                project_id: Uuid::new_v4(),
-                metric: "LCP".to_string(),
-                value: 2500.0,
-                device: Some("desktop".to_string()),
-                country: Some("US".to_string()),
-                os: Some("Windows".to_string()),
-                browser: Some("Chrome".to_string()),
-                url: "https://example.com".to_string(),
-                attributes: "{}".to_string(),
-                session_id: None,
-                created_at: Utc::now(),
-            });
+            let vital = QueuedEvent::WebVital {
+                row: WebVitalRow {
+                    id: Uuid::new_v4(),
+                    project_id: Uuid::new_v4(),
+                    metric: "LCP".to_string(),
+                    value: 2500.0,
+                    device: Some("desktop".to_string()),
+                    country: Some("US".to_string()),
+                    os: Some("Windows".to_string()),
+                    browser: Some("Chrome".to_string()),
+                    url: "https://example.com".to_string(),
+                    attributes: "{}".to_string(),
+                    session_id: None,
+                    created_at: Utc::now(),
+                },
+                tracking: None,
+            };
             store.backup_events(&[vital], None).await.unwrap();
 
             assert_eq!(store.count_backed_up().await.unwrap(), 3);
@@ -913,7 +1017,7 @@ mod tests {
 
             assert!(matches!(events[0].1, QueuedEvent::Event(_)));
             assert!(matches!(events[1].1, QueuedEvent::Error(_)));
-            assert!(matches!(events[2].1, QueuedEvent::WebVital(_)));
+            assert!(matches!(events[2].1, QueuedEvent::WebVital { .. }));
         }
 
         #[tokio::test]
@@ -1020,20 +1124,23 @@ mod tests {
                 stack: vec![],
                 cause_id: None,
             }));
-            batch.push(QueuedEvent::WebVital(WebVitalRow {
-                id: Uuid::new_v4(),
-                project_id: Uuid::new_v4(),
-                metric: "LCP".to_string(),
-                value: 2500.0,
-                device: None,
-                country: None,
-                os: None,
-                browser: None,
-                url: "https://example.com".to_string(),
-                attributes: "{}".to_string(),
-                session_id: None,
-                created_at: Utc::now(),
-            }));
+            batch.push(QueuedEvent::WebVital {
+                row: WebVitalRow {
+                    id: Uuid::new_v4(),
+                    project_id: Uuid::new_v4(),
+                    metric: "LCP".to_string(),
+                    value: 2500.0,
+                    device: None,
+                    country: None,
+                    os: None,
+                    browser: None,
+                    url: "https://example.com".to_string(),
+                    attributes: "{}".to_string(),
+                    session_id: None,
+                    created_at: Utc::now(),
+                },
+                tracking: None,
+            });
 
             assert_eq!(batch.events.len(), 1);
             assert_eq!(batch.errors.len(), 1);
@@ -1110,45 +1217,54 @@ mod tests {
             );
             let error_id = Uuid::new_v4();
             assert_eq!(
-                QueuedEvent::ErrorTracking(ErrorTrackingRow {
-                    id: Uuid::new_v4(),
-                    project_id: Uuid::new_v4(),
-                    hash: "hash".to_string(),
-                    error_id,
-                    count: 1,
-                    data_entry_id: Uuid::new_v4(),
-                    session_id: None,
-                    created_at: Utc::now(),
-                })
+                QueuedEvent::ErrorTracking {
+                    row: ErrorTrackingRow {
+                        id: Uuid::new_v4(),
+                        project_id: Uuid::new_v4(),
+                        hash: "hash".to_string(),
+                        error_id,
+                        count: 1,
+                        data_entry_id: Uuid::new_v4(),
+                        session_id: None,
+                        created_at: Utc::now(),
+                    },
+                    tracking: None,
+                }
                 .datasource(),
                 "error_tracking"
             );
             assert_eq!(
-                QueuedEvent::WebVital(WebVitalRow {
-                    id: Uuid::new_v4(),
-                    project_id: Uuid::new_v4(),
-                    metric: "LCP".to_string(),
-                    value: 2500.0,
-                    device: None,
-                    country: None,
-                    os: None,
-                    browser: None,
-                    url: "https://example.com".to_string(),
-                    attributes: "{}".to_string(),
-                    session_id: None,
-                    created_at: Utc::now(),
-                })
+                QueuedEvent::WebVital {
+                    row: WebVitalRow {
+                        id: Uuid::new_v4(),
+                        project_id: Uuid::new_v4(),
+                        metric: "LCP".to_string(),
+                        value: 2500.0,
+                        device: None,
+                        country: None,
+                        os: None,
+                        browser: None,
+                        url: "https://example.com".to_string(),
+                        attributes: "{}".to_string(),
+                        session_id: None,
+                        created_at: Utc::now(),
+                    },
+                    tracking: None,
+                }
                 .datasource(),
                 "web_vitals"
             );
             assert_eq!(
-                QueuedEvent::Replay(ReplayRow {
-                    id: Uuid::new_v4(),
-                    project_id: Uuid::new_v4(),
-                    session_id: "session".to_string(),
-                    events: "[]".to_string(),
-                    created_at: Utc::now(),
-                })
+                QueuedEvent::Replay {
+                    row: ReplayRow {
+                        id: Uuid::new_v4(),
+                        project_id: Uuid::new_v4(),
+                        session_id: "session".to_string(),
+                        events: "[]".to_string(),
+                        created_at: Utc::now(),
+                    },
+                    tracking: None,
+                }
                 .datasource(),
                 "session_replays"
             );

@@ -8,7 +8,7 @@ pub use replay::replay;
 pub use vitals::vitals;
 pub use web::{web, web_metadata};
 
-use crate::batch_queue::{BatchQueue, FailedRequest, QueuedEvent, RequestType};
+use crate::batch_queue::{BatchQueue, FailedRequest, QueuedEvent, RequestType, TrackingContext};
 use crate::models::{DataSource, Error, ErrorTracking};
 use crate::tinybird::{ErrorRow, ErrorTrackingRow, EventRow};
 use axum::Json;
@@ -97,6 +97,7 @@ pub fn success_response(warnings: HashMap<String, String>) -> HandlerResponse {
 
 pub struct ProjectContext {
     pub project_id: Uuid,
+    pub owner_id: String,
     pub domain: Option<String>,
     pub datasources: HashMap<String, DataSource>,
     pub error_tracking_enabled: bool,
@@ -110,6 +111,7 @@ pub async fn load_project_context(
         "
         SELECT
             p.id,
+            p.owner_id,
             p.domain,
             d.reference_id,
             d.name,
@@ -136,6 +138,7 @@ pub async fn load_project_context(
     }
 
     let project_id: Uuid = rows[0].try_get("id").unwrap();
+    let owner_id: String = rows[0].try_get("owner_id").unwrap();
     let domain: Option<String> = rows[0].try_get("domain").unwrap_or(None);
     let error_tracking_enabled: bool = rows[0].try_get("error_tracking_enabled").unwrap_or(false);
 
@@ -172,6 +175,7 @@ pub async fn load_project_context(
 
     Ok(ProjectContext {
         project_id,
+        owner_id,
         domain,
         datasources,
         error_tracking_enabled,
@@ -277,6 +281,7 @@ pub async fn insert_error_entries(
     project_id: Uuid,
     data_entry_id: Uuid,
     data: ErrorTracking,
+    tracking_ctx: Option<TrackingContext>,
 ) -> Result<(), HandlerResponse> {
     let mut error_rows = Vec::new();
     let error_id = build_error_rows(&data.error, &mut error_rows);
@@ -304,7 +309,10 @@ pub async fn insert_error_entries(
     };
 
     batch_queue
-        .queue_event(QueuedEvent::ErrorTracking(error_tracking))
+        .queue_event(QueuedEvent::ErrorTracking {
+            row: error_tracking,
+            tracking: tracking_ctx,
+        })
         .await
         .map_err(|e| {
             eprintln!("Failed to queue error tracking: {}", e);
@@ -360,10 +368,20 @@ async fn process_collect_request(
     if ctx.error_tracking_enabled
         && let Some(errors) = req.errors
     {
+        let tracking_ctx = TrackingContext {
+            owner_id: ctx.owner_id,
+            token: request.token.clone(),
+        };
         for error in errors {
-            insert_error_entries(batch_queue, ctx.project_id, data_entry_id, error)
-                .await
-                .map_err(|_| "Failed to queue error".to_string())?;
+            insert_error_entries(
+                batch_queue,
+                ctx.project_id,
+                data_entry_id,
+                error,
+                Some(tracking_ctx.clone()),
+            )
+            .await
+            .map_err(|_| "Failed to queue error".to_string())?;
         }
     }
 
@@ -436,13 +454,23 @@ async fn process_web_request(
     if ctx.error_tracking_enabled
         && let Some(errors) = parsed.errors
     {
+        let tracking_ctx = TrackingContext {
+            owner_id: ctx.owner_id,
+            token: token.clone(),
+        };
         for mut error in errors {
             if error.session_id.is_none() {
                 error.session_id = parsed.session_id.clone();
             }
-            insert_error_entries(batch_queue, ctx.project_id, data_entry_id, error)
-                .await
-                .map_err(|_| "Failed to queue error".to_string())?;
+            insert_error_entries(
+                batch_queue,
+                ctx.project_id,
+                data_entry_id,
+                error,
+                Some(tracking_ctx.clone()),
+            )
+            .await
+            .map_err(|_| "Failed to queue error".to_string())?;
         }
     }
 
@@ -528,8 +556,16 @@ async fn process_vitals_request(
             created_at: now,
         };
 
+        let tracking_ctx = TrackingContext {
+            owner_id: ctx.owner_id.clone(),
+            token: request.token.clone(),
+        };
+
         batch_queue
-            .queue_event(QueuedEvent::WebVital(row))
+            .queue_event(QueuedEvent::WebVital {
+                row,
+                tracking: Some(tracking_ctx),
+            })
             .await
             .map_err(|_| "Failed to queue web vital".to_string())?;
     }
@@ -560,6 +596,11 @@ async fn process_replay_request(
     let events_json =
         serde_json::to_string(&parsed.events).map_err(|_| "Failed to serialize events")?;
 
+    let tracking_ctx = TrackingContext {
+        owner_id: ctx.owner_id,
+        token: parsed.token.clone(),
+    };
+
     let replay_row = crate::tinybird::ReplayRow {
         id: Uuid::new_v4(),
         project_id: ctx.project_id,
@@ -569,7 +610,10 @@ async fn process_replay_request(
     };
 
     batch_queue
-        .queue_event(QueuedEvent::Replay(replay_row))
+        .queue_event(QueuedEvent::Replay {
+            row: replay_row,
+            tracking: Some(tracking_ctx),
+        })
         .await
         .map_err(|_| "Failed to queue replay".to_string())?;
 

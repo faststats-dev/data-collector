@@ -12,6 +12,7 @@ use tower_http::decompression::RequestDecompressionLayer;
 mod batch_queue;
 mod handler;
 mod models;
+mod polar;
 mod salt;
 mod tinybird;
 mod utils;
@@ -61,13 +62,19 @@ async fn main() {
             .expect("TINYBIRD_TOKEN must be set in .env file or environment variables"),
     ));
 
+    let polar_client = std::env::var("POLAR_TOKEN").ok().map(|token| {
+        eprintln!("Polar integration enabled for usage tracking");
+        Arc::new(polar::PolarClient::new(token))
+    });
+
     let backup_path = std::env::var("BACKUP_DB_PATH")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("/data/backup.db"));
 
-    let batch_queue = batch_queue::BatchQueue::new(Arc::clone(&tinybird_client), &backup_path)
-        .await
-        .expect("Failed to initialize batch queue");
+    let batch_queue =
+        batch_queue::BatchQueue::new(Arc::clone(&tinybird_client), polar_client, &backup_path)
+            .await
+            .expect("Failed to initialize batch queue");
 
     let state = models::AppState {
         pool: pool.clone(),

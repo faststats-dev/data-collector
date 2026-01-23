@@ -261,10 +261,12 @@ impl BackupStore {
 
         let options = SqliteConnectOptions::new()
             .filename(path)
-            .create_if_missing(true);
+            .create_if_missing(true)
+            .busy_timeout(Duration::from_secs(30));
 
         let pool = SqlitePoolOptions::new()
             .max_connections(5)
+            .acquire_timeout(Duration::from_secs(60))
             .connect_with(options)
             .await?;
 

@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 const POLAR_API_URL: &str = "https://api.polar.sh";
+const MAX_EVENTS_PER_REQUEST: usize = 500;
 
 #[derive(Clone)]
 pub struct PolarClient {
@@ -11,7 +12,7 @@ pub struct PolarClient {
     token: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct EventCreateExternalCustomer {
     #[serde(skip_serializing_if = "Option::is_none")]
     timestamp: Option<DateTime<Utc>>,
@@ -56,7 +57,6 @@ impl std::fmt::Display for PolarError {
     }
 }
 
-/// Aggregated usage counts for a specific owner (customer)
 #[derive(Debug, Default, Clone)]
 pub struct UsageCounts {
     pub events: u64,
@@ -73,71 +73,42 @@ impl PolarClient {
         }
     }
 
-    /// Ingest usage events to Polar for billing
-    ///
-    /// # Arguments
-    /// * `usage_by_owner` - Map of owner_id (external_customer_id) to their usage counts
-    /// * `token_by_owner` - Map of owner_id to the project token used (for metadata)
-    /// * `org_by_owner` - Map of owner_id to optional organization_id (for metadata)
     pub async fn ingest_usage(
         &self,
         usage_by_owner: &HashMap<String, UsageCounts>,
         token_by_owner: &HashMap<String, String>,
         org_by_owner: &HashMap<String, Option<String>>,
     ) -> Result<EventsIngestResponse, PolarError> {
-        let mut events = Vec::new();
-        let timestamp = Utc::now();
+        let mut events = Vec::with_capacity(usage_by_owner.len() * 4);
+        let base_timestamp = Utc::now();
 
         for (owner_id, counts) in usage_by_owner {
-            let token = token_by_owner.get(owner_id).cloned();
-            let org_id = org_by_owner.get(owner_id).and_then(|o| o.clone());
-            let metadata = {
-                let mut map = HashMap::new();
-                if let Some(t) = token {
-                    map.insert("token".to_string(), serde_json::Value::String(t));
+            let base_metadata = Self::build_metadata(owner_id, token_by_owner, org_by_owner);
+
+            for (i, (name, count)) in [
+                ("events", counts.events),
+                ("error_tracking", counts.error_tracking),
+                ("web_vitals", counts.web_vitals),
+                ("session_replays", counts.session_replays),
+            ]
+            .iter()
+            .enumerate()
+            {
+                if *count == 0 {
+                    continue;
                 }
-                if let Some(org) = org_id {
-                    map.insert(
-                        "organization_id".to_string(),
-                        serde_json::Value::String(org),
-                    );
-                }
-                if map.is_empty() { None } else { Some(map) }
-            };
 
-            for _ in 0..counts.events {
-                events.push(EventCreateExternalCustomer {
-                    timestamp: Some(timestamp),
-                    name: "events".to_string(),
-                    external_customer_id: owner_id.clone(),
-                    metadata: metadata.clone(),
-                });
-            }
+                let mut metadata = base_metadata.clone().unwrap_or_default();
+                metadata.insert(
+                    "count".to_string(),
+                    serde_json::Value::Number((*count).into()),
+                );
 
-            for _ in 0..counts.error_tracking {
                 events.push(EventCreateExternalCustomer {
-                    timestamp: Some(timestamp),
-                    name: "error_tracking".to_string(),
+                    timestamp: Some(base_timestamp + chrono::Duration::microseconds(i as i64)),
+                    name: name.to_string(),
                     external_customer_id: owner_id.clone(),
-                    metadata: metadata.clone(),
-                });
-            }
-
-            for _ in 0..counts.web_vitals {
-                events.push(EventCreateExternalCustomer {
-                    timestamp: Some(timestamp),
-                    name: "web_vitals".to_string(),
-                    external_customer_id: owner_id.clone(),
-                    metadata: metadata.clone(),
-                });
-            }
-
-            for _ in 0..counts.session_replays {
-                events.push(EventCreateExternalCustomer {
-                    timestamp: Some(timestamp),
-                    name: "session_replays".to_string(),
-                    external_customer_id: owner_id.clone(),
-                    metadata: metadata.clone(),
+                    metadata: Some(metadata),
                 });
             }
         }
@@ -149,25 +120,72 @@ impl PolarClient {
             });
         }
 
-        let body = EventsIngest { events };
+        if events.len() <= MAX_EVENTS_PER_REQUEST {
+            return self.send_events(&events).await;
+        }
+
+        let mut total_inserted = 0i64;
+        let mut total_duplicates = 0i64;
+
+        for chunk in events.chunks(MAX_EVENTS_PER_REQUEST) {
+            let result = self.send_events(chunk).await?;
+            total_inserted += result.inserted;
+            total_duplicates += result.duplicates;
+        }
+
+        Ok(EventsIngestResponse {
+            inserted: total_inserted,
+            duplicates: total_duplicates,
+        })
+    }
+
+    fn build_metadata(
+        owner_id: &str,
+        token_by_owner: &HashMap<String, String>,
+        org_by_owner: &HashMap<String, Option<String>>,
+    ) -> Option<HashMap<String, serde_json::Value>> {
+        let token = token_by_owner.get(owner_id);
+        let org_id = org_by_owner.get(owner_id).and_then(|o| o.as_ref());
+
+        if token.is_none() && org_id.is_none() {
+            return None;
+        }
+
+        let mut map = HashMap::with_capacity(2);
+        if let Some(t) = token {
+            map.insert("token".to_string(), serde_json::Value::String(t.clone()));
+        }
+        if let Some(org) = org_id {
+            map.insert(
+                "organization_id".to_string(),
+                serde_json::Value::String(org.clone()),
+            );
+        }
+        Some(map)
+    }
+
+    async fn send_events(
+        &self,
+        events: &[EventCreateExternalCustomer],
+    ) -> Result<EventsIngestResponse, PolarError> {
+        let body = EventsIngest {
+            events: events.to_vec(),
+        };
 
         let response = self
             .client
             .post(format!("{}/v1/events/ingest", POLAR_API_URL))
             .header("Authorization", format!("Bearer {}", self.token))
-            .header("Content-Type", "application/json")
             .json(&body)
             .send()
             .await?;
 
         let status = response.status().as_u16();
-
         if status != 200 {
-            let message = response.text().await.unwrap_or_default();
+            let message = response.text().await.unwrap_or_else(|e| e.to_string());
             return Err(PolarError::Api { status, message });
         }
 
-        let result: EventsIngestResponse = response.json().await?;
-        Ok(result)
+        Ok(response.json().await?)
     }
 }

@@ -156,11 +156,24 @@ pub async fn web(
     let url = valid_data.get("url").and_then(|v| v.as_str()).unwrap_or("");
     let is_debounced = should_debounce(server_id, url).await;
 
+    let tracking_ctx = TrackingContext {
+        owner_id: ctx.owner_id.clone(),
+        token,
+    };
+
     // Only insert pageview event if not debounced
     let data_entry_id = if is_debounced {
         Uuid::nil()
     } else {
-        match insert_event(&state.batch_queue, ctx.project_id, server_id, &valid_data).await {
+        match insert_event(
+            &state.batch_queue,
+            ctx.project_id,
+            server_id,
+            &valid_data,
+            Some(tracking_ctx.clone()),
+        )
+        .await
+        {
             Ok(id) => id,
             Err(e) => return e,
         }
@@ -168,30 +181,26 @@ pub async fn web(
 
     // Always process errors, even if pageview was debounced
     if ctx.error_tracking_enabled
-        && let Some(errors) = parsed.errors {
-            let tracking_ctx = TrackingContext {
-                owner_id: ctx.owner_id,
-                token,
-            };
-
-            for mut error in errors {
-                // Use error's sessionId if present, otherwise fall back to request-level sessionId
-                if error.session_id.is_none() {
-                    error.session_id = session_id.clone();
-                }
-                if let Err(e) = insert_error_entries(
-                    &state.batch_queue,
-                    ctx.project_id,
-                    data_entry_id,
-                    error,
-                    Some(tracking_ctx.clone()),
-                )
-                .await
-                {
-                    return e;
-                }
+        && let Some(errors) = parsed.errors
+    {
+        for mut error in errors {
+            // Use error's sessionId if present, otherwise fall back to request-level sessionId
+            if error.session_id.is_none() {
+                error.session_id = session_id.clone();
+            }
+            if let Err(e) = insert_error_entries(
+                &state.batch_queue,
+                ctx.project_id,
+                data_entry_id,
+                error,
+                Some(tracking_ctx.clone()),
+            )
+            .await
+            {
+                return e;
             }
         }
+    }
 
     success_response(warnings)
 }

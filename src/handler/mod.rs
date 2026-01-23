@@ -224,6 +224,7 @@ pub async fn insert_event(
     project_id: Uuid,
     server_id: Uuid,
     data: &HashMap<String, Value>,
+    tracking: Option<TrackingContext>,
 ) -> Result<Uuid, HandlerResponse> {
     if data.is_empty() {
         return Ok(Uuid::nil());
@@ -237,7 +238,7 @@ pub async fn insert_event(
         )
     })?;
 
-    let event = EventRow {
+    let row = EventRow {
         id: event_id,
         project_id,
         server_id,
@@ -246,7 +247,7 @@ pub async fn insert_event(
     };
 
     batch_queue
-        .queue_event(QueuedEvent::Event(event))
+        .queue_event(QueuedEvent::Event { row, tracking })
         .await
         .map_err(|e| {
             eprintln!("Failed to queue event: {}", e);
@@ -361,17 +362,24 @@ async fn process_collect_request(
     let (valid_data, _) =
         crate::validation::validate_and_filter_payload(&data_map, &ctx.datasources);
 
-    let data_entry_id = insert_event(batch_queue, ctx.project_id, server_id, &valid_data)
-        .await
-        .map_err(|_| "Failed to queue event".to_string())?;
+    let tracking_ctx = TrackingContext {
+        owner_id: ctx.owner_id.clone(),
+        token: request.token.clone(),
+    };
+
+    let data_entry_id = insert_event(
+        batch_queue,
+        ctx.project_id,
+        server_id,
+        &valid_data,
+        Some(tracking_ctx.clone()),
+    )
+    .await
+    .map_err(|_| "Failed to queue event".to_string())?;
 
     if ctx.error_tracking_enabled
         && let Some(errors) = req.errors
     {
-        let tracking_ctx = TrackingContext {
-            owner_id: ctx.owner_id,
-            token: request.token.clone(),
-        };
         for error in errors {
             insert_error_entries(
                 batch_queue,
@@ -447,17 +455,24 @@ async fn process_web_request(
         return Ok(());
     }
 
-    let data_entry_id = insert_event(batch_queue, ctx.project_id, server_id, &valid_data)
-        .await
-        .map_err(|_| "Failed to queue event".to_string())?;
+    let tracking_ctx = TrackingContext {
+        owner_id: ctx.owner_id.clone(),
+        token: token.clone(),
+    };
+
+    let data_entry_id = insert_event(
+        batch_queue,
+        ctx.project_id,
+        server_id,
+        &valid_data,
+        Some(tracking_ctx.clone()),
+    )
+    .await
+    .map_err(|_| "Failed to queue event".to_string())?;
 
     if ctx.error_tracking_enabled
         && let Some(errors) = parsed.errors
     {
-        let tracking_ctx = TrackingContext {
-            owner_id: ctx.owner_id,
-            token: token.clone(),
-        };
         for mut error in errors {
             if error.session_id.is_none() {
                 error.session_id = parsed.session_id.clone();

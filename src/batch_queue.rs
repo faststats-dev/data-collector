@@ -55,7 +55,11 @@ pub struct TrackingContext {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum QueuedEvent {
-    Event(EventRow),
+    Event {
+        row: EventRow,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tracking: Option<TrackingContext>,
+    },
     Error(ErrorRow),
     ErrorTracking {
         row: ErrorTrackingRow,
@@ -77,7 +81,7 @@ pub enum QueuedEvent {
 impl QueuedEvent {
     fn datasource(&self) -> &'static str {
         match self {
-            QueuedEvent::Event(_) => "events",
+            QueuedEvent::Event { .. } => "events",
             QueuedEvent::Error(_) => "error_",
             QueuedEvent::ErrorTracking { .. } => "error_tracking",
             QueuedEvent::WebVital { .. } => "web_vitals",
@@ -88,7 +92,7 @@ impl QueuedEvent {
 
 #[derive(Debug, Default)]
 struct InMemoryBatch {
-    events: Vec<EventRow>,
+    events: Vec<(EventRow, Option<TrackingContext>)>,
     errors: Vec<ErrorRow>,
     error_trackings: Vec<(ErrorTrackingRow, Option<TrackingContext>)>,
     web_vitals: Vec<(WebVitalRow, Option<TrackingContext>)>,
@@ -114,7 +118,7 @@ impl InMemoryBatch {
 
     fn push(&mut self, event: QueuedEvent) {
         match event {
-            QueuedEvent::Event(e) => self.events.push(e),
+            QueuedEvent::Event { row, tracking } => self.events.push((row, tracking)),
             QueuedEvent::Error(e) => self.errors.push(e),
             QueuedEvent::ErrorTracking { row, tracking } => {
                 self.error_trackings.push((row, tracking))
@@ -126,7 +130,11 @@ impl InMemoryBatch {
 
     fn into_queued_events(self) -> Vec<QueuedEvent> {
         let mut result = Vec::with_capacity(self.total_count());
-        result.extend(self.events.into_iter().map(QueuedEvent::Event));
+        result.extend(
+            self.events
+                .into_iter()
+                .map(|(row, tracking)| QueuedEvent::Event { row, tracking }),
+        );
         result.extend(self.errors.into_iter().map(QueuedEvent::Error));
         result.extend(
             self.error_trackings
@@ -151,6 +159,16 @@ impl InMemoryBatch {
         let mut usage_by_owner: HashMap<String, UsageCounts> = HashMap::new();
         let mut token_by_owner: HashMap<String, String> = HashMap::new();
 
+        for (_, ctx) in &self.events {
+            if let Some(ctx) = ctx {
+                let counts = usage_by_owner.entry(ctx.owner_id.clone()).or_default();
+                counts.events += 1;
+                token_by_owner
+                    .entry(ctx.owner_id.clone())
+                    .or_insert_with(|| ctx.token.clone());
+            }
+        }
+
         for (_, ctx) in &self.error_trackings {
             if let Some(ctx) = ctx {
                 let counts = usage_by_owner.entry(ctx.owner_id.clone()).or_default();
@@ -171,10 +189,13 @@ impl InMemoryBatch {
             }
         }
 
-        for (_, ctx) in &self.replays {
+        for (row, ctx) in &self.replays {
             if let Some(ctx) = ctx {
                 let counts = usage_by_owner.entry(ctx.owner_id.clone()).or_default();
-                counts.session_replays += 1;
+                let event_count = serde_json::from_str::<Vec<serde_json::Value>>(&row.events)
+                    .map(|v| v.len() as u64)
+                    .unwrap_or(1);
+                counts.session_replays += event_count;
                 token_by_owner
                     .entry(ctx.owner_id.clone())
                     .or_insert_with(|| ctx.token.clone());
@@ -187,7 +208,7 @@ impl InMemoryBatch {
 
 #[derive(Debug, Default)]
 struct BatchSendResult {
-    failed_events: Vec<EventRow>,
+    failed_events: Vec<(EventRow, Option<TrackingContext>)>,
     failed_errors: Vec<ErrorRow>,
     failed_error_trackings: Vec<(ErrorTrackingRow, Option<TrackingContext>)>,
     failed_web_vitals: Vec<(WebVitalRow, Option<TrackingContext>)>,
@@ -562,22 +583,23 @@ impl BatchQueue {
 
         // Send usage to Polar for billing (fire and forget, don't block on billing)
         if let Some(polar) = &self.polar
-            && !usage_by_owner.is_empty() {
-                let polar = Arc::clone(polar);
-                tokio::spawn(async move {
-                    match polar.ingest_usage(&usage_by_owner, &token_by_owner).await {
-                        Ok(response) => {
-                            eprintln!(
-                                "Polar usage ingested: {} inserted, {} duplicates",
-                                response.inserted, response.duplicates
-                            );
-                        }
-                        Err(e) => {
-                            eprintln!("Failed to ingest usage to Polar: {}", e);
-                        }
+            && !usage_by_owner.is_empty()
+        {
+            let polar = Arc::clone(polar);
+            tokio::spawn(async move {
+                match polar.ingest_usage(&usage_by_owner, &token_by_owner).await {
+                    Ok(response) => {
+                        eprintln!(
+                            "Polar usage ingested: {} inserted, {} duplicates",
+                            response.inserted, response.duplicates
+                        );
                     }
-                });
-            }
+                    Err(e) => {
+                        eprintln!("Failed to ingest usage to Polar: {}", e);
+                    }
+                }
+            });
+        }
     }
 
     fn calculate_retry_delay(retry_count: u32) -> Duration {
@@ -658,16 +680,17 @@ impl BatchQueue {
         } = batch;
 
         // Extract just the rows for Tinybird (without tracking context)
+        let event_rows: Vec<_> = events.iter().map(|(e, _)| e.clone()).collect();
         let error_tracking_rows: Vec<_> = error_trackings.iter().map(|(e, _)| e.clone()).collect();
         let web_vital_rows: Vec<_> = web_vitals.iter().map(|(e, _)| e.clone()).collect();
         let replay_rows: Vec<_> = replays.iter().map(|(e, _)| e.clone()).collect();
 
         let (events_res, errors_res, error_trackings_res, web_vitals_res, replays_res) = tokio::join!(
             async {
-                if events.is_empty() {
+                if event_rows.is_empty() {
                     Ok(())
                 } else {
-                    self.tinybird.insert_events(&events).await
+                    self.tinybird.insert_events(&event_rows).await
                 }
             },
             async {
@@ -914,6 +937,13 @@ mod tests {
         }
     }
 
+    fn create_test_queued_event() -> QueuedEvent {
+        QueuedEvent::Event {
+            row: create_test_event(),
+            tracking: None,
+        }
+    }
+
     mod backup_store_tests {
         use super::*;
 
@@ -923,14 +953,14 @@ mod tests {
             let db_path = dir.path().join("test.db");
             let store = BackupStore::new(&db_path).await.unwrap();
 
-            let event = QueuedEvent::Event(create_test_event());
+            let event = create_test_queued_event();
             store.backup_events(&[event], None).await.unwrap();
 
             let events = store.get_backed_up_events(10).await.unwrap();
             assert_eq!(events.len(), 1);
 
-            if let QueuedEvent::Event(e) = &events[0].1 {
-                assert!(e.data.contains("test"));
+            if let QueuedEvent::Event { row, .. } = &events[0].1 {
+                assert!(row.data.contains("test"));
             } else {
                 panic!("Expected Event variant");
             }
@@ -942,9 +972,7 @@ mod tests {
             let db_path = dir.path().join("test.db");
             let store = BackupStore::new(&db_path).await.unwrap();
 
-            let events: Vec<QueuedEvent> = (0..5)
-                .map(|_| QueuedEvent::Event(create_test_event()))
-                .collect();
+            let events: Vec<QueuedEvent> = (0..5).map(|_| create_test_queued_event()).collect();
             store.backup_events(&events, None).await.unwrap();
 
             let events = store.get_backed_up_events(10).await.unwrap();
@@ -965,9 +993,7 @@ mod tests {
 
             assert_eq!(store.count_backed_up().await.unwrap(), 0);
 
-            let events: Vec<QueuedEvent> = (0..5)
-                .map(|_| QueuedEvent::Event(create_test_event()))
-                .collect();
+            let events: Vec<QueuedEvent> = (0..5).map(|_| create_test_queued_event()).collect();
             store.backup_events(&events, None).await.unwrap();
 
             assert_eq!(store.count_backed_up().await.unwrap(), 5);
@@ -979,7 +1005,7 @@ mod tests {
             let db_path = dir.path().join("test.db");
             let store = BackupStore::new(&db_path).await.unwrap();
 
-            let event = QueuedEvent::Event(create_test_event());
+            let event = create_test_queued_event();
             store.backup_events(&[event], None).await.unwrap();
 
             let error = QueuedEvent::Error(ErrorRow {
@@ -1015,7 +1041,7 @@ mod tests {
             let events = store.get_backed_up_events(10).await.unwrap();
             assert_eq!(events.len(), 3);
 
-            assert!(matches!(events[0].1, QueuedEvent::Event(_)));
+            assert!(matches!(events[0].1, QueuedEvent::Event { .. }));
             assert!(matches!(events[1].1, QueuedEvent::Error(_)));
             assert!(matches!(events[2].1, QueuedEvent::WebVital { .. }));
         }
@@ -1027,10 +1053,16 @@ mod tests {
             let store = BackupStore::new(&db_path).await.unwrap();
 
             for i in 0..5 {
-                let mut event = create_test_event();
-                event.data = format!(r#"{{"order": {}}}"#, i);
+                let mut row = create_test_event();
+                row.data = format!(r#"{{"order": {}}}"#, i);
                 store
-                    .backup_events(&[QueuedEvent::Event(event)], None)
+                    .backup_events(
+                        &[QueuedEvent::Event {
+                            row,
+                            tracking: None,
+                        }],
+                        None,
+                    )
                     .await
                     .unwrap();
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1039,8 +1071,8 @@ mod tests {
             let events = store.get_backed_up_events(10).await.unwrap();
 
             for (i, (_, event)) in events.into_iter().enumerate() {
-                if let QueuedEvent::Event(e) = event {
-                    assert!(e.data.contains(&format!("\"order\": {}", i)));
+                if let QueuedEvent::Event { row, .. } = event {
+                    assert!(row.data.contains(&format!("\"order\": {}", i)));
                 }
             }
         }
@@ -1051,9 +1083,7 @@ mod tests {
             let db_path = dir.path().join("test.db");
             let store = BackupStore::new(&db_path).await.unwrap();
 
-            let events: Vec<QueuedEvent> = (0..10)
-                .map(|_| QueuedEvent::Event(create_test_event()))
-                .collect();
+            let events: Vec<QueuedEvent> = (0..10).map(|_| create_test_queued_event()).collect();
             store.backup_events(&events, None).await.unwrap();
 
             let events = store.get_backed_up_events(3).await.unwrap();
@@ -1068,9 +1098,7 @@ mod tests {
             let db_path = dir.path().join("test.db");
             let store = BackupStore::new(&db_path).await.unwrap();
 
-            let events: Vec<QueuedEvent> = (0..10)
-                .map(|_| QueuedEvent::Event(create_test_event()))
-                .collect();
+            let events: Vec<QueuedEvent> = (0..10).map(|_| create_test_queued_event()).collect();
 
             store
                 .backup_events(&events, Some("Test error"))
@@ -1090,7 +1118,7 @@ mod tests {
             assert!(batch.is_empty());
 
             let mut batch = InMemoryBatch::default();
-            batch.push(QueuedEvent::Event(create_test_event()));
+            batch.push(create_test_queued_event());
             assert!(!batch.is_empty());
         }
 
@@ -1099,8 +1127,8 @@ mod tests {
             let mut batch = InMemoryBatch::default();
             assert_eq!(batch.total_count(), 0);
 
-            batch.push(QueuedEvent::Event(create_test_event()));
-            batch.push(QueuedEvent::Event(create_test_event()));
+            batch.push(create_test_queued_event());
+            batch.push(create_test_queued_event());
             batch.push(QueuedEvent::Error(ErrorRow {
                 id: Uuid::new_v4(),
                 name: "E".to_string(),
@@ -1116,7 +1144,7 @@ mod tests {
         fn test_push_groups_correctly() {
             let mut batch = InMemoryBatch::default();
 
-            batch.push(QueuedEvent::Event(create_test_event()));
+            batch.push(create_test_queued_event());
             batch.push(QueuedEvent::Error(ErrorRow {
                 id: Uuid::new_v4(),
                 name: "E".to_string(),
@@ -1152,7 +1180,7 @@ mod tests {
         #[test]
         fn test_into_queued_events() {
             let mut batch = InMemoryBatch::default();
-            batch.push(QueuedEvent::Event(create_test_event()));
+            batch.push(create_test_queued_event());
             batch.push(QueuedEvent::Error(ErrorRow {
                 id: Uuid::new_v4(),
                 name: "E".to_string(),
@@ -1163,7 +1191,7 @@ mod tests {
 
             let queued = batch.into_queued_events();
             assert_eq!(queued.len(), 2);
-            assert!(matches!(queued[0], QueuedEvent::Event(_)));
+            assert!(matches!(queued[0], QueuedEvent::Event { .. }));
             assert!(matches!(queued[1], QueuedEvent::Error(_)));
         }
     }
@@ -1200,10 +1228,7 @@ mod tests {
 
         #[test]
         fn test_datasource_names() {
-            assert_eq!(
-                QueuedEvent::Event(create_test_event()).datasource(),
-                "events"
-            );
+            assert_eq!(create_test_queued_event().datasource(), "events");
             assert_eq!(
                 QueuedEvent::Error(ErrorRow {
                     id: Uuid::new_v4(),
@@ -1272,11 +1297,13 @@ mod tests {
 
         #[test]
         fn test_serialization_roundtrip() {
-            let event = QueuedEvent::Event(create_test_event());
+            let event = create_test_queued_event();
             let json = serde_json::to_string(&event).unwrap();
             let deserialized: QueuedEvent = serde_json::from_str(&json).unwrap();
 
-            if let (QueuedEvent::Event(orig), QueuedEvent::Event(deser)) = (&event, &deserialized) {
+            if let (QueuedEvent::Event { row: orig, .. }, QueuedEvent::Event { row: deser, .. }) =
+                (&event, &deserialized)
+            {
                 assert_eq!(orig.id, deser.id);
                 assert_eq!(orig.project_id, deser.project_id);
                 assert_eq!(orig.data, deser.data);

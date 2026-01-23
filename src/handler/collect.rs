@@ -73,20 +73,27 @@ pub async fn collect(
 
     let (valid_data, warnings) = validate_and_filter_payload(&data_map, &ctx.datasources);
 
-    let data_entry_id =
-        match insert_event(&state.batch_queue, ctx.project_id, server_id, &valid_data).await {
-            Ok(id) => id,
-            Err(e) => return e,
-        };
+    let tracking_ctx = TrackingContext {
+        owner_id: ctx.owner_id.clone(),
+        token,
+    };
+
+    let data_entry_id = match insert_event(
+        &state.batch_queue,
+        ctx.project_id,
+        server_id,
+        &valid_data,
+        Some(tracking_ctx.clone()),
+    )
+    .await
+    {
+        Ok(id) => id,
+        Err(e) => return e,
+    };
 
     if !ctx.error_tracking_enabled {
         return success_response(warnings);
     }
-
-    let tracking_ctx = TrackingContext {
-        owner_id: ctx.owner_id,
-        token,
-    };
 
     if let Some(errors) = req.errors {
         for error in errors {

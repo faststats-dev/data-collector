@@ -59,6 +59,7 @@ impl std::fmt::Display for PolarError {
 /// Aggregated usage counts for a specific owner (customer)
 #[derive(Debug, Default, Clone)]
 pub struct UsageCounts {
+    pub events: u64,
     pub error_tracking: u64,
     pub web_vitals: u64,
     pub session_replays: u64,
@@ -93,48 +94,39 @@ impl PolarClient {
                 map
             });
 
-            if counts.error_tracking > 0 {
+            for _ in 0..counts.events {
+                events.push(EventCreateExternalCustomer {
+                    timestamp: Some(timestamp),
+                    name: "events".to_string(),
+                    external_customer_id: owner_id.clone(),
+                    metadata: metadata.clone(),
+                });
+            }
+
+            for _ in 0..counts.error_tracking {
                 events.push(EventCreateExternalCustomer {
                     timestamp: Some(timestamp),
                     name: "error_tracking".to_string(),
                     external_customer_id: owner_id.clone(),
-                    metadata: metadata.clone().map(|mut m| {
-                        m.insert(
-                            "count".to_string(),
-                            serde_json::Value::Number(counts.error_tracking.into()),
-                        );
-                        m
-                    }),
+                    metadata: metadata.clone(),
                 });
             }
 
-            if counts.web_vitals > 0 {
+            for _ in 0..counts.web_vitals {
                 events.push(EventCreateExternalCustomer {
                     timestamp: Some(timestamp),
                     name: "web_vitals".to_string(),
                     external_customer_id: owner_id.clone(),
-                    metadata: metadata.clone().map(|mut m| {
-                        m.insert(
-                            "count".to_string(),
-                            serde_json::Value::Number(counts.web_vitals.into()),
-                        );
-                        m
-                    }),
+                    metadata: metadata.clone(),
                 });
             }
 
-            if counts.session_replays > 0 {
+            for _ in 0..counts.session_replays {
                 events.push(EventCreateExternalCustomer {
                     timestamp: Some(timestamp),
                     name: "session_replays".to_string(),
                     external_customer_id: owner_id.clone(),
-                    metadata: metadata.map(|mut m| {
-                        m.insert(
-                            "count".to_string(),
-                            serde_json::Value::Number(counts.session_replays.into()),
-                        );
-                        m
-                    }),
+                    metadata: metadata.clone(),
                 });
             }
         }

@@ -1,4 +1,7 @@
-use super::{EncodingQuery, HandlerResponse, decompress_body, error_response, get_authorization};
+use super::{
+    EncodingQuery, HandlerResponse, decompress_body, error_response, get_authorization,
+    load_project_context,
+};
 use crate::batch_queue::{BatchQueue, FailedRequest, QueuedEvent, RequestType, TrackingContext};
 use crate::models::AppState;
 use crate::tinybird::WebVitalRow;
@@ -9,7 +12,6 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use sqlx::Row;
 use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -50,26 +52,24 @@ pub async fn vitals(
         Ok(b) => b,
         Err(e) => return error_response(StatusCode::BAD_REQUEST, &e),
     };
+
     let token = match get_authorization(&headers) {
         Some(t) => t,
         None => return error_response(StatusCode::UNAUTHORIZED, "Unauthorized"),
     };
 
-    let (project_id, owner_id, organization_id) = match get_project_info(&state.pool, &token).await
-    {
-        Ok(info) => info,
-        Err(is_db_error) => {
-            if is_db_error {
-                let country = headers
-                    .get("CF-IPCountry")
-                    .and_then(|v| v.to_str().ok())
-                    .map(String::from);
-
+    let ctx = match load_project_context(&state.pool, &token).await {
+        Ok(ctx) => ctx,
+        Err(err) => {
+            if err.0 == StatusCode::INTERNAL_SERVER_ERROR {
                 let failed = FailedRequest {
                     request_type: RequestType::Vitals,
                     token,
                     body: body.to_vec(),
-                    country,
+                    country: headers
+                        .get("CF-IPCountry")
+                        .and_then(|v| v.to_str().ok())
+                        .map(String::from),
                     client_ip: None,
                     user_agent: None,
                     origin: None,
@@ -82,17 +82,10 @@ pub async fn vitals(
                         "Service temporarily unavailable",
                     );
                 }
-
                 return (StatusCode::OK, Json(json!({ "status": "success" })));
             }
-            return error_response(StatusCode::UNAUTHORIZED, "Unauthorized");
+            return err;
         }
-    };
-
-    let tracking_ctx = TrackingContext {
-        owner_id,
-        token: token.clone(),
-        organization_id,
     };
 
     let req: WebVitalRequest = match serde_json::from_slice(&body) {
@@ -104,56 +97,30 @@ pub async fn vitals(
         return error_response(StatusCode::BAD_REQUEST, "No vitals provided");
     }
 
+    let tracking_ctx = TrackingContext {
+        owner_id: ctx.owner_id,
+        token,
+        organization_id: ctx.organization_id,
+    };
+
     let country = headers
         .get("CF-IPCountry")
-        .and_then(|value| value.to_str().ok())
+        .and_then(|v| v.to_str().ok())
         .map(String::from);
 
-    if let Err(e) =
-        insert_web_vitals(&state.batch_queue, project_id, &req, country, tracking_ctx).await
+    if let Err(e) = insert_web_vitals(
+        &state.batch_queue,
+        ctx.project_id,
+        &req,
+        country,
+        tracking_ctx,
+    )
+    .await
     {
         return e;
     }
 
     (StatusCode::OK, Json(json!({ "status": "success" })))
-}
-
-/// Returns Ok((project_id, owner_id)) on success, Err(true) for DB errors, Err(false) for not found
-async fn get_project_info(
-    pool: &sqlx::PgPool,
-    token: &str,
-) -> Result<(Uuid, String, Option<String>), bool> {
-    let row = sqlx::query(
-        "
-        SELECT
-            p.id,
-            CASE
-                WHEN u.id IS NOT NULL THEN p.owner_id
-                WHEN o.id IS NOT NULL THEN m.user_id
-                ELSE p.owner_id
-            END AS billing_customer_id,
-            o.id AS organization_id
-        FROM project p
-        LEFT JOIN \"user\" u ON u.id = p.owner_id
-        LEFT JOIN organization o ON o.id = p.owner_id
-        LEFT JOIN member m ON m.organization_id = o.id AND m.role = 'owner'
-        WHERE p.token = $1
-        ",
-    )
-    .bind(token)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| true)?;
-
-    match row {
-        Some(row) => {
-            let id: Uuid = row.try_get("id").map_err(|_| true)?;
-            let owner_id: String = row.try_get("billing_customer_id").map_err(|_| true)?;
-            let organization_id: Option<String> = row.try_get("organization_id").unwrap_or(None);
-            Ok((id, owner_id, organization_id))
-        }
-        None => Err(false),
-    }
 }
 
 async fn insert_web_vitals(
@@ -171,12 +138,6 @@ async fn insert_web_vitals(
     let url = metadata.and_then(|m| m.url.clone()).unwrap_or_default();
 
     for vital in &req.vitals {
-        let attributes_str = vital
-            .attributes
-            .as_ref()
-            .map(|attrs| serde_json::to_string(attrs).unwrap_or_else(|_| "{}".to_string()))
-            .unwrap_or_else(|| "{}".to_string());
-
         let row = WebVitalRow {
             id: Uuid::new_v4(),
             project_id,
@@ -187,7 +148,11 @@ async fn insert_web_vitals(
             os: os.clone(),
             browser: browser.clone(),
             url: url.clone(),
-            attributes: attributes_str,
+            attributes: vital
+                .attributes
+                .as_ref()
+                .and_then(|a| serde_json::to_string(a).ok())
+                .unwrap_or_else(|| "{}".to_string()),
             session_id: req.session_id.clone(),
             created_at: now,
         };

@@ -3,7 +3,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-const POLAR_API_URL: &str = "https://sandbox-api.polar.sh";
+const POLAR_API_URL: &str = "https://api.polar.sh";
 
 #[derive(Clone)]
 pub struct PolarClient {

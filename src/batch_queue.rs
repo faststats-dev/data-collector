@@ -163,61 +163,40 @@ impl InMemoryBatch {
         result
     }
 
-    /// Aggregate usage counts by owner_id for billing
     fn aggregate_usage(&self) -> AggregatedUsage {
         let mut usage_by_owner: HashMap<String, UsageCounts> = HashMap::new();
         let mut token_by_owner: HashMap<String, String> = HashMap::new();
         let mut org_by_owner: HashMap<String, Option<String>> = HashMap::new();
 
+        let mut track = |ctx: &TrackingContext, update: fn(&mut UsageCounts)| {
+            let owner_id = &ctx.owner_id;
+            update(usage_by_owner.entry(owner_id.clone()).or_default());
+            token_by_owner
+                .entry(owner_id.clone())
+                .or_insert_with(|| ctx.token.clone());
+            org_by_owner
+                .entry(owner_id.clone())
+                .or_insert_with(|| ctx.organization_id.clone());
+        };
+
         for (_, ctx) in &self.events {
             if let Some(ctx) = ctx {
-                let counts = usage_by_owner.entry(ctx.owner_id.clone()).or_default();
-                counts.events += 1;
-                token_by_owner
-                    .entry(ctx.owner_id.clone())
-                    .or_insert_with(|| ctx.token.clone());
-                org_by_owner
-                    .entry(ctx.owner_id.clone())
-                    .or_insert_with(|| ctx.organization_id.clone());
+                track(ctx, |c| c.events += 1);
             }
         }
-
         for (_, ctx) in &self.error_trackings {
             if let Some(ctx) = ctx {
-                let counts = usage_by_owner.entry(ctx.owner_id.clone()).or_default();
-                counts.error_tracking += 1;
-                token_by_owner
-                    .entry(ctx.owner_id.clone())
-                    .or_insert_with(|| ctx.token.clone());
-                org_by_owner
-                    .entry(ctx.owner_id.clone())
-                    .or_insert_with(|| ctx.organization_id.clone());
+                track(ctx, |c| c.error_tracking += 1);
             }
         }
-
         for (_, ctx) in &self.web_vitals {
             if let Some(ctx) = ctx {
-                let counts = usage_by_owner.entry(ctx.owner_id.clone()).or_default();
-                counts.web_vitals += 1;
-                token_by_owner
-                    .entry(ctx.owner_id.clone())
-                    .or_insert_with(|| ctx.token.clone());
-                org_by_owner
-                    .entry(ctx.owner_id.clone())
-                    .or_insert_with(|| ctx.organization_id.clone());
+                track(ctx, |c| c.web_vitals += 1);
             }
         }
-
         for (_, ctx) in &self.replays {
             if let Some(ctx) = ctx {
-                let counts = usage_by_owner.entry(ctx.owner_id.clone()).or_default();
-                counts.session_replays += 1;
-                token_by_owner
-                    .entry(ctx.owner_id.clone())
-                    .or_insert_with(|| ctx.token.clone());
-                org_by_owner
-                    .entry(ctx.owner_id.clone())
-                    .or_insert_with(|| ctx.organization_id.clone());
+                track(ctx, |c| c.session_replays += 1);
             }
         }
 

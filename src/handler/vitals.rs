@@ -98,9 +98,9 @@ pub async fn vitals(
     }
 
     let tracking_ctx = TrackingContext {
-        owner_id: ctx.owner_id,
+        owner_id: ctx.owner_id.clone(),
         token,
-        organization_id: ctx.organization_id,
+        organization_id: ctx.organization_id.clone(),
     };
 
     let country = headers

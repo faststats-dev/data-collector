@@ -13,13 +13,23 @@ use crate::models::{DataSource, Error, ErrorTracking};
 use crate::tinybird::{ErrorRow, ErrorTrackingRow, EventRow};
 use axum::Json;
 use axum::http::{HeaderMap, StatusCode};
+use moka::future::Cache;
 use serde::Deserialize;
 use serde_json::Value;
 use sqlx::Row;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::Read;
+use std::sync::{Arc, LazyLock};
+use std::time::Duration;
 use uuid::Uuid;
+
+static PROJECT_CONTEXT_CACHE: LazyLock<Cache<String, Arc<ProjectContext>>> = LazyLock::new(|| {
+    Cache::builder()
+        .max_capacity(1_000)
+        .time_to_live(Duration::from_secs(60))
+        .build()
+});
 
 pub type HandlerResponse = (StatusCode, Json<Value>);
 
@@ -95,6 +105,7 @@ pub fn success_response(warnings: HashMap<String, String>) -> HandlerResponse {
     }
 }
 
+#[derive(Clone)]
 pub struct ProjectContext {
     pub project_id: Uuid,
     pub owner_id: String,
@@ -105,6 +116,22 @@ pub struct ProjectContext {
 }
 
 pub async fn load_project_context(
+    pool: &sqlx::PgPool,
+    token: &str,
+) -> Result<Arc<ProjectContext>, HandlerResponse> {
+    if let Some(cached) = PROJECT_CONTEXT_CACHE.get(token).await {
+        return Ok(cached);
+    }
+
+    let ctx = load_project_context_from_db(pool, token).await?;
+    let ctx = Arc::new(ctx);
+    PROJECT_CONTEXT_CACHE
+        .insert(token.to_string(), Arc::clone(&ctx))
+        .await;
+    Ok(ctx)
+}
+
+async fn load_project_context_from_db(
     pool: &sqlx::PgPool,
     token: &str,
 ) -> Result<ProjectContext, HandlerResponse> {
@@ -621,9 +648,9 @@ async fn process_replay_request(
         serde_json::to_string(&parsed.events).map_err(|_| "Failed to serialize events")?;
 
     let tracking_ctx = TrackingContext {
-        owner_id: ctx.owner_id,
+        owner_id: ctx.owner_id.clone(),
         token: parsed.token.clone(),
-        organization_id: ctx.organization_id,
+        organization_id: ctx.organization_id.clone(),
     };
 
     let replay_row = crate::tinybird::ReplayRow {

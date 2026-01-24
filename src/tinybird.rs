@@ -139,7 +139,7 @@ impl TinybirdClient {
                 .pool_idle_timeout(std::time::Duration::from_secs(30))
                 .pool_max_idle_per_host(5)
                 .build()
-                .expect("Failed to build HTTP client"),
+                .unwrap_or_else(|_| Client::new()),
             base_url,
             token,
         }
@@ -158,7 +158,7 @@ impl TinybirdClient {
 
         let mut ndjson = Vec::with_capacity(rows.len() * 256);
         for row in rows {
-            serde_json::to_writer(&mut ndjson, row).expect("Failed to serialize row");
+            serde_json::to_writer(&mut ndjson, row)?;
             ndjson.push(b'\n');
         }
 
@@ -191,7 +191,7 @@ impl TinybirdClient {
         Ok(())
     }
 
-    pub async fn insert_events_ref(&self, events: &[&EventRow]) -> Result<(), TinybirdError> {
+    pub async fn insert_events(&self, events: &[&EventRow]) -> Result<(), TinybirdError> {
         self.send_batch("events", events).await
     }
 
@@ -199,7 +199,7 @@ impl TinybirdClient {
         self.send_batch("error_", errors).await
     }
 
-    pub async fn insert_error_trackings_ref(
+    pub async fn insert_error_trackings(
         &self,
         rows: &[&ErrorTrackingRow],
         rows: &[&ErrorTrackingRow],
@@ -207,11 +207,11 @@ impl TinybirdClient {
         self.send_batch("error_tracking", rows).await
     }
 
-    pub async fn insert_web_vitals_ref(&self, rows: &[&WebVitalRow]) -> Result<(), TinybirdError> {
+    pub async fn insert_web_vitals(&self, rows: &[&WebVitalRow]) -> Result<(), TinybirdError> {
         self.send_batch("web_vitals", rows).await
     }
 
-    pub async fn insert_replays_ref(&self, rows: &[&ReplayRow]) -> Result<(), TinybirdError> {
+    pub async fn insert_replays(&self, rows: &[&ReplayRow]) -> Result<(), TinybirdError> {
         self.send_batch("session_replays", rows).await
     }
 }

@@ -699,7 +699,7 @@ impl BatchQueue {
                     Ok(())
                 } else {
                     let rows: Vec<_> = events.iter().map(|(e, _)| e).collect();
-                    self.tinybird.insert_events_ref(&rows).await
+                    self.tinybird.insert_events(&rows).await
                 }
             },
             async {
@@ -714,7 +714,7 @@ impl BatchQueue {
                     Ok(())
                 } else {
                     let rows: Vec<_> = error_trackings.iter().map(|(e, _)| e).collect();
-                    self.tinybird.insert_error_trackings_ref(&rows).await
+                    self.tinybird.insert_error_trackings(&rows).await
                 }
             },
             async {
@@ -722,7 +722,7 @@ impl BatchQueue {
                     Ok(())
                 } else {
                     let rows: Vec<_> = web_vitals.iter().map(|(e, _)| e).collect();
-                    self.tinybird.insert_web_vitals_ref(&rows).await
+                    self.tinybird.insert_web_vitals(&rows).await
                 }
             },
             async {
@@ -730,7 +730,7 @@ impl BatchQueue {
                     Ok(())
                 } else {
                     let rows: Vec<_> = replays.iter().map(|(e, _)| e).collect();
-                    self.tinybird.insert_replays_ref(&rows).await
+                    self.tinybird.insert_replays(&rows).await
                 }
             },
         );

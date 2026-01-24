@@ -82,6 +82,7 @@ pub enum TinybirdError {
     Request(reqwest::Error),
     Api { status: u16, message: String },
     Compression(std::io::Error),
+    Serialization(serde_json::Error),
 }
 
 impl From<reqwest::Error> for TinybirdError {
@@ -96,6 +97,12 @@ impl From<std::io::Error> for TinybirdError {
     }
 }
 
+impl From<serde_json::Error> for TinybirdError {
+    fn from(err: serde_json::Error) -> Self {
+        TinybirdError::Serialization(err)
+    }
+}
+
 impl std::fmt::Display for TinybirdError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -104,6 +111,7 @@ impl std::fmt::Display for TinybirdError {
                 write!(f, "Tinybird API error ({}): {}", status, message)
             }
             TinybirdError::Compression(e) => write!(f, "Compression error: {}", e),
+            TinybirdError::Serialization(e) => write!(f, "Serialization error: {}", e),
         }
     }
 }
@@ -113,7 +121,7 @@ impl TinybirdError {
         match self {
             TinybirdError::Request(e) => e.is_timeout() || e.is_connect() || e.is_request(),
             TinybirdError::Api { status, .. } => *status == 429 || *status >= 500,
-            TinybirdError::Compression(_) => false,
+            TinybirdError::Compression(_) | TinybirdError::Serialization(_) => false,
         }
     }
 }
@@ -131,7 +139,7 @@ impl TinybirdClient {
                 .pool_idle_timeout(std::time::Duration::from_secs(30))
                 .pool_max_idle_per_host(5)
                 .build()
-                .expect("Failed to build HTTP client"),
+                .unwrap_or_else(|_| Client::new()),
             base_url,
             token,
         }
@@ -150,7 +158,7 @@ impl TinybirdClient {
 
         let mut ndjson = Vec::with_capacity(rows.len() * 256);
         for row in rows {
-            serde_json::to_writer(&mut ndjson, row).expect("Failed to serialize row");
+            serde_json::to_writer(&mut ndjson, row)?;
             ndjson.push(b'\n');
         }
 
@@ -179,7 +187,7 @@ impl TinybirdClient {
         Ok(())
     }
 
-    pub async fn insert_events_ref(&self, events: &[&EventRow]) -> Result<(), TinybirdError> {
+    pub async fn insert_events(&self, events: &[&EventRow]) -> Result<(), TinybirdError> {
         self.send_batch("events", events).await
     }
 
@@ -187,18 +195,18 @@ impl TinybirdClient {
         self.send_batch("error_", errors).await
     }
 
-    pub async fn insert_error_trackings_ref(
+    pub async fn insert_error_trackings(
         &self,
         rows: &[&ErrorTrackingRow],
     ) -> Result<(), TinybirdError> {
         self.send_batch("error_tracking", rows).await
     }
 
-    pub async fn insert_web_vitals_ref(&self, rows: &[&WebVitalRow]) -> Result<(), TinybirdError> {
+    pub async fn insert_web_vitals(&self, rows: &[&WebVitalRow]) -> Result<(), TinybirdError> {
         self.send_batch("web_vitals", rows).await
     }
 
-    pub async fn insert_replays_ref(&self, rows: &[&ReplayRow]) -> Result<(), TinybirdError> {
+    pub async fn insert_replays(&self, rows: &[&ReplayRow]) -> Result<(), TinybirdError> {
         self.send_batch("session_replays", rows).await
     }
 }

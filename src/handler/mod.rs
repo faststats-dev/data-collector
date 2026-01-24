@@ -621,9 +621,9 @@ async fn process_replay_request(
         serde_json::to_string(&parsed.events).map_err(|_| "Failed to serialize events")?;
 
     let tracking_ctx = TrackingContext {
-        owner_id: ctx.owner_id,
+        owner_id: ctx.owner_id.clone(),
         token: parsed.token.clone(),
-        organization_id: ctx.organization_id,
+        organization_id: ctx.organization_id.clone(),
     };
 
     let replay_row = crate::tinybird::ReplayRow {

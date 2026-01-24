@@ -164,19 +164,30 @@ impl InMemoryBatch {
     }
 
     fn aggregate_usage(&self) -> AggregatedUsage {
-        let mut usage_by_owner: HashMap<String, UsageCounts> = HashMap::new();
-        let mut token_by_owner: HashMap<String, String> = HashMap::new();
-        let mut org_by_owner: HashMap<String, Option<String>> = HashMap::new();
+        let estimated_owners = (self.events.len()
+            + self.error_trackings.len()
+            + self.web_vitals.len()
+            + self.replays.len())
+        .min(100);
+
+        let mut usage_by_owner: HashMap<String, UsageCounts> =
+            HashMap::with_capacity(estimated_owners);
+        let mut token_by_owner: HashMap<String, String> = HashMap::with_capacity(estimated_owners);
+        let mut org_by_owner: HashMap<String, Option<String>> =
+            HashMap::with_capacity(estimated_owners);
 
         let mut track = |ctx: &TrackingContext, update: fn(&mut UsageCounts)| {
             let owner_id = &ctx.owner_id;
-            update(usage_by_owner.entry(owner_id.clone()).or_default());
-            token_by_owner
-                .entry(owner_id.clone())
-                .or_insert_with(|| ctx.token.clone());
-            org_by_owner
-                .entry(owner_id.clone())
-                .or_insert_with(|| ctx.organization_id.clone());
+
+            if let Some(counts) = usage_by_owner.get_mut(owner_id) {
+                update(counts);
+            } else {
+                let mut counts = UsageCounts::default();
+                update(&mut counts);
+                usage_by_owner.insert(owner_id.clone(), counts);
+                token_by_owner.insert(owner_id.clone(), ctx.token.clone());
+                org_by_owner.insert(owner_id.clone(), ctx.organization_id.clone());
+            }
         };
 
         for (_, ctx) in &self.events {
@@ -682,18 +693,13 @@ impl BatchQueue {
             replays,
         } = batch;
 
-        // Extract just the rows for Tinybird (without tracking context)
-        let event_rows: Vec<_> = events.iter().map(|(e, _)| e.clone()).collect();
-        let error_tracking_rows: Vec<_> = error_trackings.iter().map(|(e, _)| e.clone()).collect();
-        let web_vital_rows: Vec<_> = web_vitals.iter().map(|(e, _)| e.clone()).collect();
-        let replay_rows: Vec<_> = replays.iter().map(|(e, _)| e.clone()).collect();
-
         let (events_res, errors_res, error_trackings_res, web_vitals_res, replays_res) = tokio::join!(
             async {
-                if event_rows.is_empty() {
+                if events.is_empty() {
                     Ok(())
                 } else {
-                    self.tinybird.insert_events(&event_rows).await
+                    let rows: Vec<_> = events.iter().map(|(e, _)| e).collect();
+                    self.tinybird.insert_events(&rows).await
                 }
             },
             async {
@@ -704,26 +710,27 @@ impl BatchQueue {
                 }
             },
             async {
-                if error_tracking_rows.is_empty() {
+                if error_trackings.is_empty() {
                     Ok(())
                 } else {
-                    self.tinybird
-                        .insert_error_trackings(&error_tracking_rows)
-                        .await
+                    let rows: Vec<_> = error_trackings.iter().map(|(e, _)| e).collect();
+                    self.tinybird.insert_error_trackings(&rows).await
                 }
             },
             async {
-                if web_vital_rows.is_empty() {
+                if web_vitals.is_empty() {
                     Ok(())
                 } else {
-                    self.tinybird.insert_web_vitals(&web_vital_rows).await
+                    let rows: Vec<_> = web_vitals.iter().map(|(e, _)| e).collect();
+                    self.tinybird.insert_web_vitals(&rows).await
                 }
             },
             async {
-                if replay_rows.is_empty() {
+                if replays.is_empty() {
                     Ok(())
                 } else {
-                    self.tinybird.insert_replays(&replay_rows).await
+                    let rows: Vec<_> = replays.iter().map(|(e, _)| e).collect();
+                    self.tinybird.insert_replays(&rows).await
                 }
             },
         );

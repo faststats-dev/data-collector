@@ -72,7 +72,11 @@ pub struct UsageCounts {
 impl PolarClient {
     pub fn new(token: String) -> Self {
         Self {
-            client: Client::new(),
+            client: Client::builder()
+                .pool_idle_timeout(std::time::Duration::from_secs(30))
+                .pool_max_idle_per_host(2)
+                .build()
+                .unwrap_or_else(|_| Client::new()),
             token,
         }
     }

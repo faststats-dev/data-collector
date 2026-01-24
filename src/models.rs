@@ -14,7 +14,7 @@ pub struct AppState {
     pub batch_queue: Arc<BatchQueue>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DataSource {
     pub reference_id: String,
     pub name: String,

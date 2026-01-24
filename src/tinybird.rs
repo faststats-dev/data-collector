@@ -82,6 +82,7 @@ pub enum TinybirdError {
     Request(reqwest::Error),
     Api { status: u16, message: String },
     Compression(std::io::Error),
+    Serialization(serde_json::Error),
 }
 
 impl From<reqwest::Error> for TinybirdError {
@@ -96,6 +97,12 @@ impl From<std::io::Error> for TinybirdError {
     }
 }
 
+impl From<serde_json::Error> for TinybirdError {
+    fn from(err: serde_json::Error) -> Self {
+        TinybirdError::Serialization(err)
+    }
+}
+
 impl std::fmt::Display for TinybirdError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -104,6 +111,7 @@ impl std::fmt::Display for TinybirdError {
                 write!(f, "Tinybird API error ({}): {}", status, message)
             }
             TinybirdError::Compression(e) => write!(f, "Compression error: {}", e),
+            TinybirdError::Serialization(e) => write!(f, "Serialization error: {}", e),
         }
     }
 }
@@ -113,13 +121,13 @@ impl TinybirdError {
         match self {
             TinybirdError::Request(e) => e.is_timeout() || e.is_connect() || e.is_request(),
             TinybirdError::Api { status, .. } => *status == 429 || *status >= 500,
-            TinybirdError::Compression(_) => false,
+            TinybirdError::Compression(_) | TinybirdError::Serialization(_) => false,
         }
     }
 }
 
 fn gzip_compress(data: &[u8]) -> Result<Vec<u8>, std::io::Error> {
-    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    let mut encoder = GzEncoder::new(Vec::with_capacity(data.len() / 4), Compression::default());
     encoder.write_all(data)?;
     encoder.finish()
 }
@@ -127,7 +135,11 @@ fn gzip_compress(data: &[u8]) -> Result<Vec<u8>, std::io::Error> {
 impl TinybirdClient {
     pub fn new(base_url: String, token: String) -> Self {
         Self {
-            client: Client::new(),
+            client: Client::builder()
+                .pool_idle_timeout(std::time::Duration::from_secs(30))
+                .pool_max_idle_per_host(5)
+                .build()
+                .unwrap_or_else(|_| Client::new()),
             base_url,
             token,
         }
@@ -144,13 +156,14 @@ impl TinybirdClient {
 
         let url = format!("{}/v0/events?name={}&wait=true", self.base_url, datasource);
 
-        let body = rows
-            .iter()
-            .map(|row| serde_json::to_string(row).expect("Failed to serialize row"))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let mut ndjson = Vec::with_capacity(rows.len() * 256);
+        for row in rows {
+            serde_json::to_writer(&mut ndjson, row)?;
+            ndjson.push(b'\n');
+        }
 
-        let compressed = gzip_compress(body.as_bytes())?;
+        let compressed = gzip_compress(&ndjson)?;
+        drop(ndjson);
 
         let response = self
             .client
@@ -169,10 +182,12 @@ impl TinybirdClient {
             return Err(TinybirdError::Api { status, message });
         }
 
+        let _ = response.bytes().await;
+
         Ok(())
     }
 
-    pub async fn insert_events(&self, events: &[EventRow]) -> Result<(), TinybirdError> {
+    pub async fn insert_events(&self, events: &[&EventRow]) -> Result<(), TinybirdError> {
         self.send_batch("events", events).await
     }
 
@@ -182,16 +197,16 @@ impl TinybirdClient {
 
     pub async fn insert_error_trackings(
         &self,
-        rows: &[ErrorTrackingRow],
+        rows: &[&ErrorTrackingRow],
     ) -> Result<(), TinybirdError> {
         self.send_batch("error_tracking", rows).await
     }
 
-    pub async fn insert_web_vitals(&self, rows: &[WebVitalRow]) -> Result<(), TinybirdError> {
+    pub async fn insert_web_vitals(&self, rows: &[&WebVitalRow]) -> Result<(), TinybirdError> {
         self.send_batch("web_vitals", rows).await
     }
 
-    pub async fn insert_replays(&self, rows: &[ReplayRow]) -> Result<(), TinybirdError> {
+    pub async fn insert_replays(&self, rows: &[&ReplayRow]) -> Result<(), TinybirdError> {
         self.send_batch("session_replays", rows).await
     }
 }

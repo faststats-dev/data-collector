@@ -175,9 +175,30 @@ impl InMemoryBatch {
         let mut token_by_owner: HashMap<String, String> = HashMap::with_capacity(estimated_owners);
         let mut org_by_owner: HashMap<String, Option<String>> =
             HashMap::with_capacity(estimated_owners);
+        let estimated_owners = (self.events.len()
+            + self.error_trackings.len()
+            + self.web_vitals.len()
+            + self.replays.len())
+        .min(100);
+
+        let mut usage_by_owner: HashMap<String, UsageCounts> =
+            HashMap::with_capacity(estimated_owners);
+        let mut token_by_owner: HashMap<String, String> = HashMap::with_capacity(estimated_owners);
+        let mut org_by_owner: HashMap<String, Option<String>> =
+            HashMap::with_capacity(estimated_owners);
 
         let mut track = |ctx: &TrackingContext, update: fn(&mut UsageCounts)| {
             let owner_id = &ctx.owner_id;
+
+            if let Some(counts) = usage_by_owner.get_mut(owner_id) {
+                update(counts);
+            } else {
+                let mut counts = UsageCounts::default();
+                update(&mut counts);
+                usage_by_owner.insert(owner_id.clone(), counts);
+                token_by_owner.insert(owner_id.clone(), ctx.token.clone());
+                org_by_owner.insert(owner_id.clone(), ctx.organization_id.clone());
+            }
 
             if let Some(counts) = usage_by_owner.get_mut(owner_id) {
                 update(counts);
@@ -696,10 +717,11 @@ impl BatchQueue {
         let (events_res, errors_res, error_trackings_res, web_vitals_res, replays_res) = tokio::join!(
             async {
                 if events.is_empty() {
+                if events.is_empty() {
                     Ok(())
                 } else {
                     let rows: Vec<_> = events.iter().map(|(e, _)| e).collect();
-                    self.tinybird.insert_events(&rows).await
+                    self.tinybird.insert_events_ref(&rows).await
                 }
             },
             async {
@@ -711,26 +733,29 @@ impl BatchQueue {
             },
             async {
                 if error_trackings.is_empty() {
+                if error_trackings.is_empty() {
                     Ok(())
                 } else {
                     let rows: Vec<_> = error_trackings.iter().map(|(e, _)| e).collect();
-                    self.tinybird.insert_error_trackings(&rows).await
+                    self.tinybird.insert_error_trackings_ref(&rows).await
                 }
             },
             async {
                 if web_vitals.is_empty() {
+                if web_vitals.is_empty() {
                     Ok(())
                 } else {
                     let rows: Vec<_> = web_vitals.iter().map(|(e, _)| e).collect();
-                    self.tinybird.insert_web_vitals(&rows).await
+                    self.tinybird.insert_web_vitals_ref(&rows).await
                 }
             },
             async {
                 if replays.is_empty() {
+                if replays.is_empty() {
                     Ok(())
                 } else {
                     let rows: Vec<_> = replays.iter().map(|(e, _)| e).collect();
-                    self.tinybird.insert_replays(&rows).await
+                    self.tinybird.insert_replays_ref(&rows).await
                 }
             },
         );

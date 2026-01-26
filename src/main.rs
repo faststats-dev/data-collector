@@ -15,6 +15,7 @@ mod models;
 mod polar;
 mod salt;
 mod tinybird;
+pub mod ua_parser;
 mod utils;
 mod validation;
 
@@ -44,6 +45,14 @@ async fn main() {
     #[cfg(debug_assertions)]
     {
         dotenvy::dotenv().ok();
+    }
+
+    // Initialize user agent parser
+    if let Err(e) = ua_parser::init() {
+        eprintln!("Warning: Failed to initialize UA parser: {}", e);
+        eprintln!("User agent parsing will be disabled");
+    } else {
+        eprintln!("UA parser initialized successfully");
     }
 
     let database_url = std::env::var("DATABASE_URL")

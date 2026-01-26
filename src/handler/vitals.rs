@@ -35,6 +35,7 @@ pub struct WebVitalMetric {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WebVitalRequest {
+    pub anonymous_id: Uuid,
     pub vitals: Vec<WebVitalMetric>,
     #[serde(default)]
     pub metadata: Option<WebVitalsMetadata>,
@@ -125,6 +126,7 @@ pub async fn vitals(
     if let Err(e) = insert_web_vitals(
         &state.batch_queue,
         ctx.project_id,
+        req.anonymous_id,
         &req,
         country,
         ua_info,
@@ -141,6 +143,7 @@ pub async fn vitals(
 async fn insert_web_vitals(
     batch_queue: &Arc<BatchQueue>,
     project_id: Uuid,
+    anonymous_id: Uuid,
     req: &WebVitalRequest,
     country: Option<String>,
     ua_info: crate::ua_parser::UserAgentInfo,
@@ -167,6 +170,7 @@ async fn insert_web_vitals(
         let row = WebVitalRow {
             id: Uuid::new_v4(),
             project_id,
+            anonymous_id,
             metric: vital.metric.clone(),
             value: vital.value,
             device: Some(device.clone()),

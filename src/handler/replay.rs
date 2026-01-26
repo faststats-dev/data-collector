@@ -32,6 +32,7 @@ fn is_valid_rrweb_event(event: &Value) -> bool {
 #[serde(rename_all = "camelCase")]
 pub struct ReplayRequest {
     pub token: String,
+    pub anonymous_id: Uuid,
     pub session_id: String,
     #[allow(dead_code)]
     pub sequence: u32,
@@ -128,6 +129,7 @@ pub async fn replay(
     let replay_row = ReplayRow {
         id: Uuid::new_v4(),
         project_id: context.project_id,
+        anonymous_id: parsed.anonymous_id,
         session_id: parsed.session_id,
         events: events_json,
         created_at: chrono::Utc::now(),

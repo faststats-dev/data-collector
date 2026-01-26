@@ -516,30 +516,16 @@ async fn process_web_request(
     let mut data_map = parsed.data;
     enrich_data_with_country(&mut data_map, &HeaderMap::new());
 
+    let server_id = data_map
+        .get("anonymousId")
+        .and_then(|v| v.as_str())
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .ok_or_else(|| "Missing or invalid anonymousId".to_string())?;
+
     let (valid_data, _) =
         crate::validation::validate_and_filter_payload(&data_map, &ctx.datasources);
 
-    let ip = request.client_ip.as_deref().unwrap_or("");
-    let user_agent = request.user_agent.as_deref().unwrap_or("");
-
-    use crate::salt::get_daily_salt;
     use crate::utils::debounce::should_debounce;
-    use sha2::{Digest, Sha256};
-
-    let server_id = {
-        let salt = get_daily_salt().await;
-        let mut hasher = Sha256::new();
-        hasher.update(salt);
-        hasher.update(token.as_bytes());
-        hasher.update(ip.as_bytes());
-        hasher.update(user_agent.as_bytes());
-        let hash = hasher.finalize();
-        let mut bytes = [0u8; 16];
-        bytes.copy_from_slice(&hash[..16]);
-        bytes[6] = (bytes[6] & 0x0f) | 0x40;
-        bytes[8] = (bytes[8] & 0x3f) | 0x80;
-        Uuid::from_bytes(bytes)
-    };
 
     let url = valid_data.get("url").and_then(|v| v.as_str()).unwrap_or("");
     if should_debounce(server_id, url) {
@@ -626,6 +612,7 @@ async fn process_vitals_request(
     #[derive(serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct VitalsRequest {
+        anonymous_id: Uuid,
         vitals: Vec<WebVitalMetric>,
         #[serde(default)]
         metadata: Option<WebVitalsMetadata>,
@@ -667,6 +654,7 @@ async fn process_vitals_request(
         let row = crate::tinybird::WebVitalRow {
             id: Uuid::new_v4(),
             project_id: ctx.project_id,
+            anonymous_id: req.anonymous_id,
             metric: vital.metric.clone(),
             value: vital.value,
             device: device.clone(),
@@ -700,6 +688,7 @@ async fn process_replay_request(
     #[serde(rename_all = "camelCase")]
     struct ReplayRequest {
         token: String,
+        anonymous_id: Uuid,
         session_id: String,
         events: Vec<Value>,
     }
@@ -723,6 +712,7 @@ async fn process_replay_request(
     let replay_row = crate::tinybird::ReplayRow {
         id: Uuid::new_v4(),
         project_id: ctx.project_id,
+        anonymous_id: parsed.anonymous_id,
         session_id: parsed.session_id,
         events: events_json,
         created_at: chrono::Utc::now(),

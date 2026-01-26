@@ -5,7 +5,6 @@ use super::{
 };
 use crate::batch_queue::{FailedRequest, RequestType, TrackingContext};
 use crate::models::{AppState, ErrorTracking};
-use crate::salt::get_daily_salt;
 use crate::utils::debounce::should_debounce;
 use crate::validation::validate_and_filter_payload;
 use axum::body::Bytes;
@@ -14,7 +13,6 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use serde::Deserialize;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use sqlx::Row;
 use sqlx::types::Uuid;
 use std::collections::HashMap;
@@ -26,24 +24,6 @@ struct WebRequest {
     errors: Option<Vec<ErrorTracking>>,
     #[serde(rename = "sessionId")]
     session_id: Option<String>,
-}
-
-async fn generate_visitor_id(token: &str, ip: &str, user_agent: &str) -> Uuid {
-    let salt = get_daily_salt().await;
-
-    let mut hasher = Sha256::new();
-    hasher.update(salt);
-    hasher.update(token.as_bytes());
-    hasher.update(ip.as_bytes());
-    hasher.update(user_agent.as_bytes());
-    let hash = hasher.finalize();
-
-    let mut bytes = [0u8; 16];
-    bytes.copy_from_slice(&hash[..16]);
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-
-    Uuid::from_bytes(bytes)
 }
 
 pub async fn web(
@@ -131,6 +111,15 @@ pub async fn web(
             .map(String::from)
     });
 
+    let anonymous_id = match data_map
+        .get("anonymousId")
+        .and_then(|v| v.as_str())
+        .and_then(|s| Uuid::parse_str(s).ok())
+    {
+        Some(id) => id,
+        None => return error_response(StatusCode::BAD_REQUEST, "Missing or invalid anonymousId"),
+    };
+
     let (mut valid_data, warnings) = validate_and_filter_payload(&data_map, &ctx.datasources);
 
     let user_agent = headers
@@ -143,7 +132,7 @@ pub async fn web(
         None => return success_response(HashMap::new()),
     };
 
-    let server_id = generate_visitor_id(&token, client_ip, user_agent).await;
+    let server_id = anonymous_id;
 
     if !ua_info.browser.is_empty() {
         valid_data.insert("browser".into(), Value::String(ua_info.browser));

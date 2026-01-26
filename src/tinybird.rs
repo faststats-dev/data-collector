@@ -50,6 +50,7 @@ pub struct ErrorTrackingRow {
 pub struct WebVitalRow {
     pub id: Uuid,
     pub project_id: Uuid,
+    pub anonymous_id: Uuid,
     pub metric: String,
     pub value: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -71,6 +72,7 @@ pub struct WebVitalRow {
 pub struct ReplayRow {
     pub id: Uuid,
     pub project_id: Uuid,
+    pub anonymous_id: Uuid,
     pub session_id: String,
     pub events: String,
     #[serde(with = "chrono::serde::ts_milliseconds")]

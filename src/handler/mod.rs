@@ -204,7 +204,10 @@ pub async fn load_project_context(
             .into_iter()
             .map(|row| IpRule {
                 ip_address: row.try_get("ip_address").unwrap_or_default(),
-                allowed: row.try_get("allowed").unwrap_or(true),
+                allowed: row
+                    .try_get::<Option<bool>, _>("allowed")
+                    .unwrap_or(Some(true))
+                    .unwrap_or(true),
             })
             .collect();
 

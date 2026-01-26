@@ -164,8 +164,6 @@ impl TinybirdClient {
 
         let compressed = gzip_compress(&ndjson)?;
         drop(ndjson);
-        let compressed = gzip_compress(&ndjson)?;
-        drop(ndjson);
 
         let response = self
             .client
@@ -186,8 +184,6 @@ impl TinybirdClient {
 
         let _ = response.bytes().await;
 
-        let _ = response.bytes().await;
-
         Ok(())
     }
 
@@ -201,7 +197,6 @@ impl TinybirdClient {
 
     pub async fn insert_error_trackings(
         &self,
-        rows: &[&ErrorTrackingRow],
         rows: &[&ErrorTrackingRow],
     ) -> Result<(), TinybirdError> {
         self.send_batch("error_tracking", rows).await

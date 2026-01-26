@@ -57,7 +57,7 @@ pub async fn collect(
     };
 
     let client_ip = get_client_ip(&headers);
-    if let Err(msg) = check_ip_allowed(&ctx.ip_rules, &client_ip) {
+    if let Err(msg) = check_ip_allowed(&ctx.ip_rules, client_ip) {
         return error_response(StatusCode::FORBIDDEN, msg);
     }
 

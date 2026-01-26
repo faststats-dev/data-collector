@@ -248,22 +248,20 @@ pub fn validate_domain(project_domain: Option<&str>, request_origin: Option<&str
     }
 }
 
-pub fn get_client_ip(headers: &HeaderMap) -> String {
+pub fn get_client_ip(headers: &HeaderMap) -> &str {
     if let Some(cf_ip) = headers
         .get("CF-Connecting-IP")
         .and_then(|v| v.to_str().ok())
     {
-        return cf_ip.to_string();
+        return cf_ip;
     }
 
-    if let Some(xff) = headers.get("X-Forwarded-For").and_then(|v| v.to_str().ok())
-        && let Some(first_ip) = xff.split(',').next()
-    {
-        return first_ip.trim().to_string();
+    if let Some(xff) = headers.get("X-Forwarded-For").and_then(|v| v.to_str().ok()) {
+        return xff.split(',').next().map(|s| s.trim()).unwrap_or("");
     }
 
     if let Some(real_ip) = headers.get("X-Real-IP").and_then(|v| v.to_str().ok()) {
-        return real_ip.to_string();
+        return real_ip;
     }
 
     if let Some(forwarded) = headers.get("Forwarded").and_then(|v| v.to_str().ok()) {
@@ -274,13 +272,12 @@ pub fn get_client_ip(headers: &HeaderMap) -> String {
                     .trim_matches('"')
                     .trim_start_matches('[')
                     .trim_end_matches(']');
-                println!("Forwarded: {}", ip);
-                return ip.split(':').next().unwrap_or(ip).to_string();
+                return ip.split(':').next().unwrap_or(ip);
             }
         }
     }
 
-    String::new()
+    ""
 }
 
 pub fn check_ip_allowed(ip_rules: &[IpRule], client_ip: &str) -> Result<(), &'static str> {
@@ -312,11 +309,8 @@ pub fn check_ip_allowed(ip_rules: &[IpRule], client_ip: &str) -> Result<(), &'st
 }
 
 pub fn enrich_data_with_country(data: &mut HashMap<String, Value>, headers: &HeaderMap) {
-    if let Some(country) = headers
-        .get("CF-IPCountry")
-        .and_then(|value| value.to_str().ok())
-    {
-        data.insert("country".to_string(), Value::String(country.to_string()));
+    if let Some(country) = headers.get("CF-IPCountry").and_then(|v| v.to_str().ok()) {
+        data.insert("country".into(), Value::String(country.into()));
     }
 }
 
@@ -565,15 +559,12 @@ async fn process_web_request(
 
     let mut valid_data = valid_data;
     if !ua_info.browser.is_empty() {
-        valid_data.insert("browser".to_string(), Value::String(ua_info.browser));
+        valid_data.insert("browser".into(), Value::String(ua_info.browser));
     }
     if !ua_info.os.is_empty() {
-        valid_data.insert("os".to_string(), Value::String(ua_info.os));
+        valid_data.insert("os".into(), Value::String(ua_info.os));
     }
-    valid_data.insert(
-        "device".to_string(),
-        Value::String(ua_info.device.to_string()),
-    );
+    valid_data.insert("device".into(), Value::String(ua_info.device.to_string()));
 
     let tracking_ctx = TrackingContext {
         owner_id: ctx.owner_id.clone(),
@@ -912,7 +903,7 @@ mod tests {
         #[test]
         fn returns_empty_when_no_headers() {
             let headers = HeaderMap::new();
-            assert_eq!(get_client_ip(&headers), "");
+            assert!(get_client_ip(&headers).is_empty());
         }
     }
 

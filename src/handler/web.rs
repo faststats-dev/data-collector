@@ -28,7 +28,6 @@ struct WebRequest {
     session_id: Option<String>,
 }
 
-/// Generate a privacy-safe visitor identifier using daily salted hashing
 async fn generate_visitor_id(token: &str, ip: &str, user_agent: &str) -> Uuid {
     let salt = get_daily_salt().await;
 
@@ -41,8 +40,8 @@ async fn generate_visitor_id(token: &str, ip: &str, user_agent: &str) -> Uuid {
 
     let mut bytes = [0u8; 16];
     bytes.copy_from_slice(&hash[..16]);
-    bytes[6] = (bytes[6] & 0x0f) | 0x40; // Version 4
-    bytes[8] = (bytes[8] & 0x3f) | 0x80; // Variant 1
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
 
     Uuid::from_bytes(bytes)
 }
@@ -85,18 +84,19 @@ pub async fn web(
                 .map(String::from);
 
             let client_ip = get_client_ip(&headers);
-            let user_agent = headers
-                .get("User-Agent")
-                .and_then(|v| v.to_str().ok())
-                .map(String::from);
+            let user_agent = headers.get("User-Agent").and_then(|v| v.to_str().ok());
 
             let failed = FailedRequest {
                 request_type: RequestType::Web,
                 token,
                 body: body.to_vec(),
                 country,
-                client_ip: Some(client_ip),
-                user_agent,
+                client_ip: if client_ip.is_empty() {
+                    None
+                } else {
+                    Some(client_ip.to_owned())
+                },
+                user_agent: user_agent.map(str::to_owned),
                 origin: request_origin,
             };
 
@@ -117,7 +117,7 @@ pub async fn web(
     }
 
     let client_ip = get_client_ip(&headers);
-    if let Err(msg) = check_ip_allowed(&ctx.ip_rules, &client_ip) {
+    if let Err(msg) = check_ip_allowed(&ctx.ip_rules, client_ip) {
         return error_response(StatusCode::FORBIDDEN, msg);
     }
 
@@ -138,25 +138,20 @@ pub async fn web(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    // Parse UA and reject bots
     let ua_info = match crate::ua_parser::parse(user_agent) {
         Some(info) => info,
-        None => return success_response(HashMap::new()), // Bot detected, silently ignore
+        None => return success_response(HashMap::new()),
     };
 
-    let server_id = generate_visitor_id(&token, &client_ip, user_agent).await;
+    let server_id = generate_visitor_id(&token, client_ip, user_agent).await;
 
-    // Enrich data with parsed UA info
     if !ua_info.browser.is_empty() {
-        valid_data.insert("browser".to_string(), Value::String(ua_info.browser));
+        valid_data.insert("browser".into(), Value::String(ua_info.browser));
     }
     if !ua_info.os.is_empty() {
-        valid_data.insert("os".to_string(), Value::String(ua_info.os));
+        valid_data.insert("os".into(), Value::String(ua_info.os));
     }
-    valid_data.insert(
-        "device".to_string(),
-        Value::String(ua_info.device.to_string()),
-    );
+    valid_data.insert("device".into(), Value::String(ua_info.device.to_string()));
 
     let url = valid_data.get("url").and_then(|v| v.as_str()).unwrap_or("");
     let is_debounced = should_debounce(server_id, url).await;
@@ -167,7 +162,6 @@ pub async fn web(
         organization_id: ctx.organization_id.clone(),
     };
 
-    // Only insert pageview event if not debounced
     let data_entry_id = if is_debounced {
         Uuid::nil()
     } else {
@@ -185,12 +179,10 @@ pub async fn web(
         }
     };
 
-    // Always process errors, even if pageview was debounced
     if ctx.error_tracking_enabled
         && let Some(errors) = parsed.errors
     {
         for mut error in errors {
-            // Use error's sessionId if present, otherwise fall back to request-level sessionId
             if error.session_id.is_none() {
                 error.session_id = session_id.clone();
             }

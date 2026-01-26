@@ -95,7 +95,7 @@ pub async fn replay(
     };
 
     let client_ip = get_client_ip(&headers);
-    if let Err(msg) = check_ip_allowed(&context.ip_rules, &client_ip) {
+    if let Err(msg) = check_ip_allowed(&context.ip_rules, client_ip) {
         return error_response(StatusCode::FORBIDDEN, msg);
     }
 

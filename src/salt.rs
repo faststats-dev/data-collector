@@ -1,4 +1,4 @@
-use chrono::{NaiveDate, Utc};
+use chrono::{Datelike, NaiveDate, Utc};
 use moka::future::Cache;
 use rand::Rng;
 use std::sync::LazyLock;
@@ -12,8 +12,11 @@ fn generate_salt() -> [u8; 32] {
 
 pub async fn get_daily_salt() -> [u8; 32] {
     let today = Utc::now().date_naive();
+    let first_of_month = today.with_day(1).unwrap();
 
-    DAILY_SALT.get_with(today, async { generate_salt() }).await
+    DAILY_SALT
+        .get_with(first_of_month, async { generate_salt() })
+        .await
 }
 
 #[cfg(test)]

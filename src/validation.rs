@@ -15,9 +15,9 @@ pub fn validate_and_filter_payload(
     data: &HashMap<String, Value>,
     ds_by_ref: &HashMap<String, DataSource>,
 ) -> (HashMap<String, Value>, HashMap<String, String>) {
-    let mut valid_data = HashMap::new();
+    let mut valid_data = HashMap::with_capacity(data.len());
     let mut warnings = HashMap::new();
-    let mut re_cache: HashMap<String, Regex> = HashMap::new();
+    let mut re_cache: HashMap<String, Regex> = HashMap::with_capacity(ds_by_ref.len());
 
     for (ref_id, ds) in ds_by_ref {
         if let Some(pat) = &ds.regex
@@ -57,8 +57,8 @@ pub fn validate_and_filter_payload(
                 }
             }
 
-            valid_data.insert(ref_id.clone(), Value::Array(valid_elements.clone()));
             let valid_count = valid_elements.len();
+            valid_data.insert(ref_id.clone(), Value::Array(valid_elements));
             debug!(
                 "key='{}' VALID=true ({} valid elements)",
                 ref_id, valid_count
@@ -89,51 +89,51 @@ pub fn validate_and_filter_payload(
     (valid_data, warnings)
 }
 
-fn validate_scalar(v: &Value, ds: &DataSource, re: Option<&Regex>) -> Result<(), String> {
+fn validate_scalar(v: &Value, ds: &DataSource, re: Option<&Regex>) -> Result<(), &'static str> {
     match ds.data_type.as_str() {
         "string" => {
-            let s = v.as_str().ok_or_else(|| "expected string".to_string())?;
+            let s = v.as_str().ok_or("expected string")?;
             if let Some(re) = re
                 && !re.is_match(s)
             {
-                return Err("regex mismatch".to_string());
+                return Err("regex mismatch");
             }
             Ok(())
         }
         "boolean" => {
             if v.as_bool().is_none() {
-                return Err("expected boolean".to_string());
+                return Err("expected boolean");
             }
             Ok(())
         }
         "number" => {
-            let n = extract_number(v).ok_or_else(|| "expected number".to_string())?;
+            let n = extract_number(v).ok_or("expected number")?;
             if let Some(false) = ds.allow_float
                 && n.fract() != 0.0
             {
-                return Err("float not allowed; expected integer".to_string());
+                return Err("float not allowed");
             }
             if let Some(false) = ds.allow_negative
                 && n < 0.0
             {
-                return Err("negative not allowed".to_string());
+                return Err("negative not allowed");
             }
             if let Some(min) = ds.min_value
                 && n < min
             {
-                return Err(format!("value {} < min {}", n, min));
+                return Err("value below minimum");
             }
             if let Some(max) = ds.max_value
                 && n > max
             {
-                return Err(format!("value {} > max {}", n, max));
+                return Err("value above maximum");
             }
             if !n.is_finite() {
-                return Err("NaN/Infinity not allowed".to_string());
+                return Err("NaN/Infinity not allowed");
             }
             Ok(())
         }
-        other => Err(format!("unsupported data_type: {}", other)),
+        _ => Err("unsupported data_type"),
     }
 }
 

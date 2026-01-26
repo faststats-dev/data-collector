@@ -177,16 +177,18 @@ impl InMemoryBatch {
             HashMap::with_capacity(estimated_owners);
 
         let mut track = |ctx: &TrackingContext, update: fn(&mut UsageCounts)| {
-            let owner_id = &ctx.owner_id;
-
-            if let Some(counts) = usage_by_owner.get_mut(owner_id) {
-                update(counts);
-            } else {
-                let mut counts = UsageCounts::default();
-                update(&mut counts);
-                usage_by_owner.insert(owner_id.clone(), counts);
-                token_by_owner.insert(owner_id.clone(), ctx.token.clone());
-                org_by_owner.insert(owner_id.clone(), ctx.organization_id.clone());
+            use std::collections::hash_map::Entry;
+            match usage_by_owner.entry(ctx.owner_id.clone()) {
+                Entry::Occupied(mut entry) => {
+                    update(entry.get_mut());
+                }
+                Entry::Vacant(entry) => {
+                    let mut counts = UsageCounts::default();
+                    update(&mut counts);
+                    entry.insert(counts);
+                    token_by_owner.insert(ctx.owner_id.clone(), ctx.token.clone());
+                    org_by_owner.insert(ctx.owner_id.clone(), ctx.organization_id.clone());
+                }
             }
         };
 
@@ -384,10 +386,18 @@ impl BackupStore {
             return Ok(());
         }
 
-        let placeholders: Vec<String> = ids.iter().map(|_| "?".to_string()).collect();
+        // Build placeholder string without allocating per-element
+        let mut placeholders = String::with_capacity(ids.len() * 3); // "?, " per element
+        for i in 0..ids.len() {
+            if i > 0 {
+                placeholders.push_str(", ");
+            }
+            placeholders.push('?');
+        }
+
         let query = format!(
             "DELETE FROM backed_up_events WHERE id IN ({})",
-            placeholders.join(", ")
+            placeholders
         );
 
         let mut q = sqlx::query(&query);

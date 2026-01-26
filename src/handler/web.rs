@@ -154,7 +154,7 @@ pub async fn web(
     valid_data.insert("device".into(), Value::String(ua_info.device.to_string()));
 
     let url = valid_data.get("url").and_then(|v| v.as_str()).unwrap_or("");
-    let is_debounced = should_debounce(server_id, url).await;
+    let is_debounced = should_debounce(server_id, url);
 
     let tracking_ctx = TrackingContext {
         owner_id: ctx.owner_id.clone(),

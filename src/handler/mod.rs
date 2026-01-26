@@ -542,7 +542,7 @@ async fn process_web_request(
     };
 
     let url = valid_data.get("url").and_then(|v| v.as_str()).unwrap_or("");
-    if should_debounce(server_id, url).await {
+    if should_debounce(server_id, url) {
         return Ok(());
     }
 

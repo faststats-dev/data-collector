@@ -1,6 +1,6 @@
 use super::{
-    EncodingQuery, HandlerResponse, decompress_body, error_response, get_authorization,
-    load_project_context,
+    EncodingQuery, HandlerResponse, check_ip_allowed, decompress_body, error_response,
+    get_authorization, get_client_ip, load_project_context,
 };
 use crate::batch_queue::{BatchQueue, FailedRequest, QueuedEvent, RequestType, TrackingContext};
 use crate::models::AppState;
@@ -88,6 +88,11 @@ pub async fn vitals(
         }
     };
 
+    let client_ip = get_client_ip(&headers);
+    if let Err(msg) = check_ip_allowed(&ctx.ip_rules, client_ip) {
+        return error_response(StatusCode::FORBIDDEN, msg);
+    }
+
     let req: WebVitalRequest = match serde_json::from_slice(&body) {
         Ok(req) => req,
         Err(_) => return error_response(StatusCode::BAD_REQUEST, "Invalid JSON"),
@@ -108,14 +113,13 @@ pub async fn vitals(
         .and_then(|v| v.to_str().ok())
         .map(String::from);
 
-    // Parse UA and reject bots
     let user_agent = headers
         .get("User-Agent")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     let ua_info = match crate::ua_parser::parse(user_agent) {
         Some(info) => info,
-        None => return (StatusCode::OK, Json(json!({ "status": "success" }))), // Bot detected
+        None => return (StatusCode::OK, Json(json!({ "status": "success" }))),
     };
 
     if let Err(e) = insert_web_vitals(
@@ -144,7 +148,6 @@ async fn insert_web_vitals(
 ) -> Result<(), HandlerResponse> {
     let now = chrono::Utc::now();
     let metadata = req.metadata.as_ref();
-    // Use metadata from request body if available, otherwise fall back to parsed UA
     let device = metadata
         .and_then(|m| m.device.clone())
         .unwrap_or_else(|| ua_info.device.to_string());
@@ -155,6 +158,12 @@ async fn insert_web_vitals(
     let url = metadata.and_then(|m| m.url.clone()).unwrap_or_default();
 
     for vital in &req.vitals {
+        let attributes = vital
+            .attributes
+            .as_ref()
+            .and_then(|a| serde_json::to_string(a).ok())
+            .unwrap_or_else(|| "{}".into());
+
         let row = WebVitalRow {
             id: Uuid::new_v4(),
             project_id,
@@ -165,11 +174,7 @@ async fn insert_web_vitals(
             os: Some(os.clone()),
             browser: Some(browser.clone()),
             url: url.clone(),
-            attributes: vital
-                .attributes
-                .as_ref()
-                .and_then(|a| serde_json::to_string(a).ok())
-                .unwrap_or_else(|| "{}".to_string()),
+            attributes,
             session_id: req.session_id.clone(),
             created_at: now,
         };

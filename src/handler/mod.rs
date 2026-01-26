@@ -95,6 +95,11 @@ pub fn success_response(warnings: HashMap<String, String>) -> HandlerResponse {
     }
 }
 
+pub struct IpRule {
+    pub ip_address: String,
+    pub allowed: bool,
+}
+
 pub struct ProjectContext {
     pub project_id: Uuid,
     pub owner_id: String,
@@ -102,6 +107,7 @@ pub struct ProjectContext {
     pub domain: Option<String>,
     pub datasources: HashMap<String, DataSource>,
     pub error_tracking_enabled: bool,
+    pub ip_rules: Vec<IpRule>,
 }
 
 pub async fn load_project_context(
@@ -129,12 +135,15 @@ pub async fn load_project_context(
                 WHEN o.id IS NOT NULL THEN m.user_id
                 ELSE p.owner_id
             END AS billing_customer_id,
-            o.id AS organization_id
+            o.id AS organization_id,
+            ip.ip_address,
+            ip.allowed AS ip_allowed
         FROM project p
         LEFT JOIN data_sources d ON d.project_id = p.id
         LEFT JOIN \"user\" u ON u.id = p.owner_id
         LEFT JOIN organization o ON o.id = p.owner_id
         LEFT JOIN member m ON m.organization_id = o.id AND m.role = 'owner'
+        LEFT JOIN ip_addresses ip ON ip.project_id = p.id
         WHERE p.token = $1
         ",
     )
@@ -156,6 +165,8 @@ pub async fn load_project_context(
     let error_tracking_enabled: bool = rows[0].try_get("error_tracking_enabled").unwrap_or(false);
 
     let mut datasources: HashMap<String, DataSource> = HashMap::with_capacity(rows.len());
+    let mut ip_rules_map: HashMap<String, bool> = HashMap::new();
+
     for row in rows {
         let datasource = DataSource {
             reference_id: row
@@ -184,7 +195,23 @@ pub async fn load_project_context(
         if !datasource.reference_id.is_empty() {
             datasources.insert(datasource.reference_id.clone(), datasource);
         }
+
+        if let Ok(Some(ip)) = row.try_get::<Option<String>, _>("ip_address") {
+            let allowed = row
+                .try_get::<Option<bool>, _>("ip_allowed")
+                .unwrap_or(Some(true))
+                .unwrap_or(true);
+            ip_rules_map.insert(ip, allowed);
+        }
     }
+
+    let ip_rules = ip_rules_map
+        .into_iter()
+        .map(|(ip_address, allowed)| IpRule {
+            ip_address,
+            allowed,
+        })
+        .collect();
 
     Ok(ProjectContext {
         project_id,
@@ -193,18 +220,17 @@ pub async fn load_project_context(
         domain,
         datasources,
         error_tracking_enabled,
+        ip_rules,
     })
 }
 
 pub fn get_request_origin(headers: &HeaderMap) -> Option<String> {
-    // Try Origin header first (preferred for CORS requests)
     if let Some(origin) = headers.get("Origin").and_then(|v| v.to_str().ok())
         && let Ok(url) = url::Url::parse(origin)
     {
         return url.host_str().map(|h| h.to_string());
     }
 
-    // Fall back to Referer header
     if let Some(referer) = headers.get("Referer").and_then(|v| v.to_str().ok())
         && let Ok(url) = url::Url::parse(referer)
     {
@@ -222,16 +248,71 @@ pub fn validate_domain(project_domain: Option<&str>, request_origin: Option<&str
     }
 }
 
-pub fn enrich_data_with_country(data: &mut HashMap<String, Value>, headers: &HeaderMap) {
-    if let Some(country) = headers
-        .get("CF-IPCountry")
-        .and_then(|value| value.to_str().ok())
+pub fn get_client_ip(headers: &HeaderMap) -> &str {
+    if let Some(cf_ip) = headers
+        .get("CF-Connecting-IP")
+        .and_then(|v| v.to_str().ok())
     {
-        data.insert("country".to_string(), Value::String(country.to_string()));
+        return cf_ip;
+    }
+
+    if let Some(xff) = headers.get("X-Forwarded-For").and_then(|v| v.to_str().ok()) {
+        return xff.split(',').next().map(|s| s.trim()).unwrap_or("");
+    }
+
+    if let Some(real_ip) = headers.get("X-Real-IP").and_then(|v| v.to_str().ok()) {
+        return real_ip;
+    }
+
+    if let Some(forwarded) = headers.get("Forwarded").and_then(|v| v.to_str().ok()) {
+        for part in forwarded.split(';') {
+            let part = part.trim();
+            if let Some(value) = part.strip_prefix("for=") {
+                let ip = value
+                    .trim_matches('"')
+                    .trim_start_matches('[')
+                    .trim_end_matches(']');
+                return ip.split(':').next().unwrap_or(ip);
+            }
+        }
+    }
+
+    ""
+}
+
+pub fn check_ip_allowed(ip_rules: &[IpRule], client_ip: &str) -> Result<(), &'static str> {
+    if ip_rules.is_empty() {
+        return Ok(());
+    }
+
+    let has_whitelist = ip_rules.iter().any(|r| r.allowed);
+
+    if has_whitelist {
+        let is_whitelisted = ip_rules
+            .iter()
+            .any(|r| r.allowed && r.ip_address == client_ip);
+        if is_whitelisted {
+            Ok(())
+        } else {
+            Err("IP address not allowed")
+        }
+    } else {
+        let is_blacklisted = ip_rules
+            .iter()
+            .any(|r| !r.allowed && r.ip_address == client_ip);
+        if is_blacklisted {
+            Err("IP address blocked")
+        } else {
+            Ok(())
+        }
     }
 }
 
-// Tinybird insert functions
+pub fn enrich_data_with_country(data: &mut HashMap<String, Value>, headers: &HeaderMap) {
+    if let Some(country) = headers.get("CF-IPCountry").and_then(|v| v.to_str().ok()) {
+        data.insert("country".into(), Value::String(country.into()));
+    }
+}
 
 pub async fn insert_event(
     batch_queue: &BatchQueue,
@@ -270,8 +351,6 @@ pub async fn insert_event(
     Ok(event_id)
 }
 
-/// Recursively build error rows for insertion.
-/// Returns the ID of the root error and all error rows to be inserted.
 fn build_error_rows(error: &Error, errors: &mut Vec<ErrorRow>) -> Uuid {
     let error_id = Uuid::new_v4();
 
@@ -301,7 +380,6 @@ pub async fn insert_error_entries(
     let mut error_rows = Vec::new();
     let error_id = build_error_rows(&data.error, &mut error_rows);
 
-    // Queue all error rows
     for error_row in error_rows {
         batch_queue
             .queue_event(QueuedEvent::Error(error_row))
@@ -470,7 +548,6 @@ async fn process_web_request(
         return Ok(());
     }
 
-    // Parse UA and reject bots
     let ua_info = match request
         .user_agent
         .as_deref()
@@ -482,15 +559,12 @@ async fn process_web_request(
 
     let mut valid_data = valid_data;
     if !ua_info.browser.is_empty() {
-        valid_data.insert("browser".to_string(), Value::String(ua_info.browser));
+        valid_data.insert("browser".into(), Value::String(ua_info.browser));
     }
     if !ua_info.os.is_empty() {
-        valid_data.insert("os".to_string(), Value::String(ua_info.os));
+        valid_data.insert("os".into(), Value::String(ua_info.os));
     }
-    valid_data.insert(
-        "device".to_string(),
-        Value::String(ua_info.device.to_string()),
-    );
+    valid_data.insert("device".into(), Value::String(ua_info.device.to_string()));
 
     let tracking_ctx = TrackingContext {
         owner_id: ctx.owner_id.clone(),
@@ -710,6 +784,126 @@ mod tests {
                 Some("example.com"),
                 Some("sub.example.com")
             ));
+        }
+    }
+
+    mod ip_filtering {
+        use super::*;
+
+        #[test]
+        fn allows_all_when_no_rules() {
+            let rules: Vec<IpRule> = vec![];
+            assert!(check_ip_allowed(&rules, "192.168.1.1").is_ok());
+            assert!(check_ip_allowed(&rules, "10.0.0.1").is_ok());
+        }
+
+        #[test]
+        fn whitelist_allows_matching_ip() {
+            let rules = vec![
+                IpRule {
+                    ip_address: "192.168.1.1".to_string(),
+                    allowed: true,
+                },
+                IpRule {
+                    ip_address: "192.168.1.2".to_string(),
+                    allowed: true,
+                },
+            ];
+            assert!(check_ip_allowed(&rules, "192.168.1.1").is_ok());
+            assert!(check_ip_allowed(&rules, "192.168.1.2").is_ok());
+        }
+
+        #[test]
+        fn whitelist_blocks_non_matching_ip() {
+            let rules = vec![IpRule {
+                ip_address: "192.168.1.1".to_string(),
+                allowed: true,
+            }];
+            assert!(check_ip_allowed(&rules, "10.0.0.1").is_err());
+            assert!(check_ip_allowed(&rules, "192.168.1.2").is_err());
+        }
+
+        #[test]
+        fn blacklist_blocks_matching_ip() {
+            let rules = vec![IpRule {
+                ip_address: "192.168.1.1".to_string(),
+                allowed: false,
+            }];
+            assert!(check_ip_allowed(&rules, "192.168.1.1").is_err());
+        }
+
+        #[test]
+        fn blacklist_allows_non_matching_ip() {
+            let rules = vec![IpRule {
+                ip_address: "192.168.1.1".to_string(),
+                allowed: false,
+            }];
+            assert!(check_ip_allowed(&rules, "10.0.0.1").is_ok());
+            assert!(check_ip_allowed(&rules, "192.168.1.2").is_ok());
+        }
+
+        #[test]
+        fn whitelist_takes_precedence_over_blacklist() {
+            let rules = vec![
+                IpRule {
+                    ip_address: "192.168.1.1".to_string(),
+                    allowed: true,
+                },
+                IpRule {
+                    ip_address: "10.0.0.1".to_string(),
+                    allowed: false,
+                },
+            ];
+            assert!(check_ip_allowed(&rules, "192.168.1.1").is_ok());
+            assert!(check_ip_allowed(&rules, "10.0.0.1").is_err());
+            assert!(check_ip_allowed(&rules, "172.16.0.1").is_err());
+        }
+    }
+
+    mod get_client_ip_tests {
+        use super::*;
+
+        #[test]
+        fn prefers_cf_connecting_ip() {
+            let mut headers = HeaderMap::new();
+            headers.insert("CF-Connecting-IP", HeaderValue::from_static("1.2.3.4"));
+            headers.insert("X-Forwarded-For", HeaderValue::from_static("5.6.7.8"));
+            headers.insert("X-Real-IP", HeaderValue::from_static("9.10.11.12"));
+            assert_eq!(get_client_ip(&headers), "1.2.3.4");
+        }
+
+        #[test]
+        fn falls_back_to_x_forwarded_for() {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                "X-Forwarded-For",
+                HeaderValue::from_static("5.6.7.8, 1.2.3.4"),
+            );
+            headers.insert("X-Real-IP", HeaderValue::from_static("9.10.11.12"));
+            assert_eq!(get_client_ip(&headers), "5.6.7.8");
+        }
+
+        #[test]
+        fn falls_back_to_x_real_ip() {
+            let mut headers = HeaderMap::new();
+            headers.insert("X-Real-IP", HeaderValue::from_static("9.10.11.12"));
+            assert_eq!(get_client_ip(&headers), "9.10.11.12");
+        }
+
+        #[test]
+        fn parses_forwarded_header() {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                "Forwarded",
+                HeaderValue::from_static("for=192.168.1.1;proto=https"),
+            );
+            assert_eq!(get_client_ip(&headers), "192.168.1.1");
+        }
+
+        #[test]
+        fn returns_empty_when_no_headers() {
+            let headers = HeaderMap::new();
+            assert!(get_client_ip(&headers).is_empty());
         }
     }
 

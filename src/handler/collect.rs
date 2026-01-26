@@ -1,6 +1,6 @@
 use super::{
-    enrich_data_with_country, error_response, get_authorization, insert_error_entries,
-    insert_event, load_project_context, success_response,
+    check_ip_allowed, enrich_data_with_country, error_response, get_authorization, get_client_ip,
+    insert_error_entries, insert_event, load_project_context, success_response,
 };
 use crate::batch_queue::{FailedRequest, RequestType, TrackingContext};
 use crate::models::{AppState, Request};
@@ -55,6 +55,11 @@ pub async fn collect(
             return success_response(HashMap::new());
         }
     };
+
+    let client_ip = get_client_ip(&headers);
+    if let Err(msg) = check_ip_allowed(&ctx.ip_rules, client_ip) {
+        return error_response(StatusCode::FORBIDDEN, msg);
+    }
 
     let req: Request = match serde_json::from_slice(&body) {
         Ok(req) => req,

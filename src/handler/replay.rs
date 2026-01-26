@@ -1,11 +1,13 @@
 use super::{
-    EncodingQuery, decompress_body, error_response, load_project_context, success_response,
+    EncodingQuery, check_ip_allowed, decompress_body, error_response, get_client_ip,
+    load_project_context, success_response,
 };
 use crate::batch_queue::{FailedRequest, QueuedEvent, RequestType, TrackingContext};
 use crate::models::AppState;
 use crate::tinybird::ReplayRow;
 use axum::body::Bytes;
 use axum::extract::{Query, State};
+use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use serde::Deserialize;
@@ -42,6 +44,7 @@ pub struct ReplayRequest {
 
 pub async fn replay(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(query): Query<EncodingQuery>,
     body: Bytes,
 ) -> impl IntoResponse {
@@ -90,6 +93,11 @@ pub async fn replay(
             return success_response(HashMap::new());
         }
     };
+
+    let client_ip = get_client_ip(&headers);
+    if let Err(msg) = check_ip_allowed(&context.ip_rules, client_ip) {
+        return error_response(StatusCode::FORBIDDEN, msg);
+    }
 
     let valid_events: Vec<Value> = parsed
         .events

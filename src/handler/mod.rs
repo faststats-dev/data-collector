@@ -135,15 +135,12 @@ pub async fn load_project_context(
                 WHEN o.id IS NOT NULL THEN m.user_id
                 ELSE p.owner_id
             END AS billing_customer_id,
-            o.id AS organization_id,
-            ip.ip_address,
-            ip.allowed AS ip_allowed
+            o.id AS organization_id
         FROM project p
         LEFT JOIN data_sources d ON d.project_id = p.id
         LEFT JOIN \"user\" u ON u.id = p.owner_id
         LEFT JOIN organization o ON o.id = p.owner_id
         LEFT JOIN member m ON m.organization_id = o.id AND m.role = 'owner'
-        LEFT JOIN ip_addresses ip ON ip.project_id = p.id
         WHERE p.token = $1
         ",
     )
@@ -165,7 +162,6 @@ pub async fn load_project_context(
     let error_tracking_enabled: bool = rows[0].try_get("error_tracking_enabled").unwrap_or(false);
 
     let mut datasources: HashMap<String, DataSource> = HashMap::with_capacity(rows.len());
-    let mut ip_rules_map: HashMap<String, bool> = HashMap::new();
 
     for row in rows {
         let datasource = DataSource {
@@ -195,23 +191,22 @@ pub async fn load_project_context(
         if !datasource.reference_id.is_empty() {
             datasources.insert(datasource.reference_id.clone(), datasource);
         }
-
-        if let Ok(Some(ip)) = row.try_get::<Option<String>, _>("ip_address") {
-            let allowed = row
-                .try_get::<Option<bool>, _>("ip_allowed")
-                .unwrap_or(Some(true))
-                .unwrap_or(true);
-            ip_rules_map.insert(ip, allowed);
-        }
     }
 
-    let ip_rules = ip_rules_map
-        .into_iter()
-        .map(|(ip_address, allowed)| IpRule {
-            ip_address,
-            allowed,
-        })
-        .collect();
+    let ip_rules: Vec<IpRule> =
+        sqlx::query("SELECT ip_address, allowed FROM ip_addresses WHERE project_id = $1")
+            .bind(project_id)
+            .fetch_all(pool)
+            .await
+            .map_err(|_| {
+                error_response(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error")
+            })?
+            .into_iter()
+            .map(|row| IpRule {
+                ip_address: row.try_get("ip_address").unwrap_or_default(),
+                allowed: row.try_get("allowed").unwrap_or(true),
+            })
+            .collect();
 
     Ok(ProjectContext {
         project_id,

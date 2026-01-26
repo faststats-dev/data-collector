@@ -1,7 +1,7 @@
 use super::{
-    EncodingQuery, HandlerResponse, decompress_body, enrich_data_with_country, error_response,
-    get_authorization, get_request_origin, insert_error_entries, insert_event,
-    load_project_context, success_response, validate_domain,
+    EncodingQuery, HandlerResponse, check_ip_allowed, decompress_body, enrich_data_with_country,
+    error_response, get_authorization, get_client_ip, get_request_origin, insert_error_entries,
+    insert_event, load_project_context, success_response, validate_domain,
 };
 use crate::batch_queue::{FailedRequest, RequestType, TrackingContext};
 use crate::models::{AppState, ErrorTracking};
@@ -45,24 +45,6 @@ async fn generate_visitor_id(token: &str, ip: &str, user_agent: &str) -> Uuid {
     bytes[8] = (bytes[8] & 0x3f) | 0x80; // Variant 1
 
     Uuid::from_bytes(bytes)
-}
-
-fn get_client_ip(headers: &HeaderMap) -> String {
-    if let Some(xff) = headers.get("X-Forwarded-For").and_then(|v| v.to_str().ok())
-        && let Some(first_ip) = xff.split(',').next()
-    {
-        return first_ip.trim().to_string();
-    }
-    if let Some(cf_ip) = headers
-        .get("CF-Connecting-IP")
-        .and_then(|v| v.to_str().ok())
-    {
-        return cf_ip.to_string();
-    }
-    if let Some(real_ip) = headers.get("X-Real-IP").and_then(|v| v.to_str().ok()) {
-        return real_ip.to_string();
-    }
-    String::new()
 }
 
 pub async fn web(
@@ -134,6 +116,11 @@ pub async fn web(
         return error_response(StatusCode::FORBIDDEN, "Origin not allowed");
     }
 
+    let client_ip = get_client_ip(&headers);
+    if let Err(msg) = check_ip_allowed(&ctx.ip_rules, &client_ip) {
+        return error_response(StatusCode::FORBIDDEN, msg);
+    }
+
     let mut data_map = parsed.data;
     enrich_data_with_country(&mut data_map, &headers);
 
@@ -146,7 +133,6 @@ pub async fn web(
 
     let (mut valid_data, warnings) = validate_and_filter_payload(&data_map, &ctx.datasources);
 
-    let ip = get_client_ip(&headers);
     let user_agent = headers
         .get("User-Agent")
         .and_then(|v| v.to_str().ok())
@@ -158,7 +144,7 @@ pub async fn web(
         None => return success_response(HashMap::new()), // Bot detected, silently ignore
     };
 
-    let server_id = generate_visitor_id(&token, &ip, user_agent).await;
+    let server_id = generate_visitor_id(&token, &client_ip, user_agent).await;
 
     // Enrich data with parsed UA info
     if !ua_info.browser.is_empty() {

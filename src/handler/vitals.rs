@@ -1,6 +1,6 @@
 use super::{
-    EncodingQuery, HandlerResponse, decompress_body, error_response, get_authorization,
-    load_project_context,
+    EncodingQuery, HandlerResponse, check_ip_allowed, decompress_body, error_response,
+    get_authorization, get_client_ip, load_project_context,
 };
 use crate::batch_queue::{BatchQueue, FailedRequest, QueuedEvent, RequestType, TrackingContext};
 use crate::models::AppState;
@@ -87,6 +87,11 @@ pub async fn vitals(
             return err;
         }
     };
+
+    let client_ip = get_client_ip(&headers);
+    if let Err(msg) = check_ip_allowed(&ctx.ip_rules, &client_ip) {
+        return error_response(StatusCode::FORBIDDEN, msg);
+    }
 
     let req: WebVitalRequest = match serde_json::from_slice(&body) {
         Ok(req) => req,

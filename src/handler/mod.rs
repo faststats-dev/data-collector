@@ -470,6 +470,28 @@ async fn process_web_request(
         return Ok(());
     }
 
+    // Parse UA and reject bots
+    let ua_info = match request
+        .user_agent
+        .as_deref()
+        .and_then(crate::ua_parser::parse)
+    {
+        Some(info) => info,
+        None => return Ok(()), // Bot detected or no UA
+    };
+
+    let mut valid_data = valid_data;
+    if !ua_info.browser.is_empty() {
+        valid_data.insert("browser".to_string(), Value::String(ua_info.browser));
+    }
+    if !ua_info.os.is_empty() {
+        valid_data.insert("os".to_string(), Value::String(ua_info.os));
+    }
+    valid_data.insert(
+        "device".to_string(),
+        Value::String(ua_info.device.to_string()),
+    );
+
     let tracking_ctx = TrackingContext {
         owner_id: ctx.owner_id.clone(),
         token: token.clone(),

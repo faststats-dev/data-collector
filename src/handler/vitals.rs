@@ -108,11 +108,22 @@ pub async fn vitals(
         .and_then(|v| v.to_str().ok())
         .map(String::from);
 
+    // Parse UA and reject bots
+    let user_agent = headers
+        .get("User-Agent")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let ua_info = match crate::ua_parser::parse(user_agent) {
+        Some(info) => info,
+        None => return (StatusCode::OK, Json(json!({ "status": "success" }))), // Bot detected
+    };
+
     if let Err(e) = insert_web_vitals(
         &state.batch_queue,
         ctx.project_id,
         &req,
         country,
+        ua_info,
         tracking_ctx,
     )
     .await
@@ -128,13 +139,19 @@ async fn insert_web_vitals(
     project_id: Uuid,
     req: &WebVitalRequest,
     country: Option<String>,
+    ua_info: crate::ua_parser::UserAgentInfo,
     tracking_ctx: TrackingContext,
 ) -> Result<(), HandlerResponse> {
     let now = chrono::Utc::now();
     let metadata = req.metadata.as_ref();
-    let device = metadata.and_then(|m| m.device.clone());
-    let os = metadata.and_then(|m| m.os.clone());
-    let browser = metadata.and_then(|m| m.browser.clone());
+    // Use metadata from request body if available, otherwise fall back to parsed UA
+    let device = metadata
+        .and_then(|m| m.device.clone())
+        .unwrap_or_else(|| ua_info.device.to_string());
+    let os = metadata.and_then(|m| m.os.clone()).unwrap_or(ua_info.os);
+    let browser = metadata
+        .and_then(|m| m.browser.clone())
+        .unwrap_or(ua_info.browser);
     let url = metadata.and_then(|m| m.url.clone()).unwrap_or_default();
 
     for vital in &req.vitals {
@@ -143,10 +160,10 @@ async fn insert_web_vitals(
             project_id,
             metric: vital.metric.clone(),
             value: vital.value,
-            device: device.clone(),
+            device: Some(device.clone()),
             country: country.clone(),
-            os: os.clone(),
-            browser: browser.clone(),
+            os: Some(os.clone()),
+            browser: Some(browser.clone()),
             url: url.clone(),
             attributes: vital
                 .attributes

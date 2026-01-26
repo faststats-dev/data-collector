@@ -144,14 +144,33 @@ pub async fn web(
             .map(String::from)
     });
 
-    let (valid_data, warnings) = validate_and_filter_payload(&data_map, &ctx.datasources);
+    let (mut valid_data, warnings) = validate_and_filter_payload(&data_map, &ctx.datasources);
 
     let ip = get_client_ip(&headers);
     let user_agent = headers
         .get("User-Agent")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
+
+    // Parse UA and reject bots
+    let ua_info = match crate::ua_parser::parse(user_agent) {
+        Some(info) => info,
+        None => return success_response(HashMap::new()), // Bot detected, silently ignore
+    };
+
     let server_id = generate_visitor_id(&token, &ip, user_agent).await;
+
+    // Enrich data with parsed UA info
+    if !ua_info.browser.is_empty() {
+        valid_data.insert("browser".to_string(), Value::String(ua_info.browser));
+    }
+    if !ua_info.os.is_empty() {
+        valid_data.insert("os".to_string(), Value::String(ua_info.os));
+    }
+    valid_data.insert(
+        "device".to_string(),
+        Value::String(ua_info.device.to_string()),
+    );
 
     let url = valid_data.get("url").and_then(|v| v.as_str()).unwrap_or("");
     let is_debounced = should_debounce(server_id, url).await;

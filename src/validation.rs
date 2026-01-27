@@ -17,19 +17,11 @@ pub fn validate_and_filter_payload(
 ) -> (HashMap<String, Value>, HashMap<String, String>) {
     let mut valid_data = HashMap::with_capacity(data.len());
     let mut warnings = HashMap::new();
-    let mut re_cache: HashMap<String, Regex> = HashMap::with_capacity(ds_by_ref.len());
-
-    for (ref_id, ds) in ds_by_ref {
-        if let Some(pat) = &ds.regex
-            && let Ok(re) = Regex::new(pat)
-        {
-            re_cache.insert(ref_id.clone(), re);
-        }
-    }
+    let mut re_cache: HashMap<&str, Regex> = HashMap::new();
 
     for (ref_id, value) in data {
         let Some(ds) = ds_by_ref.get(ref_id) else {
-            warnings.insert(ref_id.clone(), "no matching data source".to_string());
+            warnings.insert(ref_id.clone(), "no matching data source".into());
             debug!(
                 "key='{}' VALID=false reason='no matching data source'",
                 ref_id
@@ -37,16 +29,27 @@ pub fn validate_and_filter_payload(
             continue;
         };
 
+        let re = if let Some(pat) = ds.regex.as_deref() {
+            if !re_cache.contains_key(ref_id.as_str())
+                && let Ok(compiled) = Regex::new(pat)
+            {
+                re_cache.insert(ref_id.as_str(), compiled);
+            }
+            re_cache.get(ref_id.as_str())
+        } else {
+            None
+        };
+
         if ds.is_array {
             let Some(arr) = value.as_array() else {
-                warnings.insert(ref_id.clone(), "expected array".to_string());
+                warnings.insert(ref_id.clone(), "expected array".into());
                 debug!("key='{}' VALID=false reason='expected array'", ref_id);
                 continue;
             };
 
-            let mut valid_elements = Vec::new();
+            let mut valid_elements = Vec::with_capacity(arr.len());
             for (idx, elem) in arr.iter().enumerate() {
-                if validate_scalar(elem, ds, re_cache.get(ref_id)).is_ok() {
+                if validate_scalar(elem, ds, re).is_ok() {
                     valid_elements.push(elem.clone());
                 } else {
                     warnings.insert(
@@ -67,7 +70,7 @@ pub fn validate_and_filter_payload(
             if value.is_array() {
                 warnings.insert(
                     ref_id.clone(),
-                    "unexpected array (expected single value)".to_string(),
+                    "unexpected array (expected single value)".into(),
                 );
                 debug!(
                     "key='{}' VALID=false reason='unexpected array (expected single value)'",
@@ -76,11 +79,11 @@ pub fn validate_and_filter_payload(
                 continue;
             }
 
-            if validate_scalar(value, ds, re_cache.get(ref_id)).is_ok() {
+            if validate_scalar(value, ds, re).is_ok() {
                 valid_data.insert(ref_id.clone(), value.clone());
                 debug!("key='{}' VALID=true", ref_id);
             } else {
-                warnings.insert(ref_id.clone(), "failed validation".to_string());
+                warnings.insert(ref_id.clone(), "failed validation".into());
                 debug!("key='{}' VALID=false", ref_id);
             }
         }

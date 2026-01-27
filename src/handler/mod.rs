@@ -611,7 +611,6 @@ async fn process_vitals_request(
     #[derive(serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct VitalsRequest {
-        anonymous_id: Uuid,
         vitals: Vec<WebVitalMetric>,
         #[serde(default)]
         metadata: Option<WebVitalsMetadata>,
@@ -653,7 +652,6 @@ async fn process_vitals_request(
         let row = crate::tinybird::WebVitalRow {
             id: Uuid::new_v4(),
             project_id: ctx.project_id,
-            anonymous_id: req.anonymous_id,
             metric: vital.metric.clone(),
             value: vital.value,
             device: device.clone(),
@@ -687,7 +685,6 @@ async fn process_replay_request(
     #[serde(rename_all = "camelCase")]
     struct ReplayRequest {
         token: String,
-        anonymous_id: Uuid,
         session_id: String,
         events: Vec<Value>,
     }
@@ -711,7 +708,6 @@ async fn process_replay_request(
     let replay_row = crate::tinybird::ReplayRow {
         id: Uuid::new_v4(),
         project_id: ctx.project_id,
-        anonymous_id: parsed.anonymous_id,
         session_id: parsed.session_id,
         events: events_json,
         created_at: chrono::Utc::now(),

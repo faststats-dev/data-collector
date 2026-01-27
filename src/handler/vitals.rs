@@ -149,13 +149,21 @@ async fn insert_web_vitals(
     let now = chrono::Utc::now();
     let metadata = req.metadata.as_ref();
     let device = metadata
-        .and_then(|m| m.device.clone())
+        .and_then(|m| m.device.as_deref())
+        .map(str::to_owned)
         .unwrap_or_else(|| ua_info.device.to_string());
-    let os = metadata.and_then(|m| m.os.clone()).unwrap_or(ua_info.os);
+    let os = metadata
+        .and_then(|m| m.os.as_deref())
+        .map(str::to_owned)
+        .unwrap_or(ua_info.os);
     let browser = metadata
-        .and_then(|m| m.browser.clone())
+        .and_then(|m| m.browser.as_deref())
+        .map(str::to_owned)
         .unwrap_or(ua_info.browser);
-    let url = metadata.and_then(|m| m.url.clone()).unwrap_or_default();
+    let url = metadata
+        .and_then(|m| m.url.as_deref())
+        .map(str::to_owned)
+        .unwrap_or_default();
 
     for vital in &req.vitals {
         let attributes = vital

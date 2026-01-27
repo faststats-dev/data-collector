@@ -13,6 +13,7 @@ use crate::models::{DataSource, Error, ErrorTracking};
 use crate::tinybird::{ErrorRow, ErrorTrackingRow, EventRow};
 use axum::Json;
 use axum::http::{HeaderMap, StatusCode};
+use futures::TryStreamExt;
 use serde::Deserialize;
 use serde_json::Value;
 use sqlx::Row;
@@ -114,7 +115,7 @@ pub async fn load_project_context(
     pool: &sqlx::PgPool,
     token: &str,
 ) -> Result<ProjectContext, HandlerResponse> {
-    let rows = sqlx::query(
+    let mut rows = sqlx::query(
         "
         SELECT
             p.id,
@@ -145,51 +146,74 @@ pub async fn load_project_context(
         ",
     )
     .bind(token)
-    .fetch_all(pool)
-    .await
-    .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error"))?;
+    .fetch(pool);
 
-    if rows.is_empty() {
+    let first_row = rows
+        .try_next()
+        .await
+        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error"))?;
+
+    let Some(first) = first_row else {
         return Err(error_response(StatusCode::UNAUTHORIZED, "Unauthorized"));
-    }
+    };
 
-    let project_id: Uuid = rows[0].try_get("id").unwrap();
-    let owner_id: String = rows[0]
+    let project_id: Uuid = first
+        .try_get("id")
+        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error"))?;
+    let owner_id: String = first
         .try_get("billing_customer_id")
-        .unwrap_or_else(|_| rows[0].try_get("owner_id").unwrap());
-    let organization_id: Option<String> = rows[0].try_get("organization_id").unwrap_or(None);
-    let domain: Option<String> = rows[0].try_get("domain").unwrap_or(None);
-    let error_tracking_enabled: bool = rows[0].try_get("error_tracking_enabled").unwrap_or(false);
+        .or_else(|_| first.try_get("owner_id"))
+        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error"))?;
+    let organization_id: Option<String> = first.try_get("organization_id").unwrap_or(None);
+    let domain: Option<String> = first.try_get("domain").unwrap_or(None);
+    let error_tracking_enabled: bool = first.try_get("error_tracking_enabled").unwrap_or(false);
 
-    let mut datasources: HashMap<String, DataSource> = HashMap::with_capacity(rows.len());
+    let mut datasources: HashMap<String, DataSource> = HashMap::new();
 
-    for row in rows {
-        let datasource = DataSource {
-            reference_id: row
-                .try_get::<Option<String>, _>("reference_id")
-                .unwrap_or(None)
-                .unwrap_or_default(),
+    let process_row = |row: &sqlx::postgres::PgRow| -> Option<DataSource> {
+        let reference_id: String = row
+            .try_get::<Option<String>, _>("reference_id")
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        if reference_id.is_empty() {
+            return None;
+        }
+        Some(DataSource {
+            reference_id,
             name: row
                 .try_get::<Option<String>, _>("name")
-                .unwrap_or(None)
+                .ok()
+                .flatten()
                 .unwrap_or_default(),
             data_type: row.try_get::<String, _>("data_type").unwrap_or_default(),
-            regex: row.try_get::<Option<String>, _>("regex").unwrap_or(None),
+            regex: row.try_get::<Option<String>, _>("regex").ok().flatten(),
             allow_negative: row
                 .try_get::<Option<bool>, _>("allow_negative")
-                .unwrap_or(None),
-            allow_float: row
-                .try_get::<Option<bool>, _>("allow_float")
-                .unwrap_or(None),
-            min_value: row.try_get::<Option<f64>, _>("min_value").unwrap_or(None),
-            max_value: row.try_get::<Option<f64>, _>("max_value").unwrap_or(None),
+                .ok()
+                .flatten(),
+            allow_float: row.try_get::<Option<bool>, _>("allow_float").ok().flatten(),
+            min_value: row.try_get::<Option<f64>, _>("min_value").ok().flatten(),
+            max_value: row.try_get::<Option<f64>, _>("max_value").ok().flatten(),
             is_array: row
                 .try_get::<Option<bool>, _>("is_array")
-                .unwrap_or(Some(false))
+                .ok()
+                .flatten()
                 .unwrap_or(false),
-        };
-        if !datasource.reference_id.is_empty() {
-            datasources.insert(datasource.reference_id.clone(), datasource);
+        })
+    };
+
+    if let Some(ds) = process_row(&first) {
+        datasources.insert(ds.reference_id.clone(), ds);
+    }
+
+    while let Some(row) = rows
+        .try_next()
+        .await
+        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error"))?
+    {
+        if let Some(ds) = process_row(&row) {
+            datasources.insert(ds.reference_id.clone(), ds);
         }
     }
 
@@ -283,26 +307,31 @@ pub fn check_ip_allowed(ip_rules: &[IpRule], client_ip: &str) -> Result<(), &'st
         return Ok(());
     }
 
-    let has_whitelist = ip_rules.iter().any(|r| r.allowed);
+    let mut has_whitelist = false;
+    let mut is_whitelisted = false;
+    let mut is_blacklisted = false;
+
+    for rule in ip_rules {
+        if rule.allowed {
+            has_whitelist = true;
+            if rule.ip_address == client_ip {
+                is_whitelisted = true;
+            }
+        } else if rule.ip_address == client_ip {
+            is_blacklisted = true;
+        }
+    }
 
     if has_whitelist {
-        let is_whitelisted = ip_rules
-            .iter()
-            .any(|r| r.allowed && r.ip_address == client_ip);
         if is_whitelisted {
             Ok(())
         } else {
             Err("IP address not allowed")
         }
+    } else if is_blacklisted {
+        Err("IP address blocked")
     } else {
-        let is_blacklisted = ip_rules
-            .iter()
-            .any(|r| !r.allowed && r.ip_address == client_ip);
-        if is_blacklisted {
-            Err("IP address blocked")
-        } else {
-            Ok(())
-        }
+        Ok(())
     }
 }
 

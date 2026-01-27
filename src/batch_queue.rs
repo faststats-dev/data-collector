@@ -25,12 +25,13 @@ const CHANNEL_CAPACITY: usize = 10_000;
 const CHANNEL_BACKPRESSURE_THRESHOLD: usize = 8_000;
 const MAX_BATCH_SIZE: usize = 5000;
 
-/// Aggregated usage data: (usage_by_owner, token_by_owner, org_by_owner)
-type AggregatedUsage = (
-    HashMap<String, UsageCounts>,
-    HashMap<String, String>,
-    HashMap<String, Option<String>>,
-);
+pub struct OwnerUsage {
+    pub counts: UsageCounts,
+    pub token: String,
+    pub org: Option<String>,
+}
+
+pub type AggregatedUsage = HashMap<String, OwnerUsage>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -170,50 +171,62 @@ impl InMemoryBatch {
             + self.replays.len())
         .min(100);
 
-        let mut usage_by_owner: HashMap<String, UsageCounts> =
-            HashMap::with_capacity(estimated_owners);
-        let mut token_by_owner: HashMap<String, String> = HashMap::with_capacity(estimated_owners);
-        let mut org_by_owner: HashMap<String, Option<String>> =
-            HashMap::with_capacity(estimated_owners);
-
-        let mut track = |ctx: &TrackingContext, update: fn(&mut UsageCounts)| {
-            use std::collections::hash_map::Entry;
-            match usage_by_owner.entry(ctx.owner_id.clone()) {
-                Entry::Occupied(mut entry) => {
-                    update(entry.get_mut());
-                }
-                Entry::Vacant(entry) => {
-                    let mut counts = UsageCounts::default();
-                    update(&mut counts);
-                    entry.insert(counts);
-                    token_by_owner.insert(ctx.owner_id.clone(), ctx.token.clone());
-                    org_by_owner.insert(ctx.owner_id.clone(), ctx.organization_id.clone());
-                }
-            }
-        };
+        let mut usage: AggregatedUsage = HashMap::with_capacity(estimated_owners);
 
         for (_, ctx) in &self.events {
             if let Some(ctx) = ctx {
-                track(ctx, |c| c.events += 1);
+                usage
+                    .entry(ctx.owner_id.clone())
+                    .or_insert_with(|| OwnerUsage {
+                        counts: UsageCounts::default(),
+                        token: ctx.token.clone(),
+                        org: ctx.organization_id.clone(),
+                    })
+                    .counts
+                    .events += 1;
             }
         }
         for (_, ctx) in &self.error_trackings {
             if let Some(ctx) = ctx {
-                track(ctx, |c| c.error_tracking += 1);
+                usage
+                    .entry(ctx.owner_id.clone())
+                    .or_insert_with(|| OwnerUsage {
+                        counts: UsageCounts::default(),
+                        token: ctx.token.clone(),
+                        org: ctx.organization_id.clone(),
+                    })
+                    .counts
+                    .error_tracking += 1;
             }
         }
         for (_, ctx) in &self.web_vitals {
             if let Some(ctx) = ctx {
-                track(ctx, |c| c.web_vitals += 1);
+                usage
+                    .entry(ctx.owner_id.clone())
+                    .or_insert_with(|| OwnerUsage {
+                        counts: UsageCounts::default(),
+                        token: ctx.token.clone(),
+                        org: ctx.organization_id.clone(),
+                    })
+                    .counts
+                    .web_vitals += 1;
             }
         }
         for (_, ctx) in &self.replays {
             if let Some(ctx) = ctx {
-                track(ctx, |c| c.session_replays += 1);
+                usage
+                    .entry(ctx.owner_id.clone())
+                    .or_insert_with(|| OwnerUsage {
+                        counts: UsageCounts::default(),
+                        token: ctx.token.clone(),
+                        org: ctx.organization_id.clone(),
+                    })
+                    .counts
+                    .session_replays += 1;
             }
         }
 
-        (usage_by_owner, token_by_owner, org_by_owner)
+        usage
     }
 }
 
@@ -597,21 +610,16 @@ impl BatchQueue {
         let total = batch.total_count();
         eprintln!("Flushing in-memory batch of {} events", total);
 
-        // Aggregate usage before sending (we need the data before batch is consumed)
-        let (usage_by_owner, token_by_owner, org_by_owner) = batch.aggregate_usage();
+        let usage = batch.aggregate_usage();
 
         self.send_batch_with_retry(batch).await;
 
-        // Send usage to Polar for billing (fire and forget, don't block on billing)
         if let Some(polar) = &self.polar
-            && !usage_by_owner.is_empty()
+            && !usage.is_empty()
         {
             let polar = Arc::clone(polar);
             tokio::spawn(async move {
-                match polar
-                    .ingest_usage(&usage_by_owner, &token_by_owner, &org_by_owner)
-                    .await
-                {
+                match polar.ingest_usage(&usage).await {
                     Ok(response) => {
                         eprintln!(
                             "Polar usage ingested: {} inserted, {} duplicates",

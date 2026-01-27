@@ -41,12 +41,18 @@ pub async fn web(
 
     let header_token = get_authorization(&headers);
 
-    let parsed: WebRequest = match serde_json::from_slice(&body) {
+    let WebRequest {
+        token: body_token,
+        anonymous_id,
+        data,
+        errors,
+        session_id: parsed_session_id,
+    } = match serde_json::from_slice(&body) {
         Ok(req) => req,
         Err(_) => return error_response(StatusCode::BAD_REQUEST, "Invalid JSON"),
     };
 
-    let token = match parsed.token.clone().or(header_token) {
+    let token = match body_token.or(header_token) {
         Some(t) => t,
         None => return error_response(StatusCode::UNAUTHORIZED, "Unauthorized"),
     };
@@ -103,10 +109,10 @@ pub async fn web(
         return error_response(StatusCode::FORBIDDEN, msg);
     }
 
-    let mut data_map = parsed.data;
+    let mut data_map = data;
     enrich_data_with_country(&mut data_map, &headers);
 
-    let session_id = parsed.session_id.or_else(|| {
+    let session_id = parsed_session_id.or_else(|| {
         data_map
             .get("session_id")
             .and_then(|v| v.as_str())
@@ -125,7 +131,7 @@ pub async fn web(
         None => return success_response(HashMap::new()),
     };
 
-    let server_id = parsed.anonymous_id;
+    let server_id = anonymous_id;
 
     if !ua_info.browser.is_empty() {
         valid_data.insert("browser".into(), Value::String(ua_info.browser));
@@ -162,9 +168,9 @@ pub async fn web(
     };
 
     if ctx.error_tracking_enabled
-        && let Some(errors) = parsed.errors
+        && let Some(error_list) = errors
     {
-        for mut error in errors {
+        for mut error in error_list {
             if error.session_id.is_none() {
                 error.session_id = session_id.clone();
             }

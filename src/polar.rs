@@ -1,3 +1,4 @@
+use crate::batch_queue::AggregatedUsage;
 use chrono::{DateTime, Utc};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -83,21 +84,17 @@ impl PolarClient {
 
     pub async fn ingest_usage(
         &self,
-        usage_by_owner: &HashMap<String, UsageCounts>,
-        token_by_owner: &HashMap<String, String>,
-        org_by_owner: &HashMap<String, Option<String>>,
+        usage: &AggregatedUsage,
     ) -> Result<EventsIngestResponse, PolarError> {
-        let mut events = Vec::with_capacity(usage_by_owner.len() * 4);
+        let mut events = Vec::with_capacity(usage.len() * 4);
         let base_timestamp = Utc::now();
 
-        for (owner_id, counts) in usage_by_owner {
-            let base_metadata = Self::build_metadata(owner_id, token_by_owner, org_by_owner);
-
+        for (owner_id, owner_usage) in usage {
             for (i, (name, count)) in [
-                ("events", counts.events),
-                ("error_tracking", counts.error_tracking),
-                ("web_vitals", counts.web_vitals),
-                ("session_replays", counts.session_replays),
+                ("events", owner_usage.counts.events),
+                ("error_tracking", owner_usage.counts.error_tracking),
+                ("web_vitals", owner_usage.counts.web_vitals),
+                ("session_replays", owner_usage.counts.session_replays),
             ]
             .iter()
             .enumerate()
@@ -106,11 +103,21 @@ impl PolarClient {
                     continue;
                 }
 
-                let mut metadata = base_metadata.clone().unwrap_or_default();
+                let mut metadata = HashMap::with_capacity(3);
                 metadata.insert(
                     "count".to_string(),
                     serde_json::Value::Number((*count).into()),
                 );
+                metadata.insert(
+                    "token".to_string(),
+                    serde_json::Value::String(owner_usage.token.clone()),
+                );
+                if let Some(org) = &owner_usage.org {
+                    metadata.insert(
+                        "organization_id".to_string(),
+                        serde_json::Value::String(org.clone()),
+                    );
+                }
 
                 events.push(EventCreateExternalCustomer {
                     timestamp: Some(base_timestamp + chrono::Duration::microseconds(i as i64)),
@@ -145,31 +152,6 @@ impl PolarClient {
             inserted: total_inserted,
             duplicates: total_duplicates,
         })
-    }
-
-    fn build_metadata(
-        owner_id: &str,
-        token_by_owner: &HashMap<String, String>,
-        org_by_owner: &HashMap<String, Option<String>>,
-    ) -> Option<HashMap<String, serde_json::Value>> {
-        let token = token_by_owner.get(owner_id);
-        let org_id = org_by_owner.get(owner_id).and_then(|o| o.as_ref());
-
-        if token.is_none() && org_id.is_none() {
-            return None;
-        }
-
-        let mut map = HashMap::with_capacity(2);
-        if let Some(t) = token {
-            map.insert("token".to_string(), serde_json::Value::String(t.clone()));
-        }
-        if let Some(org) = org_id {
-            map.insert(
-                "organization_id".to_string(),
-                serde_json::Value::String(org.clone()),
-            );
-        }
-        Some(map)
     }
 
     async fn send_events(

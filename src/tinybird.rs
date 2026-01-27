@@ -10,7 +10,7 @@ use uuid::Uuid;
 pub struct TinybirdClient {
     client: Client,
     base_url: String,
-    token: String,
+    bearer_token: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -126,14 +126,12 @@ impl TinybirdError {
     }
 }
 
-fn gzip_compress(data: &[u8]) -> Result<Vec<u8>, std::io::Error> {
-    let mut encoder = GzEncoder::new(Vec::with_capacity(data.len() / 4), Compression::default());
-    encoder.write_all(data)?;
-    encoder.finish()
-}
-
 impl TinybirdClient {
     pub fn new(base_url: String, token: String) -> Self {
+        let mut bearer_token = String::with_capacity(7 + token.len());
+        bearer_token.push_str("Bearer ");
+        bearer_token.push_str(&token);
+
         Self {
             client: Client::builder()
                 .pool_idle_timeout(std::time::Duration::from_secs(30))
@@ -141,7 +139,7 @@ impl TinybirdClient {
                 .build()
                 .unwrap_or_else(|_| Client::new()),
             base_url,
-            token,
+            bearer_token,
         }
     }
 
@@ -154,21 +152,24 @@ impl TinybirdClient {
             return Ok(());
         }
 
-        let url = format!("{}/v0/events?name={}&wait=true", self.base_url, datasource);
+        let mut url = String::with_capacity(self.base_url.len() + 22 + datasource.len());
+        url.push_str(&self.base_url);
+        url.push_str("/v0/events?name=");
+        url.push_str(datasource);
+        url.push_str("&wait=true");
 
-        let mut ndjson = Vec::with_capacity(rows.len() * 256);
+        let mut encoder =
+            GzEncoder::new(Vec::with_capacity(rows.len() * 128), Compression::default());
         for row in rows {
-            serde_json::to_writer(&mut ndjson, row)?;
-            ndjson.push(b'\n');
+            serde_json::to_writer(&mut encoder, row)?;
+            encoder.write_all(b"\n")?;
         }
-
-        let compressed = gzip_compress(&ndjson)?;
-        drop(ndjson);
+        let compressed = encoder.finish()?;
 
         let response = self
             .client
             .post(&url)
-            .header("Authorization", format!("Bearer {}", self.token))
+            .header("Authorization", &self.bearer_token)
             .header("Content-Type", "application/x-ndjson")
             .header("Content-Encoding", "gzip")
             .body(compressed)

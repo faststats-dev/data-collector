@@ -1041,7 +1041,6 @@ mod tests {
                 row: WebVitalRow {
                     id: Uuid::new_v4(),
                     project_id: Uuid::new_v4(),
-                    anonymous_id: Uuid::new_v4(),
                     metric: "LCP".to_string(),
                     value: 2500.0,
                     device: Some("desktop".to_string()),
@@ -1177,7 +1176,6 @@ mod tests {
                 row: WebVitalRow {
                     id: Uuid::new_v4(),
                     project_id: Uuid::new_v4(),
-                    anonymous_id: Uuid::new_v4(),
                     metric: "LCP".to_string(),
                     value: 2500.0,
                     device: None,
@@ -1285,7 +1283,6 @@ mod tests {
                     row: WebVitalRow {
                         id: Uuid::new_v4(),
                         project_id: Uuid::new_v4(),
-                        anonymous_id: Uuid::new_v4(),
                         metric: "LCP".to_string(),
                         value: 2500.0,
                         device: None,
@@ -1307,7 +1304,6 @@ mod tests {
                     row: ReplayRow {
                         id: Uuid::new_v4(),
                         project_id: Uuid::new_v4(),
-                        anonymous_id: Uuid::new_v4(),
                         session_id: "session".to_string(),
                         events: "[]".to_string(),
                         created_at: Utc::now(),

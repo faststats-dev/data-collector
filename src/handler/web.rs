@@ -18,11 +18,13 @@ use sqlx::types::Uuid;
 use std::collections::HashMap;
 
 #[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct WebRequest {
     token: Option<String>,
+    anonymous_id: Uuid,
     data: HashMap<String, Value>,
     errors: Option<Vec<ErrorTracking>>,
-    #[serde(rename = "sessionId")]
+    #[serde(default)]
     session_id: Option<String>,
 }
 
@@ -111,15 +113,6 @@ pub async fn web(
             .map(String::from)
     });
 
-    let anonymous_id = match data_map
-        .get("anonymousId")
-        .and_then(|v| v.as_str())
-        .and_then(|s| Uuid::parse_str(s).ok())
-    {
-        Some(id) => id,
-        None => return error_response(StatusCode::BAD_REQUEST, "Missing or invalid anonymousId"),
-    };
-
     let (mut valid_data, warnings) = validate_and_filter_payload(&data_map, &ctx.datasources);
 
     let user_agent = headers
@@ -132,7 +125,7 @@ pub async fn web(
         None => return success_response(HashMap::new()),
     };
 
-    let server_id = anonymous_id;
+    let server_id = parsed.anonymous_id;
 
     if !ua_info.browser.is_empty() {
         valid_data.insert("browser".into(), Value::String(ua_info.browser));

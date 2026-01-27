@@ -493,10 +493,13 @@ async fn process_web_request(
     request: &FailedRequest,
 ) -> Result<(), String> {
     #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
     struct WebRequest {
         token: Option<String>,
+        anonymous_id: Uuid,
         data: HashMap<String, Value>,
         errors: Option<Vec<ErrorTracking>>,
+        #[serde(default)]
         session_id: Option<String>,
     }
 
@@ -516,11 +519,7 @@ async fn process_web_request(
     let mut data_map = parsed.data;
     enrich_data_with_country(&mut data_map, &HeaderMap::new());
 
-    let server_id = data_map
-        .get("anonymousId")
-        .and_then(|v| v.as_str())
-        .and_then(|s| Uuid::parse_str(s).ok())
-        .ok_or_else(|| "Missing or invalid anonymousId".to_string())?;
+    let server_id = parsed.anonymous_id;
 
     let (valid_data, _) =
         crate::validation::validate_and_filter_payload(&data_map, &ctx.datasources);

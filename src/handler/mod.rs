@@ -493,10 +493,13 @@ async fn process_web_request(
     request: &FailedRequest,
 ) -> Result<(), String> {
     #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
     struct WebRequest {
         token: Option<String>,
+        anonymous_id: Uuid,
         data: HashMap<String, Value>,
         errors: Option<Vec<ErrorTracking>>,
+        #[serde(default)]
         session_id: Option<String>,
     }
 
@@ -516,30 +519,12 @@ async fn process_web_request(
     let mut data_map = parsed.data;
     enrich_data_with_country(&mut data_map, &HeaderMap::new());
 
+    let server_id = parsed.anonymous_id;
+
     let (valid_data, _) =
         crate::validation::validate_and_filter_payload(&data_map, &ctx.datasources);
 
-    let ip = request.client_ip.as_deref().unwrap_or("");
-    let user_agent = request.user_agent.as_deref().unwrap_or("");
-
-    use crate::salt::get_daily_salt;
     use crate::utils::debounce::should_debounce;
-    use sha2::{Digest, Sha256};
-
-    let server_id = {
-        let salt = get_daily_salt().await;
-        let mut hasher = Sha256::new();
-        hasher.update(salt);
-        hasher.update(token.as_bytes());
-        hasher.update(ip.as_bytes());
-        hasher.update(user_agent.as_bytes());
-        let hash = hasher.finalize();
-        let mut bytes = [0u8; 16];
-        bytes.copy_from_slice(&hash[..16]);
-        bytes[6] = (bytes[6] & 0x0f) | 0x40;
-        bytes[8] = (bytes[8] & 0x3f) | 0x80;
-        Uuid::from_bytes(bytes)
-    };
 
     let url = valid_data.get("url").and_then(|v| v.as_str()).unwrap_or("");
     if should_debounce(server_id, url) {

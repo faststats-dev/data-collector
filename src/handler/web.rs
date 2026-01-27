@@ -5,7 +5,6 @@ use super::{
 };
 use crate::batch_queue::{FailedRequest, RequestType, TrackingContext};
 use crate::models::{AppState, ErrorTracking};
-use crate::salt::get_daily_salt;
 use crate::utils::debounce::should_debounce;
 use crate::validation::validate_and_filter_payload;
 use axum::body::Bytes;
@@ -14,36 +13,19 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use serde::Deserialize;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use sqlx::Row;
 use sqlx::types::Uuid;
 use std::collections::HashMap;
 
 #[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct WebRequest {
     token: Option<String>,
+    anonymous_id: Uuid,
     data: HashMap<String, Value>,
     errors: Option<Vec<ErrorTracking>>,
-    #[serde(rename = "sessionId")]
+    #[serde(default)]
     session_id: Option<String>,
-}
-
-async fn generate_visitor_id(token: &str, ip: &str, user_agent: &str) -> Uuid {
-    let salt = get_daily_salt().await;
-
-    let mut hasher = Sha256::new();
-    hasher.update(salt);
-    hasher.update(token.as_bytes());
-    hasher.update(ip.as_bytes());
-    hasher.update(user_agent.as_bytes());
-    let hash = hasher.finalize();
-
-    let mut bytes = [0u8; 16];
-    bytes.copy_from_slice(&hash[..16]);
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-
-    Uuid::from_bytes(bytes)
 }
 
 pub async fn web(
@@ -143,7 +125,7 @@ pub async fn web(
         None => return success_response(HashMap::new()),
     };
 
-    let server_id = generate_visitor_id(&token, client_ip, user_agent).await;
+    let server_id = parsed.anonymous_id;
 
     if !ua_info.browser.is_empty() {
         valid_data.insert("browser".into(), Value::String(ua_info.browser));

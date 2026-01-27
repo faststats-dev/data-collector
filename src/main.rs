@@ -13,7 +13,6 @@ mod batch_queue;
 mod handler;
 mod models;
 mod polar;
-mod salt;
 mod tinybird;
 pub mod ua_parser;
 mod utils;

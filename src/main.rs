@@ -80,13 +80,10 @@ async fn main() {
         .unwrap_or_else(|_| PathBuf::from("/data/backup.db"));
 
     let batch_queue =
-        batch_queue::BatchQueue::new(Arc::clone(&tinybird_client), polar_client, &backup_path)
-            .await
-            .expect("Failed to initialize batch queue");
+        batch_queue::BatchQueue::new(Arc::clone(&tinybird_client), polar_client, &backup_path);
 
     let state = models::AppState {
         pool: pool.clone(),
-        tinybird: tinybird_client,
         batch_queue: Arc::clone(&batch_queue),
     };
 

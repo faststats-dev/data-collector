@@ -2,10 +2,12 @@ use moka::sync::Cache;
 use sha2::{Digest, Sha256};
 use sqlx::types::Uuid;
 use std::sync::LazyLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 const DEBOUNCE_WINDOW: Duration = Duration::from_secs(30);
 const MAX_ENTRIES: u64 = 50_000;
+const MAINTENANCE_INTERVAL: u64 = 1000;
 
 static DEBOUNCE_CACHE: LazyLock<Cache<[u8; 32], ()>> = LazyLock::new(|| {
     Cache::builder()
@@ -13,6 +15,8 @@ static DEBOUNCE_CACHE: LazyLock<Cache<[u8; 32], ()>> = LazyLock::new(|| {
         .time_to_live(DEBOUNCE_WINDOW)
         .build()
 });
+
+static INSERT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn debounce_key(visitor_id: Uuid, url: &str) -> [u8; 32] {
     let mut hasher = Sha256::new();
@@ -29,6 +33,14 @@ pub fn should_debounce(visitor_id: Uuid, url: &str) -> bool {
     }
 
     DEBOUNCE_CACHE.insert(key, ());
+
+    if INSERT_COUNTER
+        .fetch_add(1, Ordering::Relaxed)
+        .is_multiple_of(MAINTENANCE_INTERVAL)
+    {
+        DEBOUNCE_CACHE.run_pending_tasks();
+    }
+
     false
 }
 

@@ -7,11 +7,11 @@ use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
-use tokio::sync::mpsc;
+use tokio::sync::{OnceCell, mpsc};
 
 const MAX_RETRIES: u32 = 5;
 const INITIAL_RETRY_DELAY: Duration = Duration::from_secs(1);
@@ -100,13 +100,27 @@ impl QueuedEvent {
     }
 }
 
-#[derive(Debug, Default)]
+const INITIAL_BATCH_CAPACITY: usize = 256;
+
+#[derive(Debug)]
 struct InMemoryBatch {
     events: Vec<(EventRow, Option<TrackingContext>)>,
     errors: Vec<ErrorRow>,
     error_trackings: Vec<(ErrorTrackingRow, Option<TrackingContext>)>,
     web_vitals: Vec<(WebVitalRow, Option<TrackingContext>)>,
     replays: Vec<(ReplayRow, Option<TrackingContext>)>,
+}
+
+impl Default for InMemoryBatch {
+    fn default() -> Self {
+        Self {
+            events: Vec::with_capacity(INITIAL_BATCH_CAPACITY),
+            errors: Vec::new(),
+            error_trackings: Vec::new(),
+            web_vitals: Vec::with_capacity(INITIAL_BATCH_CAPACITY / 4),
+            replays: Vec::new(),
+        }
+    }
 }
 
 impl InMemoryBatch {
@@ -269,78 +283,99 @@ impl BatchSendResult {
 }
 
 pub struct BackupStore {
-    pool: SqlitePool,
+    path: PathBuf,
+    pool: OnceCell<SqlitePool>,
 }
 
 impl BackupStore {
-    pub async fn new(path: &Path) -> Result<Self, sqlx::Error> {
-        if let Some(parent) = path.parent()
-            && !parent.exists()
-        {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                sqlx::Error::Io(std::io::Error::other(format!(
-                    "Failed to create backup directory: {}",
-                    e
-                )))
-            })?;
+    pub fn new(path: &Path) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            pool: OnceCell::new(),
         }
+    }
 
-        let options = SqliteConnectOptions::new()
-            .filename(path)
-            .create_if_missing(true)
-            .busy_timeout(Duration::from_secs(30));
+    async fn get_pool(&self) -> Result<&SqlitePool, sqlx::Error> {
+        self.pool
+            .get_or_try_init(|| async {
+                eprintln!("Initializing SQLite backup connection");
 
-        let pool = SqlitePoolOptions::new()
-            .max_connections(5)
-            .acquire_timeout(Duration::from_secs(60))
-            .connect_with(options)
-            .await?;
+                if let Some(parent) = self.path.parent()
+                    && !parent.exists()
+                {
+                    std::fs::create_dir_all(parent).map_err(|e| {
+                        sqlx::Error::Io(std::io::Error::other(format!(
+                            "Failed to create backup directory: {}",
+                            e
+                        )))
+                    })?;
+                }
 
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS backed_up_events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                event_data TEXT NOT NULL,
-                datasource TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                last_error TEXT
-            )
-            "#,
-        )
-        .execute(&pool)
-        .await?;
+                let options = SqliteConnectOptions::new()
+                    .filename(&self.path)
+                    .create_if_missing(true)
+                    .busy_timeout(Duration::from_secs(30));
 
-        sqlx::query(
-            r#"
-            CREATE INDEX IF NOT EXISTS idx_backed_up_events_created_at
-            ON backed_up_events(created_at)
-            "#,
-        )
-        .execute(&pool)
-        .await?;
+                let pool = SqlitePoolOptions::new()
+                    .max_connections(3)
+                    .min_connections(0)
+                    .idle_timeout(Some(Duration::from_secs(300)))
+                    .acquire_timeout(Duration::from_secs(60))
+                    .connect_with(options)
+                    .await?;
 
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS failed_requests (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                request_data TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            )
-            "#,
-        )
-        .execute(&pool)
-        .await?;
+                sqlx::query(
+                    r#"
+                    CREATE TABLE IF NOT EXISTS backed_up_events (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        event_data TEXT NOT NULL,
+                        datasource TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        last_error TEXT
+                    )
+                    "#,
+                )
+                .execute(&pool)
+                .await?;
 
-        sqlx::query(
-            r#"
-            CREATE INDEX IF NOT EXISTS idx_failed_requests_created_at
-            ON failed_requests(created_at)
-            "#,
-        )
-        .execute(&pool)
-        .await?;
+                sqlx::query(
+                    r#"
+                    CREATE INDEX IF NOT EXISTS idx_backed_up_events_created_at
+                    ON backed_up_events(created_at)
+                    "#,
+                )
+                .execute(&pool)
+                .await?;
 
-        Ok(Self { pool })
+                sqlx::query(
+                    r#"
+                    CREATE TABLE IF NOT EXISTS failed_requests (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        request_data TEXT NOT NULL,
+                        created_at TEXT NOT NULL
+                    )
+                    "#,
+                )
+                .execute(&pool)
+                .await?;
+
+                sqlx::query(
+                    r#"
+                    CREATE INDEX IF NOT EXISTS idx_failed_requests_created_at
+                    ON failed_requests(created_at)
+                    "#,
+                )
+                .execute(&pool)
+                .await?;
+
+                eprintln!("SQLite backup connection established");
+                Ok(pool)
+            })
+            .await
+    }
+
+    pub fn is_connected(&self) -> bool {
+        self.pool.initialized()
     }
 
     pub async fn backup_events(
@@ -352,9 +387,10 @@ impl BackupStore {
             return Ok(());
         }
 
+        let pool = self.get_pool().await?;
         let now = Utc::now().to_rfc3339();
 
-        let mut tx = self.pool.begin().await?;
+        let mut tx = pool.begin().await?;
 
         for event in events {
             let event_data = serde_json::to_string(event).expect("Failed to serialize event");
@@ -379,11 +415,12 @@ impl BackupStore {
         &self,
         limit: i64,
     ) -> Result<Vec<(i64, QueuedEvent)>, sqlx::Error> {
+        let pool = self.get_pool().await?;
         let rows: Vec<(i64, String)> = sqlx::query_as(
             "SELECT id, event_data FROM backed_up_events ORDER BY created_at ASC LIMIT ?",
         )
         .bind(limit)
-        .fetch_all(&self.pool)
+        .fetch_all(pool)
         .await?;
 
         let events: Vec<(i64, QueuedEvent)> = rows
@@ -398,6 +435,8 @@ impl BackupStore {
         if ids.is_empty() {
             return Ok(());
         }
+
+        let pool = self.get_pool().await?;
 
         // Build placeholder string without allocating per-element
         let mut placeholders = String::with_capacity(ids.len() * 3); // "?, " per element
@@ -418,37 +457,48 @@ impl BackupStore {
             q = q.bind(id);
         }
 
-        q.execute(&self.pool).await?;
+        q.execute(pool).await?;
         Ok(())
     }
 
     pub async fn cleanup_stale_backups(&self) -> Result<u64, sqlx::Error> {
+        if !self.is_connected() {
+            return Ok(0);
+        }
+
+        let pool = self.get_pool().await?;
         let cutoff = Utc::now() - chrono::Duration::seconds(MAX_BACKUP_AGE_SECS);
         let cutoff_str = cutoff.to_rfc3339();
 
         let result = sqlx::query("DELETE FROM backed_up_events WHERE created_at < ?")
             .bind(&cutoff_str)
-            .execute(&self.pool)
+            .execute(pool)
             .await?;
 
         Ok(result.rows_affected())
     }
 
     pub async fn count_backed_up(&self) -> Result<i64, sqlx::Error> {
+        if !self.is_connected() {
+            return Ok(0);
+        }
+
+        let pool = self.get_pool().await?;
         let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM backed_up_events")
-            .fetch_one(&self.pool)
+            .fetch_one(pool)
             .await?;
         Ok(count.0)
     }
 
     pub async fn backup_request(&self, request: &FailedRequest) -> Result<(), sqlx::Error> {
+        let pool = self.get_pool().await?;
         let data = serde_json::to_string(request).expect("Failed to serialize request");
         let now = Utc::now().to_rfc3339();
 
         sqlx::query("INSERT INTO failed_requests (request_data, created_at) VALUES (?, ?)")
             .bind(&data)
             .bind(&now)
-            .execute(&self.pool)
+            .execute(pool)
             .await?;
 
         Ok(())
@@ -458,11 +508,12 @@ impl BackupStore {
         &self,
         limit: i64,
     ) -> Result<Vec<(i64, FailedRequest)>, sqlx::Error> {
+        let pool = self.get_pool().await?;
         let rows: Vec<(i64, String)> = sqlx::query_as(
             "SELECT id, request_data FROM failed_requests ORDER BY created_at ASC LIMIT ?",
         )
         .bind(limit)
-        .fetch_all(&self.pool)
+        .fetch_all(pool)
         .await?;
 
         Ok(rows
@@ -476,28 +527,39 @@ impl BackupStore {
     }
 
     pub async fn remove_failed_request(&self, id: i64) -> Result<(), sqlx::Error> {
+        let pool = self.get_pool().await?;
         sqlx::query("DELETE FROM failed_requests WHERE id = ?")
             .bind(id)
-            .execute(&self.pool)
+            .execute(pool)
             .await?;
         Ok(())
     }
 
     pub async fn cleanup_stale_requests(&self) -> Result<u64, sqlx::Error> {
+        if !self.is_connected() {
+            return Ok(0);
+        }
+
+        let pool = self.get_pool().await?;
         let cutoff = Utc::now() - chrono::Duration::seconds(MAX_REQUEST_AGE_SECS);
         let cutoff_str = cutoff.to_rfc3339();
 
         let result = sqlx::query("DELETE FROM failed_requests WHERE created_at < ?")
             .bind(&cutoff_str)
-            .execute(&self.pool)
+            .execute(pool)
             .await?;
 
         Ok(result.rows_affected())
     }
 
     pub async fn count_failed_requests(&self) -> Result<i64, sqlx::Error> {
+        if !self.is_connected() {
+            return Ok(0);
+        }
+
+        let pool = self.get_pool().await?;
         let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM failed_requests")
-            .fetch_one(&self.pool)
+            .fetch_one(pool)
             .await?;
         Ok(count.0)
     }
@@ -519,12 +581,12 @@ impl BatchQueue {
 }
 
 impl BatchQueue {
-    pub async fn new(
+    pub fn new(
         tinybird: Arc<TinybirdClient>,
         polar: Option<Arc<PolarClient>>,
         backup_path: &Path,
-    ) -> Result<Arc<Self>, sqlx::Error> {
-        let backup_store = Arc::new(BackupStore::new(backup_path).await?);
+    ) -> Arc<Self> {
+        let backup_store = Arc::new(BackupStore::new(backup_path));
         let (sender, receiver) = mpsc::channel(CHANNEL_CAPACITY);
         let in_memory_batch = Arc::new(Mutex::new(InMemoryBatch::default()));
         let flush_lock = Arc::new(Mutex::new(()));
@@ -547,7 +609,7 @@ impl BatchQueue {
         queue.start_batch_flusher();
         queue.start_backup_replayer();
 
-        Ok(queue)
+        queue
     }
 
     pub async fn queue_event(
@@ -635,21 +697,11 @@ impl BatchQueue {
     }
 
     fn calculate_retry_delay(retry_count: u32) -> Duration {
-        let base_delay = INITIAL_RETRY_DELAY.as_millis() as u64;
-        let exponential_delay = base_delay * 2u64.saturating_pow(retry_count);
-        let capped_delay = exponential_delay.min(MAX_RETRY_DELAY.as_millis() as u64);
-
-        let jitter_range = capped_delay / 4;
-        let jitter = if jitter_range > 0 {
-            (retry_count as u64 * 7919) % (jitter_range * 2)
-        } else {
-            0
-        };
-        let delay_with_jitter = capped_delay
-            .saturating_sub(jitter_range)
-            .saturating_add(jitter);
-
-        Duration::from_millis(delay_with_jitter)
+        let base = INITIAL_RETRY_DELAY.as_millis() as u64;
+        let capped =
+            (base * 2u64.saturating_pow(retry_count)).min(MAX_RETRY_DELAY.as_millis() as u64);
+        let jitter = (capped / 4).saturating_sub((retry_count as u64 * 7919) % (capped / 2).max(1));
+        Duration::from_millis(capped.saturating_sub(jitter))
     }
 
     async fn send_batch_with_retry(&self, batch: InMemoryBatch) {
@@ -711,13 +763,17 @@ impl BatchQueue {
             replays,
         } = batch;
 
+        let event_rows: Vec<_> = events.iter().map(|(e, _)| e).collect();
+        let error_tracking_rows: Vec<_> = error_trackings.iter().map(|(e, _)| e).collect();
+        let web_vital_rows: Vec<_> = web_vitals.iter().map(|(e, _)| e).collect();
+        let replay_rows: Vec<_> = replays.iter().map(|(e, _)| e).collect();
+
         let (events_res, errors_res, error_trackings_res, web_vitals_res, replays_res) = tokio::join!(
             async {
-                if events.is_empty() {
+                if event_rows.is_empty() {
                     Ok(())
                 } else {
-                    let rows: Vec<_> = events.iter().map(|(e, _)| e).collect();
-                    self.tinybird.insert_events(&rows).await
+                    self.tinybird.insert_events(&event_rows).await
                 }
             },
             async {
@@ -728,27 +784,26 @@ impl BatchQueue {
                 }
             },
             async {
-                if error_trackings.is_empty() {
+                if error_tracking_rows.is_empty() {
                     Ok(())
                 } else {
-                    let rows: Vec<_> = error_trackings.iter().map(|(e, _)| e).collect();
-                    self.tinybird.insert_error_trackings(&rows).await
+                    self.tinybird
+                        .insert_error_trackings(&error_tracking_rows)
+                        .await
                 }
             },
             async {
-                if web_vitals.is_empty() {
+                if web_vital_rows.is_empty() {
                     Ok(())
                 } else {
-                    let rows: Vec<_> = web_vitals.iter().map(|(e, _)| e).collect();
-                    self.tinybird.insert_web_vitals(&rows).await
+                    self.tinybird.insert_web_vitals(&web_vital_rows).await
                 }
             },
             async {
-                if replays.is_empty() {
+                if replay_rows.is_empty() {
                     Ok(())
                 } else {
-                    let rows: Vec<_> = replays.iter().map(|(e, _)| e).collect();
-                    self.tinybird.insert_replays(&rows).await
+                    self.tinybird.insert_replays(&replay_rows).await
                 }
             },
         );
@@ -932,21 +987,6 @@ impl BatchQueue {
             }
         }
     }
-
-    #[allow(dead_code)]
-    pub async fn force_flush(&self) {
-        self.flush_in_memory_batch().await;
-    }
-
-    #[allow(dead_code)]
-    pub async fn backup_count(&self) -> Result<i64, sqlx::Error> {
-        self.backup_store.count_backed_up().await
-    }
-
-    #[allow(dead_code)]
-    pub async fn failed_request_count(&self) -> Result<i64, sqlx::Error> {
-        self.backup_store.count_failed_requests().await
-    }
 }
 
 #[cfg(test)]
@@ -979,7 +1019,7 @@ mod tests {
         async fn test_backup_and_restore_events() {
             let dir = tempdir().unwrap();
             let db_path = dir.path().join("test.db");
-            let store = BackupStore::new(&db_path).await.unwrap();
+            let store = BackupStore::new(&db_path);
 
             let event = create_test_queued_event();
             store.backup_events(&[event], None).await.unwrap();
@@ -998,7 +1038,7 @@ mod tests {
         async fn test_remove_multiple_events() {
             let dir = tempdir().unwrap();
             let db_path = dir.path().join("test.db");
-            let store = BackupStore::new(&db_path).await.unwrap();
+            let store = BackupStore::new(&db_path);
 
             let events: Vec<QueuedEvent> = (0..5).map(|_| create_test_queued_event()).collect();
             store.backup_events(&events, None).await.unwrap();
@@ -1017,7 +1057,7 @@ mod tests {
         async fn test_count_backed_up() {
             let dir = tempdir().unwrap();
             let db_path = dir.path().join("test.db");
-            let store = BackupStore::new(&db_path).await.unwrap();
+            let store = BackupStore::new(&db_path);
 
             assert_eq!(store.count_backed_up().await.unwrap(), 0);
 
@@ -1031,7 +1071,7 @@ mod tests {
         async fn test_backup_different_event_types() {
             let dir = tempdir().unwrap();
             let db_path = dir.path().join("test.db");
-            let store = BackupStore::new(&db_path).await.unwrap();
+            let store = BackupStore::new(&db_path);
 
             let event = create_test_queued_event();
             store.backup_events(&[event], None).await.unwrap();
@@ -1078,7 +1118,7 @@ mod tests {
         async fn test_events_retrieved_in_order() {
             let dir = tempdir().unwrap();
             let db_path = dir.path().join("test.db");
-            let store = BackupStore::new(&db_path).await.unwrap();
+            let store = BackupStore::new(&db_path);
 
             for i in 0..5 {
                 let mut row = create_test_event();
@@ -1109,7 +1149,7 @@ mod tests {
         async fn test_get_backed_up_events_limit() {
             let dir = tempdir().unwrap();
             let db_path = dir.path().join("test.db");
-            let store = BackupStore::new(&db_path).await.unwrap();
+            let store = BackupStore::new(&db_path);
 
             let events: Vec<QueuedEvent> = (0..10).map(|_| create_test_queued_event()).collect();
             store.backup_events(&events, None).await.unwrap();
@@ -1124,7 +1164,7 @@ mod tests {
         async fn test_backup_events_bulk() {
             let dir = tempdir().unwrap();
             let db_path = dir.path().join("test.db");
-            let store = BackupStore::new(&db_path).await.unwrap();
+            let store = BackupStore::new(&db_path);
 
             let events: Vec<QueuedEvent> = (0..10).map(|_| create_test_queued_event()).collect();
 

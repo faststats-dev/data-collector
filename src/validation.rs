@@ -47,25 +47,33 @@ pub fn validate_and_filter_payload(
                 continue;
             };
 
-            let mut valid_elements = Vec::with_capacity(arr.len());
-            for (idx, elem) in arr.iter().enumerate() {
-                if validate_scalar(elem, ds, re).is_ok() {
-                    valid_elements.push(elem.clone());
-                } else {
-                    warnings.insert(
-                        ref_id.clone(),
-                        format!("element[{}] failed validation", idx),
-                    );
-                    debug!("key='{}' element[{}] VALID=false", ref_id, idx);
-                }
-            }
+            let mut has_invalid = false;
+            let valid_elements: Vec<Value> = arr
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, elem)| {
+                    if validate_scalar(elem, ds, re).is_ok() {
+                        Some(elem.clone())
+                    } else {
+                        if !has_invalid {
+                            warnings.insert(
+                                ref_id.clone(),
+                                format!("element[{}] failed validation", idx),
+                            );
+                            has_invalid = true;
+                        }
+                        debug!("key='{}' element[{}] VALID=false", ref_id, idx);
+                        None
+                    }
+                })
+                .collect();
 
-            let valid_count = valid_elements.len();
-            valid_data.insert(ref_id.clone(), Value::Array(valid_elements));
             debug!(
                 "key='{}' VALID=true ({} valid elements)",
-                ref_id, valid_count
+                ref_id,
+                valid_elements.len()
             );
+            valid_data.insert(ref_id.clone(), Value::Array(valid_elements));
         } else {
             if value.is_array() {
                 warnings.insert(

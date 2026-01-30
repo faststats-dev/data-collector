@@ -307,28 +307,21 @@ pub fn check_ip_allowed(ip_rules: &[IpRule], client_ip: &str) -> Result<(), &'st
         return Ok(());
     }
 
-    let mut has_whitelist = false;
-    let mut is_whitelisted = false;
-    let mut is_blacklisted = false;
-
-    for rule in ip_rules {
-        if rule.allowed {
-            has_whitelist = true;
-            if rule.ip_address == client_ip {
-                is_whitelisted = true;
-            }
-        } else if rule.ip_address == client_ip {
-            is_blacklisted = true;
-        }
-    }
+    let has_whitelist = ip_rules.iter().any(|r| r.allowed);
 
     if has_whitelist {
-        if is_whitelisted {
+        if ip_rules
+            .iter()
+            .any(|r| r.allowed && r.ip_address == client_ip)
+        {
             Ok(())
         } else {
             Err("IP address not allowed")
         }
-    } else if is_blacklisted {
+    } else if ip_rules
+        .iter()
+        .any(|r| !r.allowed && r.ip_address == client_ip)
+    {
         Err("IP address blocked")
     } else {
         Ok(())

@@ -1,7 +1,12 @@
 use crate::models::DataSource;
+use moka::sync::Cache;
 use regex::Regex;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::{Arc, LazyLock};
+
+static REGEX_CACHE: LazyLock<Cache<Arc<str>, Arc<Regex>>> =
+    LazyLock::new(|| Cache::builder().max_capacity(500).build());
 
 macro_rules! debug {
     ($($arg:tt)*) => {
@@ -11,13 +16,27 @@ macro_rules! debug {
     }
 }
 
+fn get_cached_regex(pattern: &str) -> Option<Arc<Regex>> {
+    let key: Arc<str> = pattern.into();
+    if let Some(re) = REGEX_CACHE.get(&key) {
+        return Some(re);
+    }
+    match Regex::new(pattern) {
+        Ok(re) => {
+            let arc_re = Arc::new(re);
+            REGEX_CACHE.insert(key, Arc::clone(&arc_re));
+            Some(arc_re)
+        }
+        Err(_) => None,
+    }
+}
+
 pub fn validate_and_filter_payload(
     data: &HashMap<String, Value>,
     ds_by_ref: &HashMap<String, DataSource>,
 ) -> (HashMap<String, Value>, HashMap<String, String>) {
     let mut valid_data = HashMap::with_capacity(data.len());
     let mut warnings = HashMap::new();
-    let mut re_cache: HashMap<&str, Regex> = HashMap::new();
 
     for (ref_id, value) in data {
         let Some(ds) = ds_by_ref.get(ref_id) else {
@@ -29,16 +48,7 @@ pub fn validate_and_filter_payload(
             continue;
         };
 
-        let re = if let Some(pat) = ds.regex.as_deref() {
-            if !re_cache.contains_key(ref_id.as_str())
-                && let Ok(compiled) = Regex::new(pat)
-            {
-                re_cache.insert(ref_id.as_str(), compiled);
-            }
-            re_cache.get(ref_id.as_str())
-        } else {
-            None
-        };
+        let re = ds.regex.as_deref().and_then(get_cached_regex);
 
         if ds.is_array {
             let Some(arr) = value.as_array() else {
@@ -52,7 +62,7 @@ pub fn validate_and_filter_payload(
                 .iter()
                 .enumerate()
                 .filter_map(|(idx, elem)| {
-                    if validate_scalar(elem, ds, re).is_ok() {
+                    if validate_scalar(elem, ds, re.as_deref()).is_ok() {
                         Some(elem.clone())
                     } else {
                         if !has_invalid {
@@ -87,7 +97,7 @@ pub fn validate_and_filter_payload(
                 continue;
             }
 
-            if validate_scalar(value, ds, re).is_ok() {
+            if validate_scalar(value, ds, re.as_deref()).is_ok() {
                 valid_data.insert(ref_id.clone(), value.clone());
                 debug!("key='{}' VALID=true", ref_id);
             } else {

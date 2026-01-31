@@ -1,8 +1,8 @@
 use super::{
-    EncodingQuery, HandlerResponse, check_ip_allowed, decompress_body, error_response,
-    get_authorization, get_client_ip, load_project_context,
+    EncodingQuery, check_ip_allowed, decompress_body, error_response, get_authorization,
+    get_client_ip, load_project_context,
 };
-use crate::batch_queue::{BatchQueue, FailedRequest, QueuedEvent, RequestType, TrackingContext};
+use crate::batch_queue::{FailedRequest, QueuedEvent, RequestType, TrackingContext};
 use crate::models::AppState;
 use crate::tinybird::WebVitalRow;
 use axum::Json;
@@ -102,16 +102,16 @@ pub async fn vitals(
         return error_response(StatusCode::BAD_REQUEST, "No vitals provided");
     }
 
-    let tracking_ctx = TrackingContext {
-        owner_id: ctx.owner_id.clone(),
-        token,
-        organization_id: ctx.organization_id.clone(),
-    };
+    let tracking_ctx = Arc::new(TrackingContext {
+        owner_id: ctx.owner_id.into(),
+        token: token.into(),
+        organization_id: ctx.organization_id.map(Into::into),
+    });
 
-    let country = headers
+    let country: Option<Arc<str>> = headers
         .get("CF-IPCountry")
         .and_then(|v| v.to_str().ok())
-        .map(String::from);
+        .map(Into::into);
 
     let user_agent = headers
         .get("User-Agent")
@@ -122,85 +122,64 @@ pub async fn vitals(
         None => return (StatusCode::OK, Json(json!({ "status": "success" }))),
     };
 
-    if let Err(e) = insert_web_vitals(
-        &state.batch_queue,
-        ctx.project_id,
-        &req,
-        country,
-        ua_info,
-        tracking_ctx,
-    )
-    .await
-    {
-        return e;
-    }
-
-    (StatusCode::OK, Json(json!({ "status": "success" })))
-}
-
-async fn insert_web_vitals(
-    batch_queue: &Arc<BatchQueue>,
-    project_id: Uuid,
-    req: &WebVitalRequest,
-    country: Option<String>,
-    ua_info: crate::ua_parser::UserAgentInfo,
-    tracking_ctx: TrackingContext,
-) -> Result<(), HandlerResponse> {
-    let now = chrono::Utc::now();
     let metadata = req.metadata.as_ref();
-    let device = metadata
+    let device: Arc<str> = metadata
         .and_then(|m| m.device.as_deref())
-        .map(str::to_owned)
-        .unwrap_or_else(|| ua_info.device.to_string());
-    let os = metadata
+        .map(Into::into)
+        .unwrap_or_else(|| ua_info.device.into());
+    let os: Arc<str> = metadata
         .and_then(|m| m.os.as_deref())
-        .map(str::to_owned)
-        .unwrap_or(ua_info.os);
-    let browser = metadata
+        .map(Into::into)
+        .unwrap_or_else(|| ua_info.os.into());
+    let browser: Arc<str> = metadata
         .and_then(|m| m.browser.as_deref())
-        .map(str::to_owned)
-        .unwrap_or(ua_info.browser);
-    let url = metadata
+        .map(Into::into)
+        .unwrap_or_else(|| ua_info.browser.into());
+    let url: Arc<str> = metadata
         .and_then(|m| m.url.as_deref())
-        .map(str::to_owned)
-        .unwrap_or_default();
+        .map(Into::into)
+        .unwrap_or_else(|| "".into());
+    let session_id: Option<Arc<str>> = req.session_id.as_deref().map(Into::into);
+    let now = chrono::Utc::now();
 
     for vital in &req.vitals {
-        let attributes = vital
+        let attributes: Arc<str> = vital
             .attributes
             .as_ref()
             .and_then(|a| serde_json::to_string(a).ok())
+            .map(Into::into)
             .unwrap_or_else(|| "{}".into());
 
         let row = WebVitalRow {
             id: Uuid::new_v4(),
-            project_id,
+            project_id: ctx.project_id,
             metric: vital.metric.clone(),
             value: vital.value,
-            device: Some(device.clone()),
-            country: country.clone(),
-            os: Some(os.clone()),
-            browser: Some(browser.clone()),
-            url: url.clone(),
-            attributes,
-            session_id: req.session_id.clone(),
+            device: Some(device.to_string()),
+            country: country.as_ref().map(|c| c.to_string()),
+            os: Some(os.to_string()),
+            browser: Some(browser.to_string()),
+            url: url.to_string(),
+            attributes: attributes.to_string(),
+            session_id: session_id.as_ref().map(|s| s.to_string()),
             created_at: now,
         };
 
-        batch_queue
+        if let Err(e) = state
+            .batch_queue
             .queue_event(QueuedEvent::WebVital {
                 row,
-                tracking: Some(tracking_ctx.clone()),
+                tracking: Some((*tracking_ctx).clone()),
             })
             .await
-            .map_err(|e| {
-                eprintln!("Failed to queue web vital: {}", e);
-                error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Failed to queue web vital",
-                )
-            })?;
+        {
+            eprintln!("Failed to queue web vital: {}", e);
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to queue web vital",
+            );
+        }
     }
 
-    Ok(())
+    (StatusCode::OK, Json(json!({ "status": "success" })))
 }

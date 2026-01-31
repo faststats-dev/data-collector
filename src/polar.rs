@@ -110,19 +110,19 @@ impl PolarClient {
                 );
                 metadata.insert(
                     "token".to_string(),
-                    serde_json::Value::String(owner_usage.token.clone()),
+                    serde_json::Value::String(owner_usage.token.to_string()),
                 );
                 if let Some(org) = &owner_usage.org {
                     metadata.insert(
                         "organization_id".to_string(),
-                        serde_json::Value::String(org.clone()),
+                        serde_json::Value::String(org.to_string()),
                     );
                 }
 
                 events.push(EventCreateExternalCustomer {
                     timestamp: Some(base_timestamp + chrono::Duration::microseconds(i as i64)),
                     name: name.to_string(),
-                    external_customer_id: owner_id.clone(),
+                    external_customer_id: owner_id.to_string(),
                     metadata: Some(metadata),
                 });
             }

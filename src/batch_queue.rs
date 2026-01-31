@@ -27,11 +27,11 @@ const MAX_BATCH_SIZE: usize = 5000;
 
 pub struct OwnerUsage {
     pub counts: UsageCounts,
-    pub token: String,
-    pub org: Option<String>,
+    pub token: Arc<str>,
+    pub org: Option<Arc<str>>,
 }
 
-pub type AggregatedUsage = HashMap<String, OwnerUsage>;
+pub type AggregatedUsage = HashMap<Arc<str>, OwnerUsage>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -56,10 +56,10 @@ pub struct FailedRequest {
 /// Tracking context for billing purposes
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrackingContext {
-    pub owner_id: String,
-    pub token: String,
+    pub owner_id: Arc<str>,
+    pub token: Arc<str>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub organization_id: Option<String>,
+    pub organization_id: Option<Arc<str>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -187,58 +187,28 @@ impl InMemoryBatch {
 
         let mut usage: AggregatedUsage = HashMap::with_capacity(estimated_owners);
 
-        for (_, ctx) in &self.events {
-            if let Some(ctx) = ctx {
-                usage
-                    .entry(ctx.owner_id.clone())
-                    .or_insert_with(|| OwnerUsage {
-                        counts: UsageCounts::default(),
-                        token: ctx.token.clone(),
-                        org: ctx.organization_id.clone(),
-                    })
-                    .counts
-                    .events += 1;
-            }
+        macro_rules! count_usage {
+            ($iter:expr, $field:ident) => {
+                for (_, ctx) in $iter {
+                    if let Some(ctx) = ctx {
+                        usage
+                            .entry(Arc::clone(&ctx.owner_id))
+                            .or_insert_with(|| OwnerUsage {
+                                counts: UsageCounts::default(),
+                                token: Arc::clone(&ctx.token),
+                                org: ctx.organization_id.as_ref().map(Arc::clone),
+                            })
+                            .counts
+                            .$field += 1;
+                    }
+                }
+            };
         }
-        for (_, ctx) in &self.error_trackings {
-            if let Some(ctx) = ctx {
-                usage
-                    .entry(ctx.owner_id.clone())
-                    .or_insert_with(|| OwnerUsage {
-                        counts: UsageCounts::default(),
-                        token: ctx.token.clone(),
-                        org: ctx.organization_id.clone(),
-                    })
-                    .counts
-                    .error_tracking += 1;
-            }
-        }
-        for (_, ctx) in &self.web_vitals {
-            if let Some(ctx) = ctx {
-                usage
-                    .entry(ctx.owner_id.clone())
-                    .or_insert_with(|| OwnerUsage {
-                        counts: UsageCounts::default(),
-                        token: ctx.token.clone(),
-                        org: ctx.organization_id.clone(),
-                    })
-                    .counts
-                    .web_vitals += 1;
-            }
-        }
-        for (_, ctx) in &self.replays {
-            if let Some(ctx) = ctx {
-                usage
-                    .entry(ctx.owner_id.clone())
-                    .or_insert_with(|| OwnerUsage {
-                        counts: UsageCounts::default(),
-                        token: ctx.token.clone(),
-                        org: ctx.organization_id.clone(),
-                    })
-                    .counts
-                    .session_replays += 1;
-            }
-        }
+
+        count_usage!(&self.events, events);
+        count_usage!(&self.error_trackings, error_tracking);
+        count_usage!(&self.web_vitals, web_vitals);
+        count_usage!(&self.replays, session_replays);
 
         usage
     }

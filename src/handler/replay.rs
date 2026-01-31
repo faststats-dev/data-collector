@@ -13,6 +13,7 @@ use axum::response::IntoResponse;
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::Arc;
 use uuid::Uuid;
 
 fn is_valid_rrweb_event(event: &Value) -> bool {
@@ -119,11 +120,11 @@ pub async fn replay(
         }
     };
 
-    let tracking_ctx = TrackingContext {
-        owner_id: context.owner_id.clone(),
-        token: parsed.token.clone(),
-        organization_id: context.organization_id.clone(),
-    };
+    let tracking_ctx = Arc::new(TrackingContext {
+        owner_id: context.owner_id.into(),
+        token: parsed.token.as_str().into(),
+        organization_id: context.organization_id.map(Into::into),
+    });
 
     let replay_row = ReplayRow {
         id: Uuid::new_v4(),
@@ -137,7 +138,7 @@ pub async fn replay(
         .batch_queue
         .queue_event(QueuedEvent::Replay {
             row: replay_row,
-            tracking: Some(tracking_ctx),
+            tracking: Some((*tracking_ctx).clone()),
         })
         .await
     {

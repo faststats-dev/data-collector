@@ -16,6 +16,7 @@ use serde_json::Value;
 use sqlx::Row;
 use sqlx::types::Uuid;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -144,11 +145,11 @@ pub async fn web(
     let url = valid_data.get("url").and_then(|v| v.as_str()).unwrap_or("");
     let is_debounced = should_debounce(server_id, url);
 
-    let tracking_ctx = TrackingContext {
-        owner_id: ctx.owner_id.clone(),
-        token,
-        organization_id: ctx.organization_id.clone(),
-    };
+    let tracking_ctx = Arc::new(TrackingContext {
+        owner_id: ctx.owner_id.into(),
+        token: token.into(),
+        organization_id: ctx.organization_id.map(Into::into),
+    });
 
     let data_entry_id = if is_debounced {
         Uuid::nil()
@@ -158,7 +159,7 @@ pub async fn web(
             ctx.project_id,
             server_id,
             &valid_data,
-            Some(tracking_ctx.clone()),
+            Some(Arc::clone(&tracking_ctx)),
         )
         .await
         {
@@ -179,7 +180,7 @@ pub async fn web(
                 ctx.project_id,
                 data_entry_id,
                 error,
-                Some(tracking_ctx.clone()),
+                Some(Arc::clone(&tracking_ctx)),
             )
             .await
             {

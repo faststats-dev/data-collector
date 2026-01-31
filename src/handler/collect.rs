@@ -11,6 +11,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use sqlx::types::Uuid;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 pub async fn collect(
     State(state): State<AppState>,
@@ -78,18 +79,18 @@ pub async fn collect(
 
     let (valid_data, warnings) = validate_and_filter_payload(&data_map, &ctx.datasources);
 
-    let tracking_ctx = TrackingContext {
-        owner_id: ctx.owner_id.clone(),
-        token,
-        organization_id: ctx.organization_id.clone(),
-    };
+    let tracking_ctx = Arc::new(TrackingContext {
+        owner_id: ctx.owner_id.into(),
+        token: token.into(),
+        organization_id: ctx.organization_id.map(Into::into),
+    });
 
     let data_entry_id = match insert_event(
         &state.batch_queue,
         ctx.project_id,
         server_id,
         &valid_data,
-        Some(tracking_ctx.clone()),
+        Some(Arc::clone(&tracking_ctx)),
     )
     .await
     {
@@ -108,7 +109,7 @@ pub async fn collect(
                 ctx.project_id,
                 data_entry_id,
                 error,
-                Some(tracking_ctx.clone()),
+                Some(Arc::clone(&tracking_ctx)),
             )
             .await
             {

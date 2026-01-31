@@ -2,7 +2,7 @@ use crate::batch_queue::AggregatedUsage;
 use chrono::{DateTime, Utc};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::sync::Arc;
 
 #[cfg(debug_assertions)]
 const POLAR_API_URL: &str = "https://sandbox-api.polar.sh";
@@ -18,18 +18,26 @@ pub struct PolarClient {
 }
 
 #[derive(Debug, Clone, Serialize)]
+struct EventMetadata {
+    count: u64,
+    token: Arc<str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    organization_id: Option<Arc<str>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 struct EventCreateExternalCustomer {
     #[serde(skip_serializing_if = "Option::is_none")]
     timestamp: Option<DateTime<Utc>>,
-    name: String,
-    external_customer_id: String,
+    name: &'static str,
+    external_customer_id: Arc<str>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    metadata: Option<HashMap<String, serde_json::Value>>,
+    metadata: Option<EventMetadata>,
 }
 
 #[derive(Debug, Serialize)]
-struct EventsIngest {
-    events: Vec<EventCreateExternalCustomer>,
+struct EventsIngest<'a> {
+    events: &'a [EventCreateExternalCustomer],
 }
 
 #[derive(Debug, Deserialize)]
@@ -90,40 +98,27 @@ impl PolarClient {
         let base_timestamp = Utc::now();
 
         for (owner_id, owner_usage) in usage {
-            for (i, (name, count)) in [
+            let counts = [
                 ("events", owner_usage.counts.events),
                 ("error_tracking", owner_usage.counts.error_tracking),
                 ("web_vitals", owner_usage.counts.web_vitals),
                 ("session_replays", owner_usage.counts.session_replays),
-            ]
-            .iter()
-            .enumerate()
-            {
-                if *count == 0 {
-                    continue;
-                }
+            ];
 
-                let mut metadata = HashMap::with_capacity(3);
-                metadata.insert(
-                    "count".to_string(),
-                    serde_json::Value::Number((*count).into()),
-                );
-                metadata.insert(
-                    "token".to_string(),
-                    serde_json::Value::String(owner_usage.token.to_string()),
-                );
-                if let Some(org) = &owner_usage.org {
-                    metadata.insert(
-                        "organization_id".to_string(),
-                        serde_json::Value::String(org.to_string()),
-                    );
+            for (i, (name, count)) in counts.into_iter().enumerate() {
+                if count == 0 {
+                    continue;
                 }
 
                 events.push(EventCreateExternalCustomer {
                     timestamp: Some(base_timestamp + chrono::Duration::microseconds(i as i64)),
-                    name: name.to_string(),
-                    external_customer_id: owner_id.to_string(),
-                    metadata: Some(metadata),
+                    name,
+                    external_customer_id: Arc::clone(owner_id),
+                    metadata: Some(EventMetadata {
+                        count,
+                        token: Arc::clone(&owner_usage.token),
+                        organization_id: owner_usage.org.as_ref().map(Arc::clone),
+                    }),
                 });
             }
         }
@@ -135,12 +130,8 @@ impl PolarClient {
             });
         }
 
-        if events.len() <= MAX_EVENTS_PER_REQUEST {
-            return self.send_events(&events).await;
-        }
-
-        let mut total_inserted = 0i64;
-        let mut total_duplicates = 0i64;
+        let mut total_inserted = 0;
+        let mut total_duplicates = 0;
 
         for chunk in events.chunks(MAX_EVENTS_PER_REQUEST) {
             let result = self.send_events(chunk).await?;
@@ -158,9 +149,7 @@ impl PolarClient {
         &self,
         events: &[EventCreateExternalCustomer],
     ) -> Result<EventsIngestResponse, PolarError> {
-        let body = EventsIngest {
-            events: events.to_vec(),
-        };
+        let body = EventsIngest { events };
 
         let response = self
             .client

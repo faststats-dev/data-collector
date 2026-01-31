@@ -77,7 +77,7 @@ pub async fn collect(
     let mut data_map = req.data;
     enrich_data_with_country(&mut data_map, &headers);
 
-    let (valid_data, warnings) = validate_and_filter_payload(&data_map, &ctx.datasources);
+    let (valid_data, warnings) = validate_and_filter_payload(data_map, &ctx.datasources);
 
     let tracking_ctx = Arc::new(TrackingContext {
         owner_id: ctx.owner_id.into(),

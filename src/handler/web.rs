@@ -120,7 +120,7 @@ pub async fn web(
             .map(String::from)
     });
 
-    let (mut valid_data, warnings) = validate_and_filter_payload(&data_map, &ctx.datasources);
+    let (mut valid_data, warnings) = validate_and_filter_payload(data_map, &ctx.datasources);
 
     let user_agent = headers
         .get("User-Agent")

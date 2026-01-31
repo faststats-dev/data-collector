@@ -476,7 +476,7 @@ async fn process_collect_request(
     enrich_data_with_country(&mut data_map, &HeaderMap::new());
 
     let (valid_data, _) =
-        crate::validation::validate_and_filter_payload(&data_map, &ctx.datasources);
+        crate::validation::validate_and_filter_payload(data_map, &ctx.datasources);
 
     let tracking_ctx = Arc::new(TrackingContext {
         owner_id: ctx.owner_id.into(),
@@ -548,7 +548,7 @@ async fn process_web_request(
     let server_id = parsed.anonymous_id;
 
     let (valid_data, _) =
-        crate::validation::validate_and_filter_payload(&data_map, &ctx.datasources);
+        crate::validation::validate_and_filter_payload(data_map, &ctx.datasources);
 
     use crate::utils::debounce::should_debounce;
 

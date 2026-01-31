@@ -32,58 +32,63 @@ fn get_cached_regex(pattern: &str) -> Option<Arc<Regex>> {
 }
 
 pub fn validate_and_filter_payload(
-    data: &HashMap<String, Value>,
+    mut data: HashMap<String, Value>,
     ds_by_ref: &HashMap<String, DataSource>,
 ) -> (HashMap<String, Value>, HashMap<String, String>) {
-    let mut valid_data = HashMap::with_capacity(data.len());
     let mut warnings = HashMap::new();
 
-    for (ref_id, value) in data {
+    data.retain(|ref_id, value| {
         let Some(ds) = ds_by_ref.get(ref_id) else {
             warnings.insert(ref_id.clone(), "no matching data source".into());
             debug!(
                 "key='{}' VALID=false reason='no matching data source'",
                 ref_id
             );
-            continue;
+            return false;
         };
 
         let re = ds.regex.as_deref().and_then(get_cached_regex);
 
         if ds.is_array {
-            let Some(arr) = value.as_array() else {
-                warnings.insert(ref_id.clone(), "expected array".into());
-                debug!("key='{}' VALID=false reason='expected array'", ref_id);
-                continue;
-            };
+            if let Some(arr) = value.as_array_mut() {
+                let mut has_invalid = false;
+                let mut first_invalid_idx = None;
+                let mut idx = 0;
 
-            let mut has_invalid = false;
-            let valid_elements: Vec<Value> = arr
-                .iter()
-                .enumerate()
-                .filter_map(|(idx, elem)| {
-                    if validate_scalar(elem, ds, re.as_deref()).is_ok() {
-                        Some(elem.clone())
-                    } else {
+                arr.retain(|elem| {
+                    let is_valid = validate_scalar(elem, ds, re.as_deref()).is_ok();
+                    if !is_valid {
                         if !has_invalid {
-                            warnings.insert(
-                                ref_id.clone(),
-                                format!("element[{}] failed validation", idx),
-                            );
+                            first_invalid_idx = Some(idx);
                             has_invalid = true;
                         }
                         debug!("key='{}' element[{}] VALID=false", ref_id, idx);
-                        None
                     }
-                })
-                .collect();
+                    idx += 1;
+                    is_valid
+                });
 
-            debug!(
-                "key='{}' VALID=true ({} valid elements)",
-                ref_id,
-                valid_elements.len()
-            );
-            valid_data.insert(ref_id.clone(), Value::Array(valid_elements));
+                if has_invalid {
+                    warnings.insert(
+                        ref_id.clone(),
+                        format!(
+                            "element[{}] failed validation",
+                            first_invalid_idx.unwrap_or(0)
+                        ),
+                    );
+                }
+
+                debug!(
+                    "key='{}' VALID=true ({} elements remain)",
+                    ref_id,
+                    arr.len()
+                );
+                true
+            } else {
+                warnings.insert(ref_id.clone(), "expected array".into());
+                debug!("key='{}' VALID=false reason='expected array'", ref_id);
+                false
+            }
         } else {
             if value.is_array() {
                 warnings.insert(
@@ -94,20 +99,24 @@ pub fn validate_and_filter_payload(
                     "key='{}' VALID=false reason='unexpected array (expected single value)'",
                     ref_id
                 );
-                continue;
+                return false;
             }
 
-            if validate_scalar(value, ds, re.as_deref()).is_ok() {
-                valid_data.insert(ref_id.clone(), value.clone());
-                debug!("key='{}' VALID=true", ref_id);
-            } else {
-                warnings.insert(ref_id.clone(), "failed validation".into());
-                debug!("key='{}' VALID=false", ref_id);
+            match validate_scalar(value, ds, re.as_deref()) {
+                Ok(_) => {
+                    debug!("key='{}' VALID=true", ref_id);
+                    true
+                }
+                Err(_) => {
+                    warnings.insert(ref_id.clone(), "failed validation".into());
+                    debug!("key='{}' VALID=false", ref_id);
+                    false
+                }
             }
         }
-    }
+    });
 
-    (valid_data, warnings)
+    (data, warnings)
 }
 
 fn validate_scalar(v: &Value, ds: &DataSource, re: Option<&Regex>) -> Result<(), &'static str> {
@@ -662,7 +671,7 @@ mod tests {
             let mut data = HashMap::new();
             data.insert("tags".to_string(), json!(["rust", "programming", "test"]));
 
-            let (valid, warnings) = validate_and_filter_payload(&data, &ds_map);
+            let (valid, warnings) = validate_and_filter_payload(data, &ds_map);
 
             assert!(valid.contains_key("tags"));
             assert_eq!(valid["tags"].as_array().unwrap().len(), 3);
@@ -678,7 +687,7 @@ mod tests {
             let mut data = HashMap::new();
             data.insert("scores".to_string(), json!([1, 2, 3, 4, 5]));
 
-            let (valid, _warnings) = validate_and_filter_payload(&data, &ds_map);
+            let (valid, _warnings) = validate_and_filter_payload(data, &ds_map);
 
             assert!(valid.contains_key("scores"));
             assert_eq!(valid["scores"].as_array().unwrap().len(), 5);
@@ -693,7 +702,7 @@ mod tests {
             let mut data = HashMap::new();
             data.insert("flags".to_string(), json!([true, false, true]));
 
-            let (valid, _warnings) = validate_and_filter_payload(&data, &ds_map);
+            let (valid, _warnings) = validate_and_filter_payload(data, &ds_map);
 
             assert!(valid.contains_key("flags"));
             assert_eq!(valid["flags"].as_array().unwrap().len(), 3);
@@ -708,7 +717,7 @@ mod tests {
             let mut data = HashMap::new();
             data.insert("values".to_string(), json!([1, "invalid", 3, null, 5]));
 
-            let (valid, warnings) = validate_and_filter_payload(&data, &ds_map);
+            let (valid, warnings) = validate_and_filter_payload(data, &ds_map);
 
             assert!(valid.contains_key("values"));
             let arr = valid["values"].as_array().unwrap();
@@ -725,7 +734,7 @@ mod tests {
             let mut data = HashMap::new();
             data.insert("items".to_string(), json!([]));
 
-            let (valid, warnings) = validate_and_filter_payload(&data, &ds_map);
+            let (valid, warnings) = validate_and_filter_payload(data, &ds_map);
 
             assert!(valid.contains_key("items"));
             assert_eq!(valid["items"].as_array().unwrap().len(), 0);
@@ -741,7 +750,7 @@ mod tests {
             let mut data = HashMap::new();
             data.insert("items".to_string(), json!("not an array"));
 
-            let (valid, warnings) = validate_and_filter_payload(&data, &ds_map);
+            let (valid, warnings) = validate_and_filter_payload(data, &ds_map);
 
             assert!(!valid.contains_key("items"));
             assert!(warnings.contains_key("items"));
@@ -757,7 +766,7 @@ mod tests {
             let mut data = HashMap::new();
             data.insert("name".to_string(), json!(["array", "of", "strings"]));
 
-            let (valid, warnings) = validate_and_filter_payload(&data, &ds_map);
+            let (valid, warnings) = validate_and_filter_payload(data, &ds_map);
 
             assert!(!valid.contains_key("name"));
             assert!(warnings.contains_key("name"));
@@ -777,7 +786,7 @@ mod tests {
                 json!(["hello", "WORLD", "test", "123"]),
             );
 
-            let (valid, warnings) = validate_and_filter_payload(&data, &ds_map);
+            let (valid, warnings) = validate_and_filter_payload(data, &ds_map);
 
             assert!(valid.contains_key("lowercase_words"));
             let arr = valid["lowercase_words"].as_array().unwrap();
@@ -796,7 +805,7 @@ mod tests {
             let mut data = HashMap::new();
             data.insert("percentages".to_string(), json!([10, 50, 150, -5, 100]));
 
-            let (valid, _warnings) = validate_and_filter_payload(&data, &ds_map);
+            let (valid, _warnings) = validate_and_filter_payload(data, &ds_map);
 
             assert!(valid.contains_key("percentages"));
             let arr = valid["percentages"].as_array().unwrap();
@@ -814,7 +823,7 @@ mod tests {
             let data = HashMap::new();
             let ds_map = HashMap::new();
 
-            let (valid, warnings) = validate_and_filter_payload(&data, &ds_map);
+            let (valid, warnings) = validate_and_filter_payload(data, &ds_map);
 
             assert!(valid.is_empty());
             assert!(warnings.is_empty());
@@ -826,7 +835,7 @@ mod tests {
             data.insert("unknown_field".to_string(), json!("value"));
             let ds_map = HashMap::new();
 
-            let (valid, warnings) = validate_and_filter_payload(&data, &ds_map);
+            let (valid, warnings) = validate_and_filter_payload(data, &ds_map);
 
             assert!(!valid.contains_key("unknown_field"));
             assert!(warnings.contains_key("unknown_field"));
@@ -845,7 +854,7 @@ mod tests {
             data.insert("age".to_string(), json!(30));
             data.insert("active".to_string(), json!(true));
 
-            let (valid, warnings) = validate_and_filter_payload(&data, &ds_map);
+            let (valid, warnings) = validate_and_filter_payload(data, &ds_map);
 
             assert_eq!(valid.len(), 3);
             assert!(valid.contains_key("name"));
@@ -865,7 +874,7 @@ mod tests {
             data.insert("invalid_number".to_string(), json!("not a number"));
             data.insert("unknown".to_string(), json!("value"));
 
-            let (valid, warnings) = validate_and_filter_payload(&data, &ds_map);
+            let (valid, warnings) = validate_and_filter_payload(data, &ds_map);
 
             assert_eq!(valid.len(), 1);
             assert!(valid.contains_key("valid_string"));
@@ -887,7 +896,7 @@ mod tests {
             data.insert("title".to_string(), json!("Test"));
             data.insert("scores".to_string(), json!([1, 2, 3]));
 
-            let (valid, warnings) = validate_and_filter_payload(&data, &ds_map);
+            let (valid, warnings) = validate_and_filter_payload(data, &ds_map);
 
             assert_eq!(valid.len(), 2);
             assert!(warnings.is_empty());
@@ -904,7 +913,7 @@ mod tests {
             data.insert("field".to_string(), json!("test"));
 
             // Should not panic, regex just won't be applied
-            let (valid, _warnings) = validate_and_filter_payload(&data, &ds_map);
+            let (valid, _warnings) = validate_and_filter_payload(data, &ds_map);
 
             // Field should still be valid since regex couldn't be compiled
             assert!(valid.contains_key("field"));
@@ -919,7 +928,7 @@ mod tests {
             let mut data = HashMap::new();
             data.insert("data".to_string(), original_value.clone());
 
-            let (valid, _) = validate_and_filter_payload(&data, &ds_map);
+            let (valid, _) = validate_and_filter_payload(data, &ds_map);
 
             assert_eq!(valid["data"], original_value);
         }
@@ -1079,7 +1088,7 @@ mod tests {
             let mut data = HashMap::new();
             data.insert("items".to_string(), json!(["valid", null, "also valid"]));
 
-            let (valid, warnings) = validate_and_filter_payload(&data, &ds_map);
+            let (valid, warnings) = validate_and_filter_payload(data, &ds_map);
 
             let arr = valid["items"].as_array().unwrap();
             assert_eq!(arr.len(), 2); // null should be filtered out
@@ -1099,7 +1108,7 @@ mod tests {
                 json!(["valid", {"obj": "value"}, "also valid"]),
             );
 
-            let (valid, warnings) = validate_and_filter_payload(&data, &ds_map);
+            let (valid, warnings) = validate_and_filter_payload(data, &ds_map);
 
             let arr = valid["items"].as_array().unwrap();
             assert_eq!(arr.len(), 2); // object should be filtered out
@@ -1116,7 +1125,7 @@ mod tests {
             let mut data = HashMap::new();
             data.insert("".to_string(), json!("value"));
 
-            let (valid, _warnings) = validate_and_filter_payload(&data, &ds_map);
+            let (valid, _warnings) = validate_and_filter_payload(data, &ds_map);
 
             assert!(valid.contains_key(""));
         }
@@ -1130,7 +1139,7 @@ mod tests {
             let mut data = HashMap::new();
             data.insert("フィールド".to_string(), json!("値"));
 
-            let (valid, warnings) = validate_and_filter_payload(&data, &ds_map);
+            let (valid, warnings) = validate_and_filter_payload(data, &ds_map);
 
             assert!(valid.contains_key("フィールド"));
             assert!(warnings.is_empty());

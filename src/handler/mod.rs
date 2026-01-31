@@ -102,6 +102,7 @@ pub fn success_response(warnings: HashMap<String, String>) -> HandlerResponse {
     }
 }
 
+#[derive(sqlx::FromRow)]
 pub struct IpRule {
     pub ip_address: String,
     pub allowed: bool,
@@ -171,11 +172,10 @@ pub async fn load_project_context(
         }
     }
 
-    let ip_rules = sqlx::query_as!(
-        IpRule,
+    let ip_rules = sqlx::query_as::<_, IpRule>(
         "SELECT ip_address, allowed FROM ip_addresses WHERE project_id = $1",
-        first.get::<Uuid, _>("id")
     )
+    .bind(first.get::<Uuid, _>("id"))
     .fetch_all(pool)
     .await
     .unwrap_or_default();

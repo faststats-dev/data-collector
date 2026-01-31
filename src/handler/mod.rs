@@ -13,8 +13,7 @@ use crate::models::{DataSource, Error, ErrorTracking};
 use crate::tinybird::{ErrorRow, ErrorTrackingRow, EventRow};
 use axum::Json;
 use axum::http::{HeaderMap, StatusCode};
-use futures::TryStreamExt;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::Row;
 use std::borrow::Cow;
@@ -79,20 +78,26 @@ pub fn error_response(status: StatusCode, message: &str) -> HandlerResponse {
     (status, Json(serde_json::json!({ "error": message })))
 }
 
+#[derive(Serialize)]
+struct SimpleResponse {
+    status: &'static str,
+}
+
+#[derive(Serialize)]
+struct WarningResponse {
+    warnings: HashMap<String, String>,
+}
+
 pub fn success_response(warnings: HashMap<String, String>) -> HandlerResponse {
     if warnings.is_empty() {
         (
             StatusCode::OK,
-            Json(serde_json::json!({ "status": "success" })),
+            Json(serde_json::to_value(SimpleResponse { status: "success" }).unwrap()),
         )
     } else {
-        let warnings_obj: serde_json::Map<String, Value> = warnings
-            .into_iter()
-            .map(|(k, v)| (k, Value::String(v)))
-            .collect();
         (
             StatusCode::OK,
-            Json(serde_json::json!({ "warnings": warnings_obj })),
+            Json(serde_json::to_value(WarningResponse { warnings }).unwrap()),
         )
     }
 }
@@ -116,133 +121,72 @@ pub async fn load_project_context(
     pool: &sqlx::PgPool,
     token: &str,
 ) -> Result<ProjectContext, HandlerResponse> {
-    let mut rows = sqlx::query(
-        "
-        SELECT
-            p.id,
-            p.owner_id,
-            p.domain,
-            d.reference_id,
-            d.name,
-            d.data_type::text AS data_type,
-            p.error_tracking_enabled,
-            d.regex,
-            d.allow_negative,
-            d.allow_float,
-            d.min_value,
-            d.max_value,
-            d.is_array,
-            CASE
-                WHEN u.id IS NOT NULL THEN p.owner_id
-                WHEN o.id IS NOT NULL THEN m.user_id
-                ELSE p.owner_id
-            END AS billing_customer_id,
-            o.id AS organization_id
+    let rows = sqlx::query(
+        r#"
+        SELECT p.id, p.owner_id, p.domain, p.error_tracking_enabled, o.id AS organization_id,
+               d.reference_id, d.name, d.data_type::text, d.regex, d.allow_negative,
+               d.allow_float, d.min_value, d.max_value, d.is_array
         FROM project p
         LEFT JOIN data_sources d ON d.project_id = p.id
-        LEFT JOIN \"user\" u ON u.id = p.owner_id
         LEFT JOIN organization o ON o.id = p.owner_id
-        LEFT JOIN member m ON m.organization_id = o.id AND m.role = 'owner'
         WHERE p.token = $1
-        ",
+        "#,
     )
     .bind(token)
-    .fetch(pool);
+    .fetch_all(pool)
+    .await
+    .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "DB Error"))?;
 
-    let first_row = rows
-        .try_next()
-        .await
-        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error"))?;
-
-    let Some(first) = first_row else {
+    if rows.is_empty() {
         return Err(error_response(StatusCode::UNAUTHORIZED, "Unauthorized"));
-    };
-
-    let project_id: Uuid = first
-        .try_get("id")
-        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error"))?;
-    let owner_id: String = first
-        .try_get("billing_customer_id")
-        .or_else(|_| first.try_get("owner_id"))
-        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error"))?;
-    let organization_id: Option<String> = first.try_get("organization_id").unwrap_or(None);
-    let domain: Option<String> = first.try_get("domain").unwrap_or(None);
-    let error_tracking_enabled: bool = first.try_get("error_tracking_enabled").unwrap_or(false);
-
-    let mut datasources: HashMap<String, DataSource> = HashMap::new();
-
-    let process_row = |row: &sqlx::postgres::PgRow| -> Option<DataSource> {
-        let reference_id: String = row
-            .try_get::<Option<String>, _>("reference_id")
-            .ok()
-            .flatten()
-            .unwrap_or_default();
-        if reference_id.is_empty() {
-            return None;
-        }
-        Some(DataSource {
-            reference_id,
-            name: row
-                .try_get::<Option<String>, _>("name")
-                .ok()
-                .flatten()
-                .unwrap_or_default(),
-            data_type: row.try_get::<String, _>("data_type").unwrap_or_default(),
-            regex: row.try_get::<Option<String>, _>("regex").ok().flatten(),
-            allow_negative: row
-                .try_get::<Option<bool>, _>("allow_negative")
-                .ok()
-                .flatten(),
-            allow_float: row.try_get::<Option<bool>, _>("allow_float").ok().flatten(),
-            min_value: row.try_get::<Option<f64>, _>("min_value").ok().flatten(),
-            max_value: row.try_get::<Option<f64>, _>("max_value").ok().flatten(),
-            is_array: row
-                .try_get::<Option<bool>, _>("is_array")
-                .ok()
-                .flatten()
-                .unwrap_or(false),
-        })
-    };
-
-    if let Some(ds) = process_row(&first) {
-        datasources.insert(ds.reference_id.clone(), ds);
     }
 
-    while let Some(row) = rows
-        .try_next()
-        .await
-        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error"))?
-    {
-        if let Some(ds) = process_row(&row) {
-            datasources.insert(ds.reference_id.clone(), ds);
+    let first = &rows[0];
+    let mut datasources = HashMap::with_capacity(rows.len());
+
+    for row in &rows {
+        if let Ok(Some(ref_id)) = row.try_get::<Option<String>, _>("reference_id") {
+            datasources.insert(
+                ref_id.clone(),
+                DataSource {
+                    reference_id: ref_id,
+                    name: row
+                        .try_get::<Option<String>, _>("name")
+                        .ok()
+                        .flatten()
+                        .unwrap_or_default(),
+                    data_type: row.try_get::<String, _>("data_type").unwrap_or_default(),
+                    regex: row.try_get("regex").ok(),
+                    allow_negative: row.try_get("allow_negative").ok(),
+                    allow_float: row.try_get("allow_float").ok(),
+                    min_value: row.try_get("min_value").ok(),
+                    max_value: row.try_get("max_value").ok(),
+                    is_array: row
+                        .try_get::<Option<bool>, _>("is_array")
+                        .ok()
+                        .flatten()
+                        .unwrap_or(false),
+                },
+            );
         }
     }
 
-    let ip_rules: Vec<IpRule> =
-        sqlx::query("SELECT ip_address, allowed FROM ip_addresses WHERE project_id = $1")
-            .bind(project_id)
-            .fetch_all(pool)
-            .await
-            .map_err(|_| {
-                error_response(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error")
-            })?
-            .into_iter()
-            .map(|row| IpRule {
-                ip_address: row.try_get("ip_address").unwrap_or_default(),
-                allowed: row
-                    .try_get::<Option<bool>, _>("allowed")
-                    .unwrap_or(Some(true))
-                    .unwrap_or(true),
-            })
-            .collect();
+    let ip_rules = sqlx::query_as!(
+        IpRule,
+        "SELECT ip_address, allowed FROM ip_addresses WHERE project_id = $1",
+        first.get::<Uuid, _>("id")
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
 
     Ok(ProjectContext {
-        project_id,
-        owner_id,
-        organization_id,
-        domain,
+        project_id: first.get("id"),
+        owner_id: first.get("owner_id"),
+        organization_id: first.get("organization_id"),
+        domain: first.get("domain"),
         datasources,
-        error_tracking_enabled,
+        error_tracking_enabled: first.get("error_tracking_enabled"),
         ip_rules,
     })
 }
@@ -308,25 +252,25 @@ pub fn check_ip_allowed(ip_rules: &[IpRule], client_ip: &str) -> Result<(), &'st
         return Ok(());
     }
 
-    let has_whitelist = ip_rules.iter().any(|r| r.allowed);
+    let mut has_whitelist = false;
+    let mut allowed_by_whitelist = false;
 
-    if has_whitelist {
-        if ip_rules
-            .iter()
-            .any(|r| r.allowed && r.ip_address == client_ip)
-        {
-            Ok(())
-        } else {
-            Err("IP address not allowed")
+    for rule in ip_rules {
+        if rule.allowed {
+            has_whitelist = true;
+            if rule.ip_address == client_ip {
+                allowed_by_whitelist = true;
+            }
+        } else if rule.ip_address == client_ip {
+            return Err("IP address blocked");
         }
-    } else if ip_rules
-        .iter()
-        .any(|r| !r.allowed && r.ip_address == client_ip)
-    {
-        Err("IP address blocked")
-    } else {
-        Ok(())
     }
+
+    if has_whitelist && !allowed_by_whitelist {
+        return Err("IP address not allowed");
+    }
+
+    Ok(())
 }
 
 pub fn enrich_data_with_country(data: &mut HashMap<String, Value>, headers: &HeaderMap) {
@@ -464,7 +408,7 @@ async fn process_collect_request(
         .map_err(|_| "Unauthorized or database error")?;
 
     let req: crate::models::Request =
-        serde_json::from_slice(&request.body).map_err(|_| "Invalid JSON".to_string())?;
+        serde_json::from_slice(&request.body).map_err(|_| "Invalid JSON")?;
 
     let server_id = req
         .id

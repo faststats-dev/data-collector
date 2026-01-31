@@ -905,11 +905,6 @@ impl BatchQueue {
 
         let event_ids: Vec<i64> = events.iter().map(|(id, _)| *id).collect();
 
-        if let Err(e) = self.backup_store.remove_backed_up_events(&event_ids).await {
-            eprintln!("Failed to remove events before replay: {}", e);
-            return;
-        }
-
         let mut batch = InMemoryBatch::default();
         for (_id, event) in events {
             batch.push(event);
@@ -918,13 +913,34 @@ impl BatchQueue {
         let result = self.send_grouped_batch(batch).await;
 
         if !result.has_failures() {
-            eprintln!("Successfully restored {} events", event_ids.len());
+            if let Err(e) = self.backup_store.remove_backed_up_events(&event_ids).await {
+                eprintln!("Failed to remove events after successful replay: {}", e);
+            } else {
+                eprintln!("Successfully restored {} events", event_ids.len());
+            }
         } else {
-            self.backup_events(
-                result.into_in_memory_batch(),
-                "Replay failed, re-backing up",
-            )
-            .await;
+            let failed_count = result.failure_count();
+            let succeeded_count = event_ids.len() - failed_count;
+
+            if succeeded_count > 0 {
+                // Remove only the IDs for events that succeeded (first N events)
+                let succeeded_ids = &event_ids[..succeeded_count];
+                if let Err(e) = self
+                    .backup_store
+                    .remove_backed_up_events(succeeded_ids)
+                    .await
+                {
+                    eprintln!(
+                        "Failed to remove {} succeeded events: {}",
+                        succeeded_count, e
+                    );
+                }
+            }
+
+            eprintln!(
+                "Replay partially failed: {} succeeded, {} failed (kept in backup)",
+                succeeded_count, failed_count
+            );
         }
     }
 

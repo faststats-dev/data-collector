@@ -152,18 +152,15 @@ impl TinybirdClient {
             return Ok(());
         }
 
-        let mut url = String::with_capacity(self.base_url.len() + 22 + datasource.len());
-        url.push_str(&self.base_url);
-        url.push_str("/v0/events?name=");
-        url.push_str(datasource);
-        url.push_str("&wait=true");
+        let url = format!("{}/v0/events?name={}&wait=true", self.base_url, datasource);
 
-        let mut encoder =
-            GzEncoder::new(Vec::with_capacity(rows.len() * 128), Compression::default());
+        let mut encoder = GzEncoder::new(Vec::with_capacity(rows.len() * 256), Compression::fast());
+
         for row in rows {
             serde_json::to_writer(&mut encoder, row)?;
             encoder.write_all(b"\n")?;
         }
+
         let compressed = encoder.finish()?;
 
         let response = self

@@ -6,8 +6,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 const DEBOUNCE_WINDOW: Duration = Duration::from_secs(30);
-const MAX_ENTRIES: u64 = 50_000;
-const MAINTENANCE_INTERVAL: u64 = 1000;
+const MAX_ENTRIES: u64 = 10_000;
+const MAINTENANCE_INTERVAL: u64 = 500;
 
 static DEBOUNCE_CACHE: LazyLock<Cache<[u8; 32], ()>> = LazyLock::new(|| {
     Cache::builder()

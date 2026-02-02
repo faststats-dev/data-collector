@@ -58,7 +58,7 @@ async fn main() {
         .expect("DATABASE_URL must be set in .env file or environment variables");
 
     let pool = PgPoolOptions::new()
-        .max_connections(10)
+        .max_connections(3)
         .connect(&database_url)
         .await
         .expect("Failed to connect to database");

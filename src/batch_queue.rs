@@ -21,8 +21,8 @@ const BACKUP_REPLAY_INTERVAL: Duration = Duration::from_secs(600);
 const MAX_REPLAY_BATCH_SIZE: i64 = 50;
 const MAX_BACKUP_AGE_SECS: i64 = 86400;
 const MAX_REQUEST_AGE_SECS: i64 = 86400;
-const CHANNEL_CAPACITY: usize = 10_000;
-const CHANNEL_BACKPRESSURE_THRESHOLD: usize = 8_000;
+const CHANNEL_CAPACITY: usize = 2_000;
+const CHANNEL_BACKPRESSURE_THRESHOLD: usize = 1_600;
 const MAX_BATCH_SIZE: usize = 5000;
 
 pub struct OwnerUsage {
@@ -100,7 +100,7 @@ impl QueuedEvent {
     }
 }
 
-const INITIAL_BATCH_CAPACITY: usize = 256;
+const INITIAL_BATCH_CAPACITY: usize = 64;
 
 #[derive(Debug)]
 struct InMemoryBatch {
@@ -284,13 +284,14 @@ impl BackupStore {
                 let options = SqliteConnectOptions::new()
                     .filename(&self.path)
                     .create_if_missing(true)
-                    .busy_timeout(Duration::from_secs(30));
+                    .busy_timeout(Duration::from_secs(30))
+                    .pragma("cache_size", "500");
 
                 let pool = SqlitePoolOptions::new()
-                    .max_connections(3)
+                    .max_connections(1)
                     .min_connections(0)
-                    .idle_timeout(Some(Duration::from_secs(300)))
-                    .acquire_timeout(Duration::from_secs(60))
+                    .idle_timeout(Some(Duration::from_secs(60)))
+                    .acquire_timeout(Duration::from_secs(30))
                     .connect_with(options)
                     .await?;
 

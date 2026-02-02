@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 
 static REGEX_CACHE: LazyLock<Cache<Arc<str>, Arc<Regex>>> =
-    LazyLock::new(|| Cache::builder().max_capacity(500).build());
+    LazyLock::new(|| Cache::builder().max_capacity(100).build());
 
 macro_rules! debug {
     ($($arg:tt)*) => {

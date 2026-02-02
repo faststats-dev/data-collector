@@ -134,8 +134,8 @@ impl TinybirdClient {
 
         Self {
             client: Client::builder()
-                .pool_idle_timeout(std::time::Duration::from_secs(30))
-                .pool_max_idle_per_host(5)
+                .pool_idle_timeout(std::time::Duration::from_secs(15))
+                .pool_max_idle_per_host(2)
                 .build()
                 .unwrap_or_else(|_| Client::new()),
             base_url,

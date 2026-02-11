@@ -28,4 +28,8 @@ COPY --from=builder \
     /app/target/x86_64-unknown-linux-musl/release/data-collector \
     /usr/local/bin/data-collector
 USER nonroot:nonroot
+
+ENV PORT=8080
+EXPOSE $PORT
+
 ENTRYPOINT ["/usr/local/bin/data-collector"]

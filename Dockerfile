@@ -1,4 +1,4 @@
-FROM rust:1.92-slim AS builder
+FROM rust:1.92-slim-bookworm AS builder
 WORKDIR /app
 COPY . .
 RUN cargo build --release --bin data-collector

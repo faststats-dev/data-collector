@@ -4,6 +4,7 @@ COPY . .
 RUN cargo build --release --bin data-collector
 
 FROM gcr.io/distroless/cc-debian12:nonroot
+COPY regexes.yaml ./regexes.yaml
 COPY --from=builder /app/target/release/data-collector /usr/local/bin/data-collector
 USER nonroot:nonroot
 

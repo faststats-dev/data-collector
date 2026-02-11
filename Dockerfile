@@ -32,10 +32,10 @@ RUN mkdir -p /home/app/data && \
 
 USER app
 
-ENV PORT=3000
+ENV PORT=8080
 ENV BACKUP_DB_PATH=/home/app/data/backup.db
 ENV UA_REGEXES_PATH=/app/regexes.yaml
 
-EXPOSE 3000
+EXPOSE $PORT
 
 CMD ["./data-collector"]

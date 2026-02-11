@@ -1,9 +1,9 @@
-# fly.toml app configuration file generated for data-collector-thrumming-bush-8343 on 2026-02-11T17:42:10+01:00
+# fly.toml app configuration file generated for data-collector-20axlq on 2026-02-11T18:03:01+01:00
 #
 # See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #
 
-app = 'data-collector-thrumming-bush-8343'
+app = 'data-collector-20axlq'
 primary_region = 'ams'
 
 [build]

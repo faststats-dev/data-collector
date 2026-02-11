@@ -1,0 +1,7 @@
+target/
+.git/
+.github/
+.env
+.idea/
+backup.db
+*.md

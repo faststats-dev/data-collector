@@ -4,7 +4,7 @@
 #
 
 app = 'data-collector-20axlq'
-primary_region = 'ams'
+primary_region = 'fra'
 
 [build]
 

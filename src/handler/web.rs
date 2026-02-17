@@ -1,7 +1,7 @@
 use super::{
-    EncodingQuery, HandlerResponse, check_ip_allowed, decompress_body, enrich_data_with_country,
-    error_response, get_authorization, get_client_ip, get_request_origin, insert_error_entries,
-    insert_event, load_project_context, success_response, validate_domain,
+    EncodingQuery, check_ip_allowed, decompress_body, enrich_data_with_country, error_response,
+    get_authorization, get_client_ip, get_request_origin, insert_error_entries, insert_event,
+    load_project_context, success_response, validate_domain,
 };
 use crate::batch_queue::{FailedRequest, RequestType, TrackingContext};
 use crate::models::{AppState, ErrorTracking};
@@ -11,9 +11,7 @@ use axum::body::Bytes;
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
-use serde::Deserialize;
 use serde_json::Value;
-use sqlx::Row;
 use sqlx::types::Uuid;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -190,60 +188,4 @@ pub async fn web(
     }
 
     success_response(warnings)
-}
-
-#[derive(Deserialize)]
-pub struct MetadataQuery {
-    token: String,
-}
-
-pub async fn web_metadata(
-    State(state): State<AppState>,
-    Query(query): Query<MetadataQuery>,
-) -> HandlerResponse {
-    let row = sqlx::query(
-        "SELECT
-            error_tracking_enabled,
-            web_vitals_enabled,
-            session_replays_enabled,
-            web_vitals_sampling,
-            session_replays_sampling
-         FROM project
-         WHERE token = $1",
-    )
-    .bind(&query.token)
-    .fetch_optional(&state.pool)
-    .await;
-
-    let row = match row {
-        Ok(Some(r)) => r,
-        Ok(None) => return error_response(StatusCode::NOT_FOUND, "Project not found"),
-        Err(_) => {
-            return error_response(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error");
-        }
-    };
-
-    let error_tracking_enabled: bool = row.try_get("error_tracking_enabled").unwrap_or(false);
-    let web_vitals_enabled: bool = row.try_get("web_vitals_enabled").unwrap_or(false);
-    let session_replays_enabled: bool = row.try_get("session_replays_enabled").unwrap_or(false);
-    let web_vitals_sampling: Option<Value> = row.try_get("web_vitals_sampling").unwrap_or(None);
-    let session_replays_sampling: Option<Value> =
-        row.try_get("session_replays_sampling").unwrap_or(None);
-
-    (
-        StatusCode::OK,
-        axum::Json(serde_json::json!({
-            "errorTracking": {
-                "enabled": error_tracking_enabled
-            },
-            "webVitals": {
-                "enabled": web_vitals_enabled,
-                "sampling": web_vitals_sampling
-            },
-            "sessionReplays": {
-                "enabled": session_replays_enabled,
-                "sampling": session_replays_sampling
-            }
-        })),
-    )
 }

@@ -102,7 +102,6 @@ async fn main() {
         .route("/v1/health", get(|| async { (StatusCode::OK, "OK") }))
         .route("/v1/collect", post(handler::collect))
         .route("/v1/web", post(handler::web))
-        .route("/v1/web/metadata", get(handler::web_metadata))
         .route("/v1/vitals", post(handler::vitals))
         .route("/v1/replay", post(handler::replay))
         .layer(RequestDecompressionLayer::new())

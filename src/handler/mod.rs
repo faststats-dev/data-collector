@@ -6,7 +6,7 @@ mod web;
 pub use collect::collect;
 pub use replay::replay;
 pub use vitals::vitals;
-pub use web::{web, web_metadata};
+pub use web::web;
 
 use crate::batch_queue::{BatchQueue, FailedRequest, QueuedEvent, RequestType, TrackingContext};
 use crate::models::{DataSource, Error, ErrorTracking};

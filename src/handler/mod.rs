@@ -414,6 +414,7 @@ async fn process_collect_request(
         .id
         .value()
         .parse::<Uuid>()
+        .map(|id| crate::utils::hash_server_id(id, ctx.project_id))
         .map_err(|_| "Invalid server_id".to_string())?;
 
     let mut data_map = req.data;
@@ -489,7 +490,7 @@ async fn process_web_request(
     let mut data_map = parsed.data;
     enrich_data_with_country(&mut data_map, &HeaderMap::new());
 
-    let server_id = parsed.anonymous_id;
+    let server_id = crate::utils::hash_server_id(parsed.anonymous_id, ctx.project_id);
 
     let (valid_data, _) =
         crate::validation::validate_and_filter_payload(data_map, &ctx.datasources);

@@ -68,7 +68,7 @@ pub async fn collect(
     };
 
     let server_id = match req.id.value().parse::<Uuid>() {
-        Ok(id) => id,
+        Ok(id) => crate::utils::hash_server_id(id, ctx.project_id),
         Err(_) => {
             return error_response(StatusCode::BAD_REQUEST, "Invalid server_id or identifier");
         }

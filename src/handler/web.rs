@@ -132,7 +132,7 @@ pub async fn web(
         None => return success_response(HashMap::new()),
     };
 
-    let server_id = anonymous_id;
+    let server_id = crate::utils::hash_server_id(anonymous_id, ctx.project_id);
 
     if !ua_info.browser.is_empty() {
         valid_data.insert("browser".into(), Value::String(ua_info.browser));

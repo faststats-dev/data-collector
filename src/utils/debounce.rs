@@ -47,7 +47,7 @@ pub fn should_debounce(visitor_id: Uuid, url: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::Rng;
+    use rand::RngExt;
 
     fn random_uuid() -> Uuid {
         let bytes: [u8; 16] = rand::rng().random();

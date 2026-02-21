@@ -1,15 +1,18 @@
 use axum::{
     Router,
     extract::{MatchedPath, Request},
-    http::{HeaderName, Method, StatusCode},
+    http::HeaderName,
+    http::Method,
+    http::StatusCode,
+    http::header::HeaderMap,
     middleware::Next,
     response::IntoResponse,
-    routing::{get, post},
+    routing::get,
+    routing::post,
 };
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
 use sqlx::postgres::PgPoolOptions;
 use std::{
-    future::ready,
     path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
@@ -122,6 +125,9 @@ async fn main() {
         ])
         .allow_credentials(true);
 
+    let fly_prometheus_token =
+        std::env::var("FLY_PROMETHEUS_TOKEN").expect("FLY_PROMETHEUS_TOKEN must be set");
+
     let app = Router::new()
         .route("/v1/health", get(|| async { (StatusCode::OK, "OK") }))
         .route("/v1/collect", post(handler::collect))
@@ -129,13 +135,24 @@ async fn main() {
         .route("/v1/vitals", post(handler::vitals))
         .route("/v1/replay", post(handler::replay))
         .route(
-            "/metrics",
-            get(move || {
-                ready((
-                    StatusCode::OK,
-                    [("content-type", "text/plain; version=0.0.4; charset=utf-8")],
-                    recorder_handle.render(),
-                ))
+            "/prometheus",
+            get(move |headers: HeaderMap| async move {
+                let auth_header = headers
+                    .get("authorization")
+                    .and_then(|v| v.to_str().ok());
+
+                let valid = auth_header
+                    .map(|h| {
+                        h == format!("Bearer {}", fly_prometheus_token)
+                            || h == format!("FlyV1 {}", fly_prometheus_token)
+                    })
+                    .unwrap_or(false);
+
+                if !valid {
+                    return (StatusCode::NOT_FOUND, "Not found".to_string());
+                }
+
+                (StatusCode::OK, recorder_handle.render())
             }),
         )
         .layer(RequestDecompressionLayer::new())

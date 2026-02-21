@@ -137,9 +137,7 @@ async fn main() {
         .route(
             "/prometheus",
             get(move |headers: HeaderMap| async move {
-                let auth_header = headers
-                    .get("authorization")
-                    .and_then(|v| v.to_str().ok());
+                let auth_header = headers.get("authorization").and_then(|v| v.to_str().ok());
 
                 let valid = auth_header
                     .map(|h| {

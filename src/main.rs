@@ -93,21 +93,30 @@ async fn main() {
     let batch_queue =
         batch_queue::BatchQueue::new(Arc::clone(&tinybird_client), polar_client, &backup_path);
 
-    let recorder_handle = setup_metrics_recorder();
+    let fly_prometheus_token = std::env::var("FLY_PROMETHEUS_TOKEN").ok();
 
-    let batch_queue_for_metrics = Arc::clone(&batch_queue);
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(10));
-        loop {
-            interval.tick().await;
+    let recorder_handle = if fly_prometheus_token.is_some() {
+        let handle = setup_metrics_recorder();
 
-            let channel_capacity = batch_queue_for_metrics.channel_capacity();
-            metrics::gauge!("batch_channel_capacity").set(channel_capacity as f64);
+        let batch_queue_for_metrics = Arc::clone(&batch_queue);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(10));
+            loop {
+                interval.tick().await;
 
-            let batch_size = batch_queue_for_metrics.current_batch_size().await;
-            metrics::gauge!("batch_current_size").set(batch_size as f64);
-        }
-    });
+                let channel_capacity = batch_queue_for_metrics.channel_capacity();
+                metrics::gauge!("batch_channel_capacity").set(channel_capacity as f64);
+
+                let batch_size = batch_queue_for_metrics.current_batch_size().await;
+                metrics::gauge!("batch_current_size").set(batch_size as f64);
+            }
+        });
+
+        Some(handle)
+    } else {
+        eprintln!("FLY_PROMETHEUS_TOKEN not set, Prometheus metrics disabled");
+        None
+    };
 
     let state = models::AppState {
         pool: pool.clone(),
@@ -125,37 +134,39 @@ async fn main() {
         ])
         .allow_credentials(true);
 
-    let fly_prometheus_token =
-        std::env::var("FLY_PROMETHEUS_TOKEN").expect("FLY_PROMETHEUS_TOKEN must be set");
-
-    let app = Router::new()
+    let mut app = Router::new()
         .route("/v1/health", get(|| async { (StatusCode::OK, "OK") }))
         .route("/v1/collect", post(handler::collect))
         .route("/v1/web", post(handler::web))
         .route("/v1/vitals", post(handler::vitals))
-        .route("/v1/replay", post(handler::replay))
-        .route(
-            "/prometheus",
-            get(move |headers: HeaderMap| async move {
-                let auth_header = headers.get("authorization").and_then(|v| v.to_str().ok());
+        .route("/v1/replay", post(handler::replay));
 
-                let valid = auth_header
-                    .map(|h| {
-                        h == format!("Bearer {}", fly_prometheus_token)
-                            || h == format!("FlyV1 {}", fly_prometheus_token)
-                    })
-                    .unwrap_or(false);
+    if let (Some(token), Some(handle)) = (fly_prometheus_token, recorder_handle) {
+        app = app
+            .route(
+                "/prometheus",
+                get(move |headers: HeaderMap| async move {
+                    let auth_header = headers.get("authorization").and_then(|v| v.to_str().ok());
 
-                if !valid {
-                    return (StatusCode::NOT_FOUND, "Not found".to_string());
-                }
+                    let valid = auth_header
+                        .map(|h| {
+                            h == format!("Bearer {}", token) || h == format!("FlyV1 {}", token)
+                        })
+                        .unwrap_or(false);
 
-                (StatusCode::OK, recorder_handle.render())
-            }),
-        )
+                    if !valid {
+                        return (StatusCode::NOT_FOUND, "Not found".to_string());
+                    }
+
+                    (StatusCode::OK, handle.render())
+                }),
+            )
+            .layer(axum::middleware::from_fn(track_metrics));
+    }
+
+    let app = app
         .layer(RequestDecompressionLayer::new())
         .layer(cors)
-        .layer(axum::middleware::from_fn(track_metrics))
         .with_state(state);
 
     let port: u16 = std::env::var("PORT")

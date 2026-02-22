@@ -515,8 +515,17 @@ async fn process_web_request(
     if !ua_info.browser.is_empty() {
         valid_data.insert("browser".into(), Value::String(ua_info.browser));
     }
+    if !ua_info.browser_version.is_empty() {
+        valid_data.insert(
+            "browser_version".into(),
+            Value::String(ua_info.browser_version),
+        );
+    }
     if !ua_info.os.is_empty() {
         valid_data.insert("os".into(), Value::String(ua_info.os));
+    }
+    if !ua_info.os_version.is_empty() {
+        valid_data.insert("os_version".into(), Value::String(ua_info.os_version));
     }
     valid_data.insert("device".into(), Value::String(ua_info.device.to_string()));
 
@@ -636,7 +645,9 @@ async fn process_vitals_request(
             device: device.as_ref().map(|s| s.to_string()),
             country: country.as_ref().map(|s| s.to_string()),
             os: os.as_ref().map(|s| s.to_string()),
+            os_version: None,
             browser: browser.as_ref().map(|s| s.to_string()),
+            browser_version: None,
             url: url.to_string(),
             attributes: attributes_str.to_string(),
             session_id: session_id.as_ref().map(|s| s.to_string()),

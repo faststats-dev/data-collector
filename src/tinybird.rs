@@ -59,7 +59,11 @@ pub struct WebVitalRow {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub os: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub os_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub browser: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub browser_version: Option<String>,
     pub url: String,
     pub attributes: String,
     pub session_id: Option<String>,

@@ -590,6 +590,14 @@ impl BatchQueue {
         self.sender.send(event).await
     }
 
+    pub fn channel_capacity(&self) -> usize {
+        self.sender.capacity()
+    }
+
+    pub async fn current_batch_size(&self) -> usize {
+        self.in_memory_batch.lock().await.total_count()
+    }
+
     fn start_batch_processor(self: &Arc<Self>, mut receiver: mpsc::Receiver<QueuedEvent>) {
         let queue = Arc::clone(self);
         tokio::spawn(async move {

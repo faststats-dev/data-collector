@@ -18,6 +18,8 @@ pub struct EventRow {
     pub id: Uuid,
     pub project_id: Uuid,
     pub server_id: Uuid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub country: Option<String>,
     pub data: String,
     #[serde(with = "chrono::serde::ts_milliseconds")]
     pub created_at: DateTime<Utc>,

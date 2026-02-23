@@ -1,6 +1,6 @@
 use super::{
-    EncodingQuery, check_ip_allowed, decompress_body, enrich_data_with_country, error_response,
-    get_authorization, get_client_ip, get_request_origin, insert_error_entries, insert_event,
+    EncodingQuery, check_ip_allowed, decompress_body, error_response, get_authorization,
+    get_client_ip, get_country, get_request_origin, insert_error_entries, insert_event,
     load_project_context, success_response, validate_domain,
 };
 use crate::batch_queue::{FailedRequest, RequestType, TrackingContext};
@@ -108,17 +108,16 @@ pub async fn web(
         return error_response(StatusCode::FORBIDDEN, msg);
     }
 
-    let mut data_map = data;
-    enrich_data_with_country(&mut data_map, &headers);
+    let country = get_country(&headers);
 
     let session_id = parsed_session_id.or_else(|| {
-        data_map
+        data
             .get("session_id")
             .and_then(|v| v.as_str())
             .map(String::from)
     });
 
-    let (mut valid_data, warnings) = validate_and_filter_payload(data_map, &ctx.datasources);
+    let (mut valid_data, warnings) = validate_and_filter_payload(data, &ctx.datasources);
 
     let user_agent = headers
         .get("User-Agent")
@@ -165,6 +164,7 @@ pub async fn web(
             &state.batch_queue,
             ctx.project_id,
             server_id,
+            country,
             &valid_data,
             Some(Arc::clone(&tracking_ctx)),
         )

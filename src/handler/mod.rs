@@ -273,16 +273,18 @@ pub fn check_ip_allowed(ip_rules: &[IpRule], client_ip: &str) -> Result<(), &'st
     Ok(())
 }
 
-pub fn enrich_data_with_country(data: &mut HashMap<String, Value>, headers: &HeaderMap) {
-    if let Some(country) = headers.get("CF-IPCountry").and_then(|v| v.to_str().ok()) {
-        data.insert("country".into(), Value::String(country.into()));
-    }
+pub fn get_country(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("CF-IPCountry")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from)
 }
 
 pub async fn insert_event(
     batch_queue: &BatchQueue,
     project_id: Uuid,
     server_id: Uuid,
+    country: Option<String>,
     data: &HashMap<String, Value>,
     tracking: Option<Arc<TrackingContext>>,
 ) -> Result<Uuid, HandlerResponse> {
@@ -302,6 +304,7 @@ pub async fn insert_event(
         id: event_id,
         project_id,
         server_id,
+        country,
         data: data_json,
         created_at: chrono::Utc::now(),
     };
@@ -417,11 +420,8 @@ async fn process_collect_request(
         .map(|id| crate::utils::hash_server_id(id, ctx.project_id))
         .map_err(|_| "Invalid server_id".to_string())?;
 
-    let mut data_map = req.data;
-    enrich_data_with_country(&mut data_map, &HeaderMap::new());
-
     let (valid_data, _) =
-        crate::validation::validate_and_filter_payload(data_map, &ctx.datasources);
+        crate::validation::validate_and_filter_payload(req.data, &ctx.datasources);
 
     let tracking_ctx = Arc::new(TrackingContext {
         owner_id: ctx.owner_id.into(),
@@ -433,6 +433,7 @@ async fn process_collect_request(
         batch_queue,
         ctx.project_id,
         server_id,
+        request.country.clone(),
         &valid_data,
         Some(Arc::clone(&tracking_ctx)),
     )
@@ -487,13 +488,10 @@ async fn process_web_request(
         return Err("Origin not allowed".to_string());
     }
 
-    let mut data_map = parsed.data;
-    enrich_data_with_country(&mut data_map, &HeaderMap::new());
-
     let server_id = crate::utils::hash_server_id(parsed.anonymous_id, ctx.project_id);
 
     let (valid_data, _) =
-        crate::validation::validate_and_filter_payload(data_map, &ctx.datasources);
+        crate::validation::validate_and_filter_payload(parsed.data, &ctx.datasources);
 
     use crate::utils::debounce::should_debounce;
 
@@ -539,6 +537,7 @@ async fn process_web_request(
         batch_queue,
         ctx.project_id,
         server_id,
+        request.country.clone(),
         &valid_data,
         Some(Arc::clone(&tracking_ctx)),
     )

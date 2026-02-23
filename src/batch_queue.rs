@@ -995,6 +995,7 @@ mod tests {
             id: Uuid::new_v4(),
             project_id: Uuid::new_v4(),
             server_id: Uuid::new_v4(),
+            country: None,
             data: r#"{"test": "data"}"#.to_string(),
             created_at: Utc::now(),
         }

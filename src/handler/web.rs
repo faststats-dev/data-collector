@@ -111,8 +111,7 @@ pub async fn web(
     let country = get_country(&headers);
 
     let session_id = parsed_session_id.or_else(|| {
-        data
-            .get("session_id")
+        data.get("session_id")
             .and_then(|v| v.as_str())
             .map(String::from)
     });

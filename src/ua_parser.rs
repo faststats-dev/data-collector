@@ -67,63 +67,67 @@ fn format_version_only(major: Option<impl AsRef<str>>, minor: Option<impl AsRef<
     }
 }
 
-fn get_device_type(ua: &str, device_family: Option<&str>) -> &'static str {
-    let ua_lower = ua.to_lowercase();
-
-    if let Some(f) = device_family {
-        let f_lower = f.to_lowercase();
-        if f_lower == "spider" || f_lower.contains("bot") {
-            return "Bot";
-        }
+fn contains_ci(haystack: &str, needle: &str) -> bool {
+    if needle.len() > haystack.len() {
+        return false;
     }
+    haystack
+        .as_bytes()
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
+}
 
-    if ua_lower.contains("bot")
-        || ua_lower.contains("spider")
-        || ua_lower.contains("crawler")
-        || ua_lower.contains("headless")
+fn get_device_type(ua: &str, device_family: Option<&str>) -> &'static str {
+    if let Some(f) = device_family
+        && (f.eq_ignore_ascii_case("spider") || contains_ci(f, "bot"))
     {
         return "Bot";
     }
 
-    let is_android = ua_lower.contains("android");
-    let is_tablet = ua_lower.contains("tablet");
-    let is_mobile = ua_lower.contains("mobile");
+    if contains_ci(ua, "bot")
+        || contains_ci(ua, "spider")
+        || contains_ci(ua, "crawler")
+        || contains_ci(ua, "headless")
+    {
+        return "Bot";
+    }
+
+    let is_android = contains_ci(ua, "android");
+    let is_tablet = contains_ci(ua, "tablet");
+    let is_mobile = contains_ci(ua, "mobile");
 
     if is_mobile
-        || ua_lower.contains("iphone")
-        || ua_lower.contains("ipod")
-        || ua_lower.contains("windows phone")
-        || ua_lower.contains("blackberry")
+        || contains_ci(ua, "iphone")
+        || contains_ci(ua, "ipod")
+        || contains_ci(ua, "windows phone")
+        || contains_ci(ua, "blackberry")
         || (is_android && !is_tablet)
     {
         return "Mobile";
     }
 
     if is_tablet
-        || ua_lower.contains("ipad")
-        || ua_lower.contains("kindle")
+        || contains_ci(ua, "ipad")
+        || contains_ci(ua, "kindle")
         || (is_android && !is_mobile)
     {
         return "Tablet";
     }
 
-    if ua_lower.contains("smart-tv")
-        || ua_lower.contains("smarttv")
-        || ua_lower.contains("googletv")
-        || ua_lower.contains("appletv")
-        || ua_lower.contains("hbbtv")
+    if contains_ci(ua, "smart-tv")
+        || contains_ci(ua, "smarttv")
+        || contains_ci(ua, "googletv")
+        || contains_ci(ua, "appletv")
+        || contains_ci(ua, "hbbtv")
     {
         return "TV";
     }
 
-    if ua_lower.contains("playstation")
-        || ua_lower.contains("xbox")
-        || ua_lower.contains("nintendo")
-    {
+    if contains_ci(ua, "playstation") || contains_ci(ua, "xbox") || contains_ci(ua, "nintendo") {
         return "Console";
     }
 
-    if ua_lower.contains("watch") {
+    if contains_ci(ua, "watch") {
         return "Wearable";
     }
 

@@ -14,17 +14,17 @@ use axum::response::IntoResponse;
 use serde_json::Value;
 use sqlx::types::Uuid;
 use std::collections::HashMap;
-use std::sync::Arc;
+use tracing::error;
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct WebRequest {
-    token: Option<String>,
-    anonymous_id: Uuid,
-    data: HashMap<String, Value>,
-    errors: Option<Vec<ErrorTracking>>,
+pub(crate) struct WebRequest {
+    pub(crate) token: Option<String>,
+    pub(crate) anonymous_id: Uuid,
+    pub(crate) data: HashMap<String, Value>,
+    pub(crate) errors: Option<Vec<ErrorTracking>>,
     #[serde(default)]
-    session_id: Option<String>,
+    pub(crate) session_id: Option<String>,
 }
 
 pub async fn web(
@@ -88,7 +88,7 @@ pub async fn web(
             };
 
             if let Err(e) = state.batch_queue.backup_store.backup_request(&failed).await {
-                eprintln!("Failed to store failed request: {}", e);
+                error!("Failed to store failed request: {}", e);
                 return error_response(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "Service temporarily unavailable",
@@ -154,11 +154,11 @@ pub async fn web(
     let url = valid_data.get("url").and_then(|v| v.as_str()).unwrap_or("");
     let is_debounced = should_debounce(server_id, url);
 
-    let tracking_ctx = Arc::new(TrackingContext {
-        owner_id: ctx.owner_id.into(),
+    let tracking_ctx = TrackingContext {
+        owner_id: ctx.owner_id.as_str().into(),
         token: token.into(),
-        organization_id: ctx.organization_id.map(Into::into),
-    });
+        organization_id: ctx.organization_id.as_deref().map(Into::into),
+    };
 
     let data_entry_id = if is_debounced {
         Uuid::nil()
@@ -169,7 +169,7 @@ pub async fn web(
             server_id,
             country,
             &valid_data,
-            Some(Arc::clone(&tracking_ctx)),
+            Some(tracking_ctx.clone()),
         )
         .await
         {
@@ -190,7 +190,7 @@ pub async fn web(
                 ctx.project_id,
                 data_entry_id,
                 error,
-                Some(Arc::clone(&tracking_ctx)),
+                Some(tracking_ctx.clone()),
             )
             .await
             {

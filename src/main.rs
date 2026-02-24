@@ -20,6 +20,7 @@ use std::{
 use tokio::signal;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::decompression::RequestDecompressionLayer;
+use tracing::{info, warn};
 mod batch_queue;
 mod handler;
 mod models;
@@ -57,12 +58,19 @@ async fn main() {
         dotenvy::dotenv().ok();
     }
 
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive(tracing::Level::INFO.into()),
+        )
+        .init();
+
     // Initialize user agent parser
     if let Err(e) = ua_parser::init() {
-        eprintln!("Warning: Failed to initialize UA parser: {}", e);
-        eprintln!("User agent parsing will be disabled");
+        warn!("Failed to initialize UA parser: {}", e);
+        warn!("User agent parsing will be disabled");
     } else {
-        eprintln!("UA parser initialized successfully");
+        info!("UA parser initialized successfully");
     }
 
     let database_url = std::env::var("DATABASE_URL")
@@ -82,7 +90,7 @@ async fn main() {
     ));
 
     let polar_client = std::env::var("POLAR_TOKEN").ok().map(|token| {
-        eprintln!("Polar integration enabled for usage tracking");
+        info!("Polar integration enabled for usage tracking");
         Arc::new(polar::PolarClient::new(token))
     });
 
@@ -114,7 +122,7 @@ async fn main() {
 
         Some(handle)
     } else {
-        eprintln!("FLY_PROMETHEUS_TOKEN not set, Prometheus metrics disabled");
+        info!("FLY_PROMETHEUS_TOKEN not set, Prometheus metrics disabled");
         None
     };
 
@@ -177,16 +185,16 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port))
         .await
         .unwrap();
-    println!("Listening on {}", listener.local_addr().unwrap());
+    info!("Listening on {}", listener.local_addr().unwrap());
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await
         .expect("Server error");
 
-    eprintln!("Shutting down, flushing in-memory batch...");
+    info!("Shutting down, flushing in-memory batch...");
     batch_queue.flush_in_memory_batch().await;
-    eprintln!("Shutdown complete");
+    info!("Shutdown complete");
 }
 
 fn start_failed_request_replayer(pool: sqlx::PgPool, batch_queue: Arc<batch_queue::BatchQueue>) {

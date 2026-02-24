@@ -163,7 +163,7 @@ async fn main() {
                         .unwrap_or(false);
 
                     if !valid {
-                        return (StatusCode::NOT_FOUND, "Not found".to_string());
+                        return (StatusCode::UNAUTHORIZED, "Unauthorized".to_string());
                     }
 
                     (StatusCode::OK, handle.render())

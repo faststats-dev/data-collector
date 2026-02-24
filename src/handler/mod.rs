@@ -115,6 +115,7 @@ pub struct ProjectContext {
     pub domain: Option<String>,
     pub datasources: HashMap<String, DataSource>,
     pub error_tracking_enabled: bool,
+    pub cookieless_mode: bool,
     pub ip_rules: Vec<IpRule>,
 }
 
@@ -124,7 +125,8 @@ pub async fn load_project_context(
 ) -> Result<ProjectContext, HandlerResponse> {
     let rows = sqlx::query(
         r#"
-        SELECT p.id, p.owner_id, p.domain, p.error_tracking_enabled, o.id AS organization_id,
+        SELECT p.id, p.owner_id, p.domain, p.error_tracking_enabled, p.cookieless_mode,
+               o.id AS organization_id,
                d.reference_id, d.name, d.data_type::text, d.regex, d.allow_negative,
                d.allow_float, d.min_value, d.max_value, d.is_array
         FROM project p
@@ -187,6 +189,7 @@ pub async fn load_project_context(
         domain: first.get("domain"),
         datasources,
         error_tracking_enabled: first.get("error_tracking_enabled"),
+        cookieless_mode: first.get("cookieless_mode"),
         ip_rules,
     })
 }
@@ -488,7 +491,13 @@ async fn process_web_request(
         return Err("Origin not allowed".to_string());
     }
 
-    let server_id = crate::utils::hash_server_id(parsed.anonymous_id, ctx.project_id);
+    let server_id = if ctx.cookieless_mode {
+        let ip = request.client_ip.as_deref().unwrap_or("");
+        let ua = request.user_agent.as_deref().unwrap_or("");
+        crate::utils::cookieless_server_id(ip, ua, ctx.project_id)
+    } else {
+        crate::utils::hash_server_id(parsed.anonymous_id, ctx.project_id)
+    };
 
     let (valid_data, _) =
         crate::validation::validate_and_filter_payload(parsed.data, &ctx.datasources);

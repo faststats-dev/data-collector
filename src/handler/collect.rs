@@ -1,5 +1,5 @@
 use super::{
-    check_ip_allowed, enrich_data_with_country, error_response, get_authorization, get_client_ip,
+    check_ip_allowed, error_response, get_authorization, get_client_ip, get_country,
     insert_error_entries, insert_event, load_project_context, success_response,
 };
 use crate::batch_queue::{FailedRequest, RequestType, TrackingContext};
@@ -74,10 +74,8 @@ pub async fn collect(
         }
     };
 
-    let mut data_map = req.data;
-    enrich_data_with_country(&mut data_map, &headers);
-
-    let (valid_data, warnings) = validate_and_filter_payload(data_map, &ctx.datasources);
+    let country = get_country(&headers);
+    let (valid_data, warnings) = validate_and_filter_payload(req.data, &ctx.datasources);
 
     let tracking_ctx = Arc::new(TrackingContext {
         owner_id: ctx.owner_id.into(),
@@ -89,6 +87,7 @@ pub async fn collect(
         &state.batch_queue,
         ctx.project_id,
         server_id,
+        country,
         &valid_data,
         Some(Arc::clone(&tracking_ctx)),
     )

@@ -135,6 +135,8 @@ pub async fn vitals(
         .and_then(|m| m.browser.as_deref())
         .map(Into::into)
         .unwrap_or_else(|| ua_info.browser.into());
+    let browser_version: Arc<str> = ua_info.browser_version.into();
+    let os_version: Arc<str> = ua_info.os_version.into();
     let url: Arc<str> = metadata
         .and_then(|m| m.url.as_deref())
         .map(Into::into)
@@ -158,7 +160,17 @@ pub async fn vitals(
             device: Some(device.to_string()),
             country: country.as_ref().map(|c| c.to_string()),
             os: Some(os.to_string()),
+            os_version: if os_version.is_empty() {
+                None
+            } else {
+                Some(os_version.to_string())
+            },
             browser: Some(browser.to_string()),
+            browser_version: if browser_version.is_empty() {
+                None
+            } else {
+                Some(browser_version.to_string())
+            },
             url: url.to_string(),
             attributes: attributes.to_string(),
             session_id: session_id.as_ref().map(|s| s.to_string()),

@@ -18,6 +18,8 @@ pub struct EventRow {
     pub id: Uuid,
     pub project_id: Uuid,
     pub server_id: Uuid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub country: Option<String>,
     pub data: String,
     #[serde(with = "chrono::serde::ts_milliseconds")]
     pub created_at: DateTime<Utc>,
@@ -59,7 +61,11 @@ pub struct WebVitalRow {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub os: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub os_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub browser: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub browser_version: Option<String>,
     pub url: String,
     pub attributes: String,
     pub session_id: Option<String>,

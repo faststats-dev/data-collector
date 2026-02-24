@@ -5,7 +5,9 @@ static UA_EXTRACTOR: OnceLock<Extractor> = OnceLock::new();
 
 pub struct UserAgentInfo {
     pub browser: String,
+    pub browser_version: String,
     pub os: String,
+    pub os_version: String,
     pub device: &'static str,
 }
 
@@ -31,29 +33,37 @@ pub fn parse(ua: &str) -> Option<UserAgentInfo> {
         return None;
     }
 
+    let (browser_name, browser_version) = browser
+        .map(|u| {
+            let version = format_version_only(u.major, u.minor);
+            (u.family.to_string(), version)
+        })
+        .unwrap_or_default();
+
+    let (os_name, os_version) = os
+        .map(|o| {
+            let version = format_version_only(o.major, o.minor);
+            (o.os.to_string(), version)
+        })
+        .unwrap_or_default();
+
     Some(UserAgentInfo {
-        browser: browser
-            .map(|u| format_version(&u.family, u.major, u.minor))
-            .unwrap_or_default(),
-        os: os
-            .map(|o| format_version(&o.os, o.major, o.minor))
-            .unwrap_or_default(),
+        browser: browser_name,
+        browser_version,
+        os: os_name,
+        os_version,
         device: device_type,
     })
 }
 
-fn format_version(
-    name: &str,
-    major: Option<impl AsRef<str>>,
-    minor: Option<impl AsRef<str>>,
-) -> String {
+fn format_version_only(major: Option<impl AsRef<str>>, minor: Option<impl AsRef<str>>) -> String {
     match (
         major.as_ref().map(|s| s.as_ref()),
         minor.as_ref().map(|s| s.as_ref()),
     ) {
-        (Some(maj), Some(min)) => format!("{} {}.{}", name, maj, min),
-        (Some(maj), None) => format!("{} {}", name, maj),
-        _ => name.to_string(),
+        (Some(maj), Some(min)) => format!("{}.{}", maj, min),
+        (Some(maj), None) => maj.to_string(),
+        _ => String::new(),
     }
 }
 

@@ -17,6 +17,6 @@ primary_region = 'fra'
   processes = ['app']
 
 [metrics]
-  port = 8080
-  path = "/prometheus"
+  port = 9091
+  path = "/metrics"
 

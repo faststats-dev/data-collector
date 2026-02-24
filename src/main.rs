@@ -4,7 +4,6 @@ use axum::{
     http::HeaderName,
     http::Method,
     http::StatusCode,
-    http::header::HeaderMap,
     middleware::Next,
     response::IntoResponse,
     routing::get,
@@ -101,30 +100,21 @@ async fn main() {
     let batch_queue =
         batch_queue::BatchQueue::new(Arc::clone(&tinybird_client), polar_client, &backup_path);
 
-    let fly_prometheus_token = std::env::var("FLY_PROMETHEUS_TOKEN").ok();
+    let recorder_handle = setup_metrics_recorder();
 
-    let recorder_handle = if fly_prometheus_token.is_some() {
-        let handle = setup_metrics_recorder();
+    let batch_queue_for_metrics = Arc::clone(&batch_queue);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(10));
+        loop {
+            interval.tick().await;
 
-        let batch_queue_for_metrics = Arc::clone(&batch_queue);
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(10));
-            loop {
-                interval.tick().await;
+            let channel_capacity = batch_queue_for_metrics.channel_capacity();
+            metrics::gauge!("batch_channel_capacity").set(channel_capacity as f64);
 
-                let channel_capacity = batch_queue_for_metrics.channel_capacity();
-                metrics::gauge!("batch_channel_capacity").set(channel_capacity as f64);
-
-                let batch_size = batch_queue_for_metrics.current_batch_size().await;
-                metrics::gauge!("batch_current_size").set(batch_size as f64);
-            }
-        });
-
-        Some(handle)
-    } else {
-        info!("FLY_PROMETHEUS_TOKEN not set, Prometheus metrics disabled");
-        None
-    };
+            let batch_size = batch_queue_for_metrics.current_batch_size().await;
+            metrics::gauge!("batch_current_size").set(batch_size as f64);
+        }
+    });
 
     let state = models::AppState {
         pool: pool.clone(),
@@ -142,50 +132,47 @@ async fn main() {
         ])
         .allow_credentials(true);
 
-    let mut app = Router::new()
+    let app = Router::new()
         .route("/v1/health", get(|| async { (StatusCode::OK, "OK") }))
         .route("/v1/collect", post(handler::collect))
         .route("/v1/web", post(handler::web))
         .route("/v1/vitals", post(handler::vitals))
-        .route("/v1/replay", post(handler::replay));
-
-    if let (Some(token), Some(handle)) = (fly_prometheus_token, recorder_handle) {
-        app = app
-            .route(
-                "/prometheus",
-                get(move |headers: HeaderMap| async move {
-                    let auth_header = headers.get("authorization").and_then(|v| v.to_str().ok());
-
-                    let valid = auth_header
-                        .map(|h| {
-                            h == format!("Bearer {}", token) || h == format!("FlyV1 {}", token)
-                        })
-                        .unwrap_or(false);
-
-                    if !valid {
-                        return (StatusCode::UNAUTHORIZED, "Unauthorized".to_string());
-                    }
-
-                    (StatusCode::OK, handle.render())
-                }),
-            )
-            .layer(axum::middleware::from_fn(track_metrics));
-    }
-
-    let app = app
+        .route("/v1/replay", post(handler::replay))
+        .layer(axum::middleware::from_fn(track_metrics))
         .layer(RequestDecompressionLayer::new())
         .layer(cors)
         .with_state(state);
+
+    let metrics_app = Router::new().route(
+        "/metrics",
+        get(move || async move { recorder_handle.render() }),
+    );
 
     let port: u16 = std::env::var("PORT")
         .unwrap_or_else(|_| "3000".to_string())
         .parse()
         .expect("Failed to parse PORT");
 
+    let metrics_port: u16 = std::env::var("METRICS_PORT")
+        .unwrap_or_else(|_| "9091".to_string())
+        .parse()
+        .expect("Failed to parse METRICS_PORT");
+
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port))
         .await
         .unwrap();
+    let metrics_listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", metrics_port))
+        .await
+        .unwrap();
+
     info!("Listening on {}", listener.local_addr().unwrap());
+    info!("Metrics on {}", metrics_listener.local_addr().unwrap());
+
+    tokio::spawn(async move {
+        axum::serve(metrics_listener, metrics_app)
+            .await
+            .expect("Metrics server error");
+    });
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())

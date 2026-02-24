@@ -1,9 +1,11 @@
 mod collect;
+mod identify;
 mod replay;
 mod vitals;
 mod web;
 
 pub use collect::collect;
+pub use identify::identify;
 pub use replay::replay;
 pub use vitals::vitals;
 pub use web::web;

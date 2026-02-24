@@ -128,7 +128,11 @@ pub async fn web(
         None => return success_response(HashMap::new()),
     };
 
-    let server_id = crate::utils::hash_server_id(anonymous_id, ctx.project_id);
+    let server_id = if ctx.cookieless_mode {
+        crate::utils::cookieless_server_id(client_ip, user_agent, ctx.project_id)
+    } else {
+        crate::utils::hash_server_id(anonymous_id, ctx.project_id)
+    };
 
     if !ua_info.browser.is_empty() {
         valid_data.insert("browser".into(), Value::String(ua_info.browser));

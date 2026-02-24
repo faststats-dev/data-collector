@@ -4,17 +4,10 @@ use regex::Regex;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
+use tracing::debug;
 
 static REGEX_CACHE: LazyLock<Cache<Arc<str>, Arc<Regex>>> =
     LazyLock::new(|| Cache::builder().max_capacity(100).build());
-
-macro_rules! debug {
-    ($($arg:tt)*) => {
-        if cfg!(debug_assertions) {
-            eprintln!("[validate_payload][debug] {}", format!($($arg)*));
-        }
-    }
-}
 
 fn get_cached_regex(pattern: &str) -> Option<Arc<Regex>> {
     let key: Arc<str> = pattern.into();

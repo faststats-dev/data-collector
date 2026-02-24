@@ -13,14 +13,24 @@ use crate::models::{DataSource, Error, ErrorTracking};
 use crate::tinybird::{ErrorRow, ErrorTrackingRow, EventRow};
 use axum::Json;
 use axum::http::{HeaderMap, StatusCode};
-use serde::{Deserialize, Serialize};
+use moka::future::Cache;
+use serde::Deserialize;
 use serde_json::Value;
 use sqlx::Row;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::Read;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
+use std::time::Duration;
+use tracing::error;
 use uuid::Uuid;
+
+static PROJECT_CACHE: LazyLock<Cache<String, Arc<ProjectContext>>> = LazyLock::new(|| {
+    Cache::builder()
+        .max_capacity(1_000)
+        .time_to_live(Duration::from_secs(60))
+        .build()
+});
 
 pub type HandlerResponse = (StatusCode, Json<Value>);
 
@@ -78,36 +88,27 @@ pub fn error_response(status: StatusCode, message: &str) -> HandlerResponse {
     (status, Json(serde_json::json!({ "error": message })))
 }
 
-#[derive(Serialize)]
-struct SimpleResponse {
-    status: &'static str,
-}
-
-#[derive(Serialize)]
-struct WarningResponse {
-    warnings: HashMap<String, String>,
-}
-
 pub fn success_response(warnings: HashMap<String, String>) -> HandlerResponse {
     if warnings.is_empty() {
         (
             StatusCode::OK,
-            Json(serde_json::to_value(SimpleResponse { status: "success" }).unwrap()),
+            Json(serde_json::json!({ "status": "success" })),
         )
     } else {
         (
             StatusCode::OK,
-            Json(serde_json::to_value(WarningResponse { warnings }).unwrap()),
+            Json(serde_json::json!({ "warnings": warnings })),
         )
     }
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(Clone, sqlx::FromRow)]
 pub struct IpRule {
     pub ip_address: String,
     pub allowed: bool,
 }
 
+#[derive(Clone)]
 pub struct ProjectContext {
     pub project_id: Uuid,
     pub owner_id: String,
@@ -122,7 +123,11 @@ pub struct ProjectContext {
 pub async fn load_project_context(
     pool: &sqlx::PgPool,
     token: &str,
-) -> Result<ProjectContext, HandlerResponse> {
+) -> Result<Arc<ProjectContext>, HandlerResponse> {
+    if let Some(cached) = PROJECT_CACHE.get(token).await {
+        return Ok(cached);
+    }
+
     let rows = sqlx::query(
         r#"
         SELECT p.id, p.owner_id, p.domain, p.error_tracking_enabled, p.cookieless_mode,
@@ -182,7 +187,7 @@ pub async fn load_project_context(
     .await
     .unwrap_or_default();
 
-    Ok(ProjectContext {
+    let ctx = Arc::new(ProjectContext {
         project_id: first.get("id"),
         owner_id: first.get("owner_id"),
         organization_id: first.get("organization_id"),
@@ -191,7 +196,11 @@ pub async fn load_project_context(
         error_tracking_enabled: first.get("error_tracking_enabled"),
         cookieless_mode: first.get("cookieless_mode"),
         ip_rules,
-    })
+    });
+    PROJECT_CACHE
+        .insert(token.to_string(), Arc::clone(&ctx))
+        .await;
+    Ok(ctx)
 }
 
 pub fn get_request_origin(headers: &HeaderMap) -> Option<String> {
@@ -289,7 +298,7 @@ pub async fn insert_event(
     server_id: Uuid,
     country: Option<String>,
     data: &HashMap<String, Value>,
-    tracking: Option<Arc<TrackingContext>>,
+    tracking: Option<TrackingContext>,
 ) -> Result<Uuid, HandlerResponse> {
     if data.is_empty() {
         return Ok(Uuid::nil());
@@ -313,13 +322,10 @@ pub async fn insert_event(
     };
 
     batch_queue
-        .queue_event(QueuedEvent::Event {
-            row,
-            tracking: tracking.map(|t| (*t).clone()),
-        })
+        .queue_event(QueuedEvent::Event { row, tracking })
         .await
         .map_err(|e| {
-            eprintln!("Failed to queue event: {}", e);
+            error!("Failed to queue event: {}", e);
             error_response(StatusCode::INTERNAL_SERVER_ERROR, "Failed to queue event")
         })?;
     Ok(event_id)
@@ -349,7 +355,7 @@ pub async fn insert_error_entries(
     project_id: Uuid,
     data_entry_id: Uuid,
     data: ErrorTracking,
-    tracking_ctx: Option<Arc<TrackingContext>>,
+    tracking_ctx: Option<TrackingContext>,
 ) -> Result<(), HandlerResponse> {
     let mut error_rows = Vec::new();
     let error_id = build_error_rows(&data.error, &mut error_rows);
@@ -359,7 +365,7 @@ pub async fn insert_error_entries(
             .queue_event(QueuedEvent::Error(error_row))
             .await
             .map_err(|e| {
-                eprintln!("Failed to queue error: {}", e);
+                error!("Failed to queue error: {}", e);
                 error_response(StatusCode::INTERNAL_SERVER_ERROR, "Failed to queue error")
             })?;
     }
@@ -369,7 +375,7 @@ pub async fn insert_error_entries(
         project_id,
         hash: data.hash,
         error_id,
-        count: data.count.unwrap_or(1) as u32,
+        count: data.count.unwrap_or(1).max(0) as u32,
         data_entry_id,
         session_id: data.session_id,
         created_at: chrono::Utc::now(),
@@ -378,11 +384,11 @@ pub async fn insert_error_entries(
     batch_queue
         .queue_event(QueuedEvent::ErrorTracking {
             row: error_tracking,
-            tracking: tracking_ctx.map(|t| (*t).clone()),
+            tracking: tracking_ctx,
         })
         .await
         .map_err(|e| {
-            eprintln!("Failed to queue error tracking: {}", e);
+            error!("Failed to queue error tracking: {}", e);
             error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Failed to queue error tracking",
@@ -426,11 +432,11 @@ async fn process_collect_request(
     let (valid_data, _) =
         crate::validation::validate_and_filter_payload(req.data, &ctx.datasources);
 
-    let tracking_ctx = Arc::new(TrackingContext {
-        owner_id: ctx.owner_id.into(),
+    let tracking_ctx = TrackingContext {
+        owner_id: ctx.owner_id.as_str().into(),
         token: request.token.as_str().into(),
-        organization_id: ctx.organization_id.map(Into::into),
-    });
+        organization_id: ctx.organization_id.as_deref().map(Into::into),
+    };
 
     let data_entry_id = insert_event(
         batch_queue,
@@ -438,7 +444,7 @@ async fn process_collect_request(
         server_id,
         request.country.clone(),
         &valid_data,
-        Some(Arc::clone(&tracking_ctx)),
+        Some(tracking_ctx.clone()),
     )
     .await
     .map_err(|_| "Failed to queue event".to_string())?;
@@ -452,7 +458,7 @@ async fn process_collect_request(
                 ctx.project_id,
                 data_entry_id,
                 error,
-                Some(Arc::clone(&tracking_ctx)),
+                Some(tracking_ctx.clone()),
             )
             .await
             .map_err(|_| "Failed to queue error".to_string())?;
@@ -467,16 +473,7 @@ async fn process_web_request(
     pool: &sqlx::PgPool,
     request: &FailedRequest,
 ) -> Result<(), String> {
-    #[derive(serde::Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct WebRequest {
-        token: Option<String>,
-        anonymous_id: Uuid,
-        data: HashMap<String, Value>,
-        errors: Option<Vec<ErrorTracking>>,
-        #[serde(default)]
-        session_id: Option<String>,
-    }
+    use crate::handler::web::WebRequest;
 
     let parsed: WebRequest =
         serde_json::from_slice(&request.body).map_err(|_| "Invalid JSON".to_string())?;
@@ -536,11 +533,11 @@ async fn process_web_request(
     }
     valid_data.insert("device".into(), Value::String(ua_info.device.to_string()));
 
-    let tracking_ctx = Arc::new(TrackingContext {
-        owner_id: ctx.owner_id.into(),
+    let tracking_ctx = TrackingContext {
+        owner_id: ctx.owner_id.as_str().into(),
         token: token.into(),
-        organization_id: ctx.organization_id.map(Into::into),
-    });
+        organization_id: ctx.organization_id.as_deref().map(Into::into),
+    };
 
     let data_entry_id = insert_event(
         batch_queue,
@@ -548,7 +545,7 @@ async fn process_web_request(
         server_id,
         request.country.clone(),
         &valid_data,
-        Some(Arc::clone(&tracking_ctx)),
+        Some(tracking_ctx.clone()),
     )
     .await
     .map_err(|_| "Failed to queue event".to_string())?;
@@ -565,7 +562,7 @@ async fn process_web_request(
                 ctx.project_id,
                 data_entry_id,
                 error,
-                Some(Arc::clone(&tracking_ctx)),
+                Some(tracking_ctx.clone()),
             )
             .await
             .map_err(|_| "Failed to queue error".to_string())?;
@@ -580,37 +577,13 @@ async fn process_vitals_request(
     pool: &sqlx::PgPool,
     request: &FailedRequest,
 ) -> Result<(), String> {
-    #[derive(serde::Deserialize)]
-    struct WebVitalsMetadata {
-        browser: Option<String>,
-        os: Option<String>,
-        device: Option<String>,
-        url: Option<String>,
-    }
-
-    #[derive(serde::Deserialize)]
-    struct WebVitalMetric {
-        metric: String,
-        value: f64,
-        #[serde(default)]
-        attributes: Option<HashMap<String, Value>>,
-    }
-
-    #[derive(serde::Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct VitalsRequest {
-        vitals: Vec<WebVitalMetric>,
-        #[serde(default)]
-        metadata: Option<WebVitalsMetadata>,
-        #[serde(default)]
-        session_id: Option<String>,
-    }
+    use crate::handler::vitals::WebVitalRequest;
 
     let ctx = load_project_context(pool, &request.token)
         .await
         .map_err(|_| "Unauthorized or database error")?;
 
-    let req: VitalsRequest =
+    let req: WebVitalRequest =
         serde_json::from_slice(&request.body).map_err(|_| "Invalid JSON".to_string())?;
 
     if req.vitals.is_empty() {
@@ -624,11 +597,11 @@ async fn process_vitals_request(
     let browser = metadata.and_then(|m| m.browser.clone());
     let url = metadata.and_then(|m| m.url.clone()).unwrap_or_default();
 
-    let tracking_ctx = Arc::new(TrackingContext {
-        owner_id: ctx.owner_id.into(),
+    let tracking_ctx = TrackingContext {
+        owner_id: ctx.owner_id.as_str().into(),
         token: request.token.as_str().into(),
-        organization_id: ctx.organization_id.map(Into::into),
-    });
+        organization_id: ctx.organization_id.as_deref().map(Into::into),
+    };
 
     let device: Option<Arc<str>> = device.map(Into::into);
     let os: Option<Arc<str>> = os.map(Into::into);
@@ -665,7 +638,7 @@ async fn process_vitals_request(
         batch_queue
             .queue_event(QueuedEvent::WebVital {
                 row,
-                tracking: Some((*tracking_ctx).clone()),
+                tracking: Some(tracking_ctx.clone()),
             })
             .await
             .map_err(|_| "Failed to queue web vital".to_string())?;
@@ -679,13 +652,7 @@ async fn process_replay_request(
     pool: &sqlx::PgPool,
     request: &FailedRequest,
 ) -> Result<(), String> {
-    #[derive(serde::Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct ReplayRequest {
-        token: String,
-        session_id: String,
-        events: Vec<Value>,
-    }
+    use crate::handler::replay::ReplayRequest;
 
     let parsed: ReplayRequest =
         serde_json::from_slice(&request.body).map_err(|_| "Invalid JSON".to_string())?;
@@ -698,9 +665,9 @@ async fn process_replay_request(
         serde_json::to_string(&parsed.events).map_err(|_| "Failed to serialize events")?;
 
     let tracking_ctx = TrackingContext {
-        owner_id: ctx.owner_id.into(),
+        owner_id: ctx.owner_id.as_str().into(),
         token: parsed.token.as_str().into(),
-        organization_id: ctx.organization_id.map(Into::into),
+        organization_id: ctx.organization_id.as_deref().map(Into::into),
     };
 
     let replay_row = crate::tinybird::ReplayRow {

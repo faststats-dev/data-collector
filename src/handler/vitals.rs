@@ -14,32 +14,33 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
+use tracing::error;
 use uuid::Uuid;
 
 #[derive(Debug, Deserialize)]
-pub struct WebVitalsMetadata {
-    pub browser: Option<String>,
-    pub os: Option<String>,
-    pub device: Option<String>,
-    pub url: Option<String>,
+pub(crate) struct WebVitalsMetadata {
+    pub(crate) browser: Option<String>,
+    pub(crate) os: Option<String>,
+    pub(crate) device: Option<String>,
+    pub(crate) url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct WebVitalMetric {
-    pub metric: String,
-    pub value: f64,
+pub(crate) struct WebVitalMetric {
+    pub(crate) metric: String,
+    pub(crate) value: f64,
     #[serde(default)]
-    pub attributes: Option<HashMap<String, Value>>,
+    pub(crate) attributes: Option<HashMap<String, Value>>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct WebVitalRequest {
-    pub vitals: Vec<WebVitalMetric>,
+pub(crate) struct WebVitalRequest {
+    pub(crate) vitals: Vec<WebVitalMetric>,
     #[serde(default)]
-    pub metadata: Option<WebVitalsMetadata>,
+    pub(crate) metadata: Option<WebVitalsMetadata>,
     #[serde(default)]
-    pub session_id: Option<String>,
+    pub(crate) session_id: Option<String>,
 }
 
 pub async fn vitals(
@@ -76,7 +77,7 @@ pub async fn vitals(
                 };
 
                 if let Err(e) = state.batch_queue.backup_store.backup_request(&failed).await {
-                    eprintln!("Failed to store failed request: {}", e);
+                    error!("Failed to store failed request: {}", e);
                     return error_response(
                         StatusCode::SERVICE_UNAVAILABLE,
                         "Service temporarily unavailable",
@@ -102,11 +103,11 @@ pub async fn vitals(
         return error_response(StatusCode::BAD_REQUEST, "No vitals provided");
     }
 
-    let tracking_ctx = Arc::new(TrackingContext {
-        owner_id: ctx.owner_id.into(),
+    let tracking_ctx = TrackingContext {
+        owner_id: ctx.owner_id.as_str().into(),
         token: token.into(),
-        organization_id: ctx.organization_id.map(Into::into),
-    });
+        organization_id: ctx.organization_id.as_deref().map(Into::into),
+    };
 
     let country: Option<Arc<str>> = headers
         .get("CF-IPCountry")
@@ -181,11 +182,11 @@ pub async fn vitals(
             .batch_queue
             .queue_event(QueuedEvent::WebVital {
                 row,
-                tracking: Some((*tracking_ctx).clone()),
+                tracking: Some(tracking_ctx.clone()),
             })
             .await
         {
-            eprintln!("Failed to queue web vital: {}", e);
+            error!("Failed to queue web vital: {}", e);
             return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Failed to queue web vital",

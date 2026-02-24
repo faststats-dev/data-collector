@@ -13,7 +13,7 @@ use axum::response::IntoResponse;
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::Arc;
+use tracing::{error, warn};
 use uuid::Uuid;
 
 fn is_valid_rrweb_event(event: &Value) -> bool {
@@ -31,16 +31,16 @@ fn is_valid_rrweb_event(event: &Value) -> bool {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ReplayRequest {
-    pub token: String,
-    pub session_id: String,
+pub(crate) struct ReplayRequest {
+    pub(crate) token: String,
+    pub(crate) session_id: String,
     #[allow(dead_code)]
-    pub sequence: u32,
+    pub(crate) sequence: u32,
     #[allow(dead_code)]
-    pub timestamp: u64,
+    pub(crate) timestamp: u64,
     #[allow(dead_code)]
-    pub url: String,
-    pub events: Vec<Value>,
+    pub(crate) url: String,
+    pub(crate) events: Vec<Value>,
 }
 
 pub async fn replay(
@@ -57,7 +57,7 @@ pub async fn replay(
     let parsed: ReplayRequest = match serde_json::from_slice(&body) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!(
+            warn!(
                 "[Replay] JSON parse error: {}. Body preview: {}",
                 e,
                 String::from_utf8_lossy(&body[..body.len().min(500)])
@@ -84,7 +84,7 @@ pub async fn replay(
             };
 
             if let Err(e) = state.batch_queue.backup_store.backup_request(&failed).await {
-                eprintln!("Failed to store failed request: {}", e);
+                error!("Failed to store failed request: {}", e);
                 return error_response(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "Service temporarily unavailable",
@@ -120,11 +120,11 @@ pub async fn replay(
         }
     };
 
-    let tracking_ctx = Arc::new(TrackingContext {
-        owner_id: context.owner_id.into(),
+    let tracking_ctx = TrackingContext {
+        owner_id: context.owner_id.as_str().into(),
         token: parsed.token.as_str().into(),
-        organization_id: context.organization_id.map(Into::into),
-    });
+        organization_id: context.organization_id.as_deref().map(Into::into),
+    };
 
     let replay_row = ReplayRow {
         id: Uuid::new_v4(),
@@ -138,11 +138,11 @@ pub async fn replay(
         .batch_queue
         .queue_event(QueuedEvent::Replay {
             row: replay_row,
-            tracking: Some((*tracking_ctx).clone()),
+            tracking: Some(tracking_ctx),
         })
         .await
     {
-        eprintln!("Failed to queue replay: {}", e);
+        error!("Failed to queue replay: {}", e);
         return error_response(StatusCode::INTERNAL_SERVER_ERROR, "Failed to store replay");
     }
 

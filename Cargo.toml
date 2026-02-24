@@ -8,8 +8,6 @@ dotenvy = "0.15.7"
 axum = "0.8.7"
 chrono = { version = "0.4", features = ["serde"] }
 flate2 = "1.1.5"
-futures = "0.3"
-rand = "0.10.0"
 regex = "1.12.2"
 serde = "1.0.228"
 serde_json = "1.0.145"
@@ -27,6 +25,9 @@ ua-parser = "0.2.1"
 serde_yaml = "0.9.34"
 metrics = "0.24"
 metrics-exporter-prometheus = "0.18"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 tempfile = "3"
+rand = "0.10.0"

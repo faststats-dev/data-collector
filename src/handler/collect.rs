@@ -11,7 +11,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use sqlx::types::Uuid;
 use std::collections::HashMap;
-use std::sync::Arc;
+use tracing::error;
 
 pub async fn collect(
     State(state): State<AppState>,
@@ -46,7 +46,7 @@ pub async fn collect(
             };
 
             if let Err(e) = state.batch_queue.backup_store.backup_request(&failed).await {
-                eprintln!("Failed to store failed request: {}", e);
+                error!("Failed to store failed request: {}", e);
                 return error_response(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "Service temporarily unavailable",
@@ -77,11 +77,11 @@ pub async fn collect(
     let country = get_country(&headers);
     let (valid_data, warnings) = validate_and_filter_payload(req.data, &ctx.datasources);
 
-    let tracking_ctx = Arc::new(TrackingContext {
-        owner_id: ctx.owner_id.into(),
+    let tracking_ctx = TrackingContext {
+        owner_id: ctx.owner_id.as_str().into(),
         token: token.into(),
-        organization_id: ctx.organization_id.map(Into::into),
-    });
+        organization_id: ctx.organization_id.as_deref().map(Into::into),
+    };
 
     let data_entry_id = match insert_event(
         &state.batch_queue,
@@ -89,7 +89,7 @@ pub async fn collect(
         server_id,
         country,
         &valid_data,
-        Some(Arc::clone(&tracking_ctx)),
+        Some(tracking_ctx.clone()),
     )
     .await
     {
@@ -108,7 +108,7 @@ pub async fn collect(
                 ctx.project_id,
                 data_entry_id,
                 error,
-                Some(Arc::clone(&tracking_ctx)),
+                Some(tracking_ctx.clone()),
             )
             .await
             {

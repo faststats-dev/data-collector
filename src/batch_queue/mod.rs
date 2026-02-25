@@ -1073,6 +1073,7 @@ mod tests {
                         id: Uuid::new_v4(),
                         project_id: Uuid::new_v4(),
                         session_id: "session".to_string(),
+                        identifier: None,
                         events: "[]".to_string(),
                         created_at: Utc::now(),
                     },

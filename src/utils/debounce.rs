@@ -28,20 +28,18 @@ fn debounce_key(visitor_id: Uuid, url: &str) -> [u8; 32] {
 pub fn should_debounce(visitor_id: Uuid, url: &str) -> bool {
     let key = debounce_key(visitor_id, url);
 
-    if DEBOUNCE_CACHE.contains_key(&key) {
-        return true;
-    }
+    let entry = DEBOUNCE_CACHE.entry(key).or_insert(());
+    let is_new = entry.is_fresh();
 
-    DEBOUNCE_CACHE.insert(key, ());
-
-    if INSERT_COUNTER
-        .fetch_add(1, Ordering::Relaxed)
-        .is_multiple_of(MAINTENANCE_INTERVAL)
+    if is_new
+        && INSERT_COUNTER
+            .fetch_add(1, Ordering::Relaxed)
+            .is_multiple_of(MAINTENANCE_INTERVAL)
     {
         DEBOUNCE_CACHE.run_pending_tasks();
     }
 
-    false
+    !is_new
 }
 
 #[cfg(test)]

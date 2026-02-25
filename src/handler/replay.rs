@@ -40,6 +40,8 @@ pub(crate) struct ReplayRequest {
     pub(crate) timestamp: u64,
     #[allow(dead_code)]
     pub(crate) url: String,
+    #[serde(default)]
+    pub(crate) identifier: Option<String>,
     pub(crate) events: Vec<Value>,
 }
 
@@ -130,6 +132,7 @@ pub async fn replay(
         id: Uuid::new_v4(),
         project_id: context.project_id,
         session_id: parsed.session_id,
+        identifier: parsed.identifier,
         events: events_json,
         created_at: chrono::Utc::now(),
     };

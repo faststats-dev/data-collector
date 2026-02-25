@@ -73,6 +73,7 @@ pub struct ReplayRow {
     pub id: Uuid,
     pub project_id: Uuid,
     pub session_id: String,
+    pub identifier: Option<String>,
     pub events: String,
     #[serde(with = "chrono::serde::ts_milliseconds")]
     pub created_at: DateTime<Utc>,

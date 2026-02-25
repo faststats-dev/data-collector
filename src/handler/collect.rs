@@ -66,8 +66,14 @@ pub async fn collect(
         Ok(req) => req,
         Err(_) => return error_response(StatusCode::BAD_REQUEST, "Invalid JSON"),
     };
+    let Request {
+        id,
+        data,
+        errors,
+        session_id,
+    } = req;
 
-    let server_id = match req.id.value().parse::<Uuid>() {
+    let server_id = match id.value().parse::<Uuid>() {
         Ok(id) => crate::utils::hash_server_id(id, ctx.project_id),
         Err(_) => {
             return error_response(StatusCode::BAD_REQUEST, "Invalid server_id or identifier");
@@ -75,7 +81,7 @@ pub async fn collect(
     };
 
     let country = get_country(&headers);
-    let (valid_data, warnings) = validate_and_filter_payload(req.data, &ctx.datasources);
+    let (valid_data, warnings) = validate_and_filter_payload(data, &ctx.datasources);
 
     let tracking_ctx = TrackingContext {
         owner_id: ctx.owner_id.as_str().into(),
@@ -87,6 +93,7 @@ pub async fn collect(
         &state.batch_queue,
         ctx.project_id,
         server_id,
+        session_id,
         country,
         &valid_data,
         Some(tracking_ctx.clone()),
@@ -101,7 +108,7 @@ pub async fn collect(
         return success_response(warnings);
     }
 
-    if let Some(errors) = req.errors {
+    if let Some(errors) = errors {
         for error in errors {
             if let Err(e) = insert_error_entries(
                 &state.batch_queue,

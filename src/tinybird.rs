@@ -19,6 +19,7 @@ pub struct EventRow {
     pub id: Uuid,
     pub project_id: Uuid,
     pub server_id: Uuid,
+    pub session_id: Option<String>,
 
     pub country: Option<String>,
     pub data: String,

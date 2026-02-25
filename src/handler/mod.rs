@@ -298,6 +298,7 @@ pub async fn insert_event(
     batch_queue: &BatchQueue,
     project_id: Uuid,
     server_id: Uuid,
+    session_id: Option<String>,
     country: Option<String>,
     data: &HashMap<String, Value>,
     tracking: Option<TrackingContext>,
@@ -318,6 +319,7 @@ pub async fn insert_event(
         id: event_id,
         project_id,
         server_id,
+        session_id,
         country,
         data: data_json,
         created_at: chrono::Utc::now(),
@@ -423,16 +425,20 @@ async fn process_collect_request(
 
     let req: crate::models::Request =
         serde_json::from_slice(&request.body).map_err(|_| "Invalid JSON")?;
+    let crate::models::Request {
+        id,
+        data,
+        errors,
+        session_id,
+    } = req;
 
-    let server_id = req
-        .id
+    let server_id = id
         .value()
         .parse::<Uuid>()
         .map(|id| crate::utils::hash_server_id(id, ctx.project_id))
         .map_err(|_| "Invalid server_id".to_string())?;
 
-    let (valid_data, _) =
-        crate::validation::validate_and_filter_payload(req.data, &ctx.datasources);
+    let (valid_data, _) = crate::validation::validate_and_filter_payload(data, &ctx.datasources);
 
     let tracking_ctx = TrackingContext {
         owner_id: ctx.owner_id.as_str().into(),
@@ -444,6 +450,7 @@ async fn process_collect_request(
         batch_queue,
         ctx.project_id,
         server_id,
+        session_id,
         request.country.clone(),
         &valid_data,
         Some(tracking_ctx.clone()),
@@ -452,7 +459,7 @@ async fn process_collect_request(
     .map_err(|_| "Failed to queue event".to_string())?;
 
     if ctx.error_tracking_enabled
-        && let Some(errors) = req.errors
+        && let Some(errors) = errors
     {
         for error in errors {
             insert_error_entries(
@@ -495,7 +502,10 @@ async fn process_web_request(
         let ua = request.user_agent.as_deref().unwrap_or("");
         crate::utils::cookieless_server_id(ip, ua, ctx.project_id)
     } else {
-        crate::utils::hash_server_id(parsed.anonymous_id, ctx.project_id)
+        let identifier = parsed
+            .identifier
+            .ok_or_else(|| "identifier is required".to_string())?;
+        crate::utils::hash_server_id(identifier, ctx.project_id)
     };
 
     let (valid_data, _) =
@@ -545,6 +555,7 @@ async fn process_web_request(
         batch_queue,
         ctx.project_id,
         server_id,
+        parsed.session_id.clone(),
         request.country.clone(),
         &valid_data,
         Some(tracking_ctx.clone()),
@@ -658,25 +669,41 @@ async fn process_replay_request(
 
     let parsed: ReplayRequest =
         serde_json::from_slice(&request.body).map_err(|_| "Invalid JSON".to_string())?;
+    let ReplayRequest {
+        token,
+        session_id,
+        sequence: _,
+        timestamp: _,
+        url: _,
+        identifier,
+        events,
+    } = parsed;
 
-    let ctx = load_project_context(pool, &parsed.token)
+    let ctx = load_project_context(pool, &token)
         .await
         .map_err(|_| "Unauthorized or database error")?;
 
-    let events_json =
-        serde_json::to_string(&parsed.events).map_err(|_| "Failed to serialize events")?;
+    let events_json = serde_json::to_string(&events).map_err(|_| "Failed to serialize events")?;
+    let server_id = if ctx.cookieless_mode {
+        let ip = request.client_ip.as_deref().unwrap_or("");
+        let ua = request.user_agent.as_deref().unwrap_or("");
+        crate::utils::cookieless_server_id(ip, ua, ctx.project_id)
+    } else {
+        let identifier = identifier.ok_or_else(|| "identifier is required".to_string())?;
+        crate::utils::hash_server_id(identifier, ctx.project_id)
+    };
 
     let tracking_ctx = TrackingContext {
         owner_id: ctx.owner_id.as_str().into(),
-        token: parsed.token.as_str().into(),
+        token: token.as_str().into(),
         organization_id: ctx.organization_id.as_deref().map(Into::into),
     };
 
     let replay_row = crate::tinybird::ReplayRow {
         id: Uuid::new_v4(),
         project_id: ctx.project_id,
-        session_id: parsed.session_id,
-        identifier: parsed.identifier,
+        session_id,
+        identifier: Some(server_id.to_string()),
         events: events_json,
         created_at: chrono::Utc::now(),
     };

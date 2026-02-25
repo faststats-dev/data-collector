@@ -16,8 +16,8 @@ use std::collections::HashMap;
 #[serde(rename_all = "camelCase")]
 pub(crate) struct IdentifyRequest {
     pub(crate) token: Option<String>,
-    pub(crate) anonymous_id: Option<Uuid>,
-    pub(crate) identifier: Option<String>,
+    #[serde(default, alias = "anonymousId")]
+    pub(crate) identifier: Option<Uuid>,
     pub(crate) external_id: String,
     pub(crate) email: String,
     #[serde(default)]
@@ -48,7 +48,6 @@ pub async fn identify(
 ) -> impl IntoResponse {
     let IdentifyRequest {
         token: body_token,
-        anonymous_id,
         identifier,
         external_id,
         email,
@@ -80,6 +79,12 @@ pub async fn identify(
     if let Err(msg) = check_ip_allowed(&ctx.ip_rules, client_ip) {
         return error_response(StatusCode::FORBIDDEN, msg);
     }
+    if ctx.cookieless_mode {
+        return error_response(
+            StatusCode::CONFLICT,
+            "identify is not supported when cookieless mode is enabled",
+        );
+    }
 
     let external_id = external_id.trim();
     if external_id.is_empty() {
@@ -91,26 +96,8 @@ pub async fn identify(
         return error_response(StatusCode::BAD_REQUEST, "email is required");
     }
 
-    let source_id = match anonymous_id {
-        Some(value) => value,
-        None => {
-            let Some(raw_identifier) = identifier else {
-                return error_response(
-                    StatusCode::BAD_REQUEST,
-                    "anonymousId or identifier is required",
-                );
-            };
-
-            match raw_identifier.parse::<Uuid>() {
-                Ok(value) => value,
-                Err(_) => {
-                    return error_response(
-                        StatusCode::BAD_REQUEST,
-                        "identifier must be a UUID string",
-                    );
-                }
-            }
-        }
+    let Some(source_id) = identifier else {
+        return error_response(StatusCode::BAD_REQUEST, "identifier is required");
     };
 
     let server_id = crate::utils::hash_server_id(source_id, ctx.project_id).to_string();

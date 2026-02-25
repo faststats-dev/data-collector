@@ -20,7 +20,8 @@ use tracing::error;
 #[serde(rename_all = "camelCase")]
 pub(crate) struct WebRequest {
     pub(crate) token: Option<String>,
-    pub(crate) anonymous_id: Uuid,
+    #[serde(default, alias = "anonymousId")]
+    pub(crate) identifier: Option<Uuid>,
     pub(crate) data: HashMap<String, Value>,
     pub(crate) errors: Option<Vec<ErrorTracking>>,
     #[serde(default)]
@@ -42,7 +43,7 @@ pub async fn web(
 
     let WebRequest {
         token: body_token,
-        anonymous_id,
+        identifier,
         data,
         errors,
         session_id: parsed_session_id,
@@ -131,7 +132,10 @@ pub async fn web(
     let server_id = if ctx.cookieless_mode {
         crate::utils::cookieless_server_id(client_ip, user_agent, ctx.project_id)
     } else {
-        crate::utils::hash_server_id(anonymous_id, ctx.project_id)
+        let Some(identifier) = identifier else {
+            return error_response(StatusCode::BAD_REQUEST, "identifier is required");
+        };
+        crate::utils::hash_server_id(identifier, ctx.project_id)
     };
 
     if !ua_info.browser.is_empty() {
@@ -167,6 +171,7 @@ pub async fn web(
             &state.batch_queue,
             ctx.project_id,
             server_id,
+            session_id.clone(),
             country,
             &valid_data,
             Some(tracking_ctx.clone()),

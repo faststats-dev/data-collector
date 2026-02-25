@@ -4,6 +4,7 @@ use flate2::write::GzEncoder;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
+use tracing::debug;
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -18,7 +19,7 @@ pub struct EventRow {
     pub id: Uuid,
     pub project_id: Uuid,
     pub server_id: Uuid,
-    #[serde(skip_serializing_if = "Option::is_none")]
+
     pub country: Option<String>,
     pub data: String,
     #[serde(with = "chrono::serde::ts_milliseconds")]
@@ -31,7 +32,7 @@ pub struct ErrorRow {
     pub name: String,
     pub message: String,
     pub stack: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+
     pub cause_id: Option<Uuid>,
 }
 
@@ -54,17 +55,11 @@ pub struct WebVitalRow {
     pub project_id: Uuid,
     pub metric: String,
     pub value: f64,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub device: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub country: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub os: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub os_version: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub browser: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub browser_version: Option<String>,
     pub url: String,
     pub attributes: String,
@@ -180,6 +175,8 @@ impl TinybirdClient {
             .await?;
 
         let status = response.status().as_u16();
+
+        debug!("Tinybird request status: {}", status);
 
         if status != 200 && status != 202 {
             let message = response.text().await.unwrap_or_default();

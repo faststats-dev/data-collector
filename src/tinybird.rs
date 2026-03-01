@@ -43,7 +43,7 @@ pub struct WebEventRow {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PluginEventRow {
+pub struct ModsEventRow {
     pub id: Uuid,
     pub project_id: Uuid,
     pub server_id: Uuid,
@@ -230,11 +230,8 @@ impl TinybirdClient {
         self.send_batch("web_events", events).await
     }
 
-    pub async fn insert_plugin_events(
-        &self,
-        events: &[&PluginEventRow],
-    ) -> Result<(), TinybirdError> {
-        self.send_batch("plugin_events", events).await
+    pub async fn insert_mods_events(&self, events: &[&ModsEventRow]) -> Result<(), TinybirdError> {
+        self.send_batch("mods_events", events).await
     }
 
     pub async fn insert_errors(&self, errors: &[ErrorRow]) -> Result<(), TinybirdError> {

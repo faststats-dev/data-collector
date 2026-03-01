@@ -1,6 +1,6 @@
 use super::{
-    PLUGIN_EVENT_FIELDS, check_ip_allowed, error_response, extract_known_fields, get_authorization,
-    get_client_ip, get_country, insert_error_entries, insert_plugin_event, load_project_context,
+    MODS_EVENT_FIELDS, check_ip_allowed, error_response, extract_known_fields, get_authorization,
+    get_client_ip, get_country, insert_error_entries, insert_mods_event, load_project_context,
     success_response,
 };
 use crate::batch_queue::{FailedRequest, RequestType, TrackingContext};
@@ -84,7 +84,7 @@ pub async fn collect(
     let country = get_country(&headers);
 
     // Extract known row fields before datasource validation
-    let mut known = extract_known_fields(&mut data, PLUGIN_EVENT_FIELDS);
+    let mut known = extract_known_fields(&mut data, MODS_EVENT_FIELDS);
 
     // Remaining fields go through datasource validation → custom JSON
     let (valid_custom, warnings) = validate_and_filter_payload(data, &ctx.datasources);
@@ -95,7 +95,7 @@ pub async fn collect(
         organization_id: ctx.organization_id.as_deref().map(Into::into),
     };
 
-    let data_entry_id = match insert_plugin_event(
+    let data_entry_id = match insert_mods_event(
         &state.batch_queue,
         ctx.project_id,
         server_id,

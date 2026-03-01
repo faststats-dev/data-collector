@@ -12,7 +12,7 @@ pub use web::web;
 
 use crate::batch_queue::{BatchQueue, FailedRequest, QueuedEvent, RequestType, TrackingContext};
 use crate::models::{DataSource, Error, ErrorTracking};
-use crate::tinybird::{ErrorRow, ErrorTrackingRow, PluginEventRow, WebEventRow};
+use crate::tinybird::{ErrorRow, ErrorTrackingRow, ModsEventRow, WebEventRow};
 use axum::Json;
 use axum::http::{HeaderMap, StatusCode};
 use moka::future::Cache;
@@ -338,8 +338,8 @@ const WEB_EVENT_FIELDS: &[&str] = &[
     "outbound_link",
 ];
 
-/// Known internal fields for plugin_events row.
-const PLUGIN_EVENT_FIELDS: &[&str] = &[
+/// Known internal fields for mods_events row.
+const MODS_EVENT_FIELDS: &[&str] = &[
     "player_count",
     "online_mode",
     "plugin_version",
@@ -417,7 +417,7 @@ pub async fn insert_web_event(
     Ok(event_id)
 }
 
-pub async fn insert_plugin_event(
+pub async fn insert_mods_event(
     batch_queue: &BatchQueue,
     project_id: Uuid,
     server_id: Uuid,
@@ -428,7 +428,7 @@ pub async fn insert_plugin_event(
 ) -> Result<Uuid, HandlerResponse> {
     let event_id = Uuid::new_v4();
 
-    let row = PluginEventRow {
+    let row = ModsEventRow {
         id: event_id,
         project_id,
         server_id,
@@ -448,7 +448,7 @@ pub async fn insert_plugin_event(
     };
 
     batch_queue
-        .queue_event(QueuedEvent::PluginEvent { row, tracking })
+        .queue_event(QueuedEvent::ModsEvent { row, tracking })
         .await
         .map_err(|e| {
             error!("Failed to queue event: {}", e);
@@ -560,7 +560,7 @@ async fn process_collect_request(
         .map(|id| crate::utils::hash_server_id(id, ctx.project_id))
         .map_err(|_| "Invalid server_id".to_string())?;
 
-    let mut known = extract_known_fields(&mut data, PLUGIN_EVENT_FIELDS);
+    let mut known = extract_known_fields(&mut data, MODS_EVENT_FIELDS);
     let (valid_custom, _) = crate::validation::validate_and_filter_payload(data, &ctx.datasources);
 
     let tracking_ctx = TrackingContext {
@@ -569,7 +569,7 @@ async fn process_collect_request(
         organization_id: ctx.organization_id.as_deref().map(Into::into),
     };
 
-    let data_entry_id = insert_plugin_event(
+    let data_entry_id = insert_mods_event(
         batch_queue,
         ctx.project_id,
         server_id,

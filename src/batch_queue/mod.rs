@@ -3,7 +3,7 @@ pub use backup_store::BackupStore;
 
 use crate::polar::{PolarClient, UsageCounts};
 use crate::tinybird::{
-    ErrorRow, ErrorTrackingRow, PluginEventRow, ReplayRow, TinybirdClient, WebEventRow, WebVitalRow,
+    ErrorRow, ErrorTrackingRow, ModsEventRow, ReplayRow, TinybirdClient, WebEventRow, WebVitalRow,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -71,8 +71,8 @@ pub enum QueuedEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         tracking: Option<TrackingContext>,
     },
-    PluginEvent {
-        row: PluginEventRow,
+    ModsEvent {
+        row: ModsEventRow,
         #[serde(skip_serializing_if = "Option::is_none")]
         tracking: Option<TrackingContext>,
     },
@@ -98,7 +98,7 @@ impl QueuedEvent {
     fn datasource(&self) -> &'static str {
         match self {
             QueuedEvent::WebEvent { .. } => "web_events",
-            QueuedEvent::PluginEvent { .. } => "plugin_events",
+            QueuedEvent::ModsEvent { .. } => "mods_events",
             QueuedEvent::Error(_) => "error_",
             QueuedEvent::ErrorTracking { .. } => "error_tracking",
             QueuedEvent::WebVital { .. } => "web_vitals",
@@ -112,7 +112,7 @@ const INITIAL_BATCH_CAPACITY: usize = 64;
 #[derive(Debug)]
 struct InMemoryBatch {
     web_events: Vec<(WebEventRow, Option<TrackingContext>)>,
-    plugin_events: Vec<(PluginEventRow, Option<TrackingContext>)>,
+    mods_events: Vec<(ModsEventRow, Option<TrackingContext>)>,
     errors: Vec<ErrorRow>,
     error_trackings: Vec<(ErrorTrackingRow, Option<TrackingContext>)>,
     web_vitals: Vec<(WebVitalRow, Option<TrackingContext>)>,
@@ -123,7 +123,7 @@ impl Default for InMemoryBatch {
     fn default() -> Self {
         Self {
             web_events: Vec::with_capacity(INITIAL_BATCH_CAPACITY),
-            plugin_events: Vec::with_capacity(INITIAL_BATCH_CAPACITY),
+            mods_events: Vec::with_capacity(INITIAL_BATCH_CAPACITY),
             errors: Vec::new(),
             error_trackings: Vec::new(),
             web_vitals: Vec::with_capacity(INITIAL_BATCH_CAPACITY / 4),
@@ -135,7 +135,7 @@ impl Default for InMemoryBatch {
 impl InMemoryBatch {
     fn is_empty(&self) -> bool {
         self.web_events.is_empty()
-            && self.plugin_events.is_empty()
+            && self.mods_events.is_empty()
             && self.errors.is_empty()
             && self.error_trackings.is_empty()
             && self.web_vitals.is_empty()
@@ -144,7 +144,7 @@ impl InMemoryBatch {
 
     fn total_count(&self) -> usize {
         self.web_events.len()
-            + self.plugin_events.len()
+            + self.mods_events.len()
             + self.errors.len()
             + self.error_trackings.len()
             + self.web_vitals.len()
@@ -154,7 +154,7 @@ impl InMemoryBatch {
     fn push(&mut self, event: QueuedEvent) {
         match event {
             QueuedEvent::WebEvent { row, tracking } => self.web_events.push((*row, tracking)),
-            QueuedEvent::PluginEvent { row, tracking } => self.plugin_events.push((row, tracking)),
+            QueuedEvent::ModsEvent { row, tracking } => self.mods_events.push((row, tracking)),
             QueuedEvent::Error(e) => self.errors.push(e),
             QueuedEvent::ErrorTracking { row, tracking } => {
                 self.error_trackings.push((row, tracking))
@@ -175,9 +175,9 @@ impl InMemoryBatch {
                 }),
         );
         result.extend(
-            self.plugin_events
+            self.mods_events
                 .into_iter()
-                .map(|(row, tracking)| QueuedEvent::PluginEvent { row, tracking }),
+                .map(|(row, tracking)| QueuedEvent::ModsEvent { row, tracking }),
         );
         result.extend(self.errors.into_iter().map(QueuedEvent::Error));
         result.extend(
@@ -200,7 +200,7 @@ impl InMemoryBatch {
 
     fn aggregate_usage(&self) -> AggregatedUsage {
         let estimated_owners = (self.web_events.len()
-            + self.plugin_events.len()
+            + self.mods_events.len()
             + self.error_trackings.len()
             + self.web_vitals.len()
             + self.replays.len())
@@ -227,7 +227,7 @@ impl InMemoryBatch {
         }
 
         count_usage!(&self.web_events, events);
-        count_usage!(&self.plugin_events, events);
+        count_usage!(&self.mods_events, events);
         count_usage!(&self.error_trackings, error_tracking);
         count_usage!(&self.web_vitals, web_vitals);
         count_usage!(&self.replays, session_replays);
@@ -239,7 +239,7 @@ impl InMemoryBatch {
 #[derive(Debug, Default)]
 struct BatchSendResult {
     failed_web_events: Vec<(WebEventRow, Option<TrackingContext>)>,
-    failed_plugin_events: Vec<(PluginEventRow, Option<TrackingContext>)>,
+    failed_mods_events: Vec<(ModsEventRow, Option<TrackingContext>)>,
     failed_errors: Vec<ErrorRow>,
     failed_error_trackings: Vec<(ErrorTrackingRow, Option<TrackingContext>)>,
     failed_web_vitals: Vec<(WebVitalRow, Option<TrackingContext>)>,
@@ -250,7 +250,7 @@ struct BatchSendResult {
 impl BatchSendResult {
     fn has_failures(&self) -> bool {
         !self.failed_web_events.is_empty()
-            || !self.failed_plugin_events.is_empty()
+            || !self.failed_mods_events.is_empty()
             || !self.failed_errors.is_empty()
             || !self.failed_error_trackings.is_empty()
             || !self.failed_web_vitals.is_empty()
@@ -260,7 +260,7 @@ impl BatchSendResult {
     fn into_in_memory_batch(self) -> InMemoryBatch {
         InMemoryBatch {
             web_events: self.failed_web_events,
-            plugin_events: self.failed_plugin_events,
+            mods_events: self.failed_mods_events,
             errors: self.failed_errors,
             error_trackings: self.failed_error_trackings,
             web_vitals: self.failed_web_vitals,
@@ -270,7 +270,7 @@ impl BatchSendResult {
 
     fn failure_count(&self) -> usize {
         self.failed_web_events.len()
-            + self.failed_plugin_events.len()
+            + self.failed_mods_events.len()
             + self.failed_errors.len()
             + self.failed_error_trackings.len()
             + self.failed_web_vitals.len()
@@ -478,7 +478,7 @@ impl BatchQueue {
 
         let InMemoryBatch {
             web_events,
-            plugin_events,
+            mods_events,
             errors,
             error_trackings,
             web_vitals,
@@ -486,14 +486,14 @@ impl BatchQueue {
         } = batch;
 
         let web_event_rows: Vec<_> = web_events.iter().map(|(e, _)| e).collect();
-        let plugin_event_rows: Vec<_> = plugin_events.iter().map(|(e, _)| e).collect();
+        let mods_event_rows: Vec<_> = mods_events.iter().map(|(e, _)| e).collect();
         let error_tracking_rows: Vec<_> = error_trackings.iter().map(|(e, _)| e).collect();
         let web_vital_rows: Vec<_> = web_vitals.iter().map(|(e, _)| e).collect();
         let replay_rows: Vec<_> = replays.iter().map(|(e, _)| e).collect();
 
         let (
             web_events_res,
-            plugin_events_res,
+            mods_events_res,
             errors_res,
             error_trackings_res,
             web_vitals_res,
@@ -507,10 +507,10 @@ impl BatchQueue {
                 }
             },
             async {
-                if plugin_event_rows.is_empty() {
+                if mods_event_rows.is_empty() {
                     Ok(())
                 } else {
-                    self.tinybird.insert_plugin_events(&plugin_event_rows).await
+                    self.tinybird.insert_mods_events(&mods_event_rows).await
                 }
             },
             async {
@@ -552,11 +552,11 @@ impl BatchQueue {
             result.failed_web_events = web_events;
         }
 
-        if let Err(e) = plugin_events_res {
+        if let Err(e) = mods_events_res {
             if !e.is_transient() {
                 result.had_permanent_failure = true;
             }
-            result.failed_plugin_events = plugin_events;
+            result.failed_mods_events = mods_events;
         }
 
         if let Err(e) = errors_res {
@@ -756,8 +756,8 @@ mod tests {
     use tempfile::tempdir;
     use uuid::Uuid;
 
-    fn create_test_plugin_event() -> PluginEventRow {
-        PluginEventRow {
+    fn create_test_mods_event() -> ModsEventRow {
+        ModsEventRow {
             id: Uuid::new_v4(),
             project_id: Uuid::new_v4(),
             server_id: Uuid::new_v4(),
@@ -778,8 +778,8 @@ mod tests {
     }
 
     fn create_test_queued_event() -> QueuedEvent {
-        QueuedEvent::PluginEvent {
-            row: create_test_plugin_event(),
+        QueuedEvent::ModsEvent {
+            row: create_test_mods_event(),
             tracking: None,
         }
     }
@@ -799,7 +799,7 @@ mod tests {
             let events = store.get_backed_up_events(10).await.unwrap();
             assert_eq!(events.len(), 1);
 
-            if let QueuedEvent::PluginEvent { row, .. } = &events[0].1 {
+            if let QueuedEvent::ModsEvent { row, .. } = &events[0].1 {
                 assert!(row.custom.contains("test"));
             } else {
                 panic!("Expected Event variant");
@@ -883,7 +883,7 @@ mod tests {
             let events = store.get_backed_up_events(10).await.unwrap();
             assert_eq!(events.len(), 3);
 
-            assert!(matches!(events[0].1, QueuedEvent::PluginEvent { .. }));
+            assert!(matches!(events[0].1, QueuedEvent::ModsEvent { .. }));
             assert!(matches!(events[1].1, QueuedEvent::Error(_)));
             assert!(matches!(events[2].1, QueuedEvent::WebVital { .. }));
         }
@@ -895,11 +895,11 @@ mod tests {
             let store = BackupStore::new(&db_path);
 
             for i in 0..5 {
-                let mut row = create_test_plugin_event();
+                let mut row = create_test_mods_event();
                 row.custom = format!(r#"{{"order": {}}}"#, i);
                 store
                     .backup_events(
-                        &[QueuedEvent::PluginEvent {
+                        &[QueuedEvent::ModsEvent {
                             row,
                             tracking: None,
                         }],
@@ -913,7 +913,7 @@ mod tests {
             let events = store.get_backed_up_events(10).await.unwrap();
 
             for (i, (_, event)) in events.into_iter().enumerate() {
-                if let QueuedEvent::PluginEvent { row, .. } = event {
+                if let QueuedEvent::ModsEvent { row, .. } = event {
                     assert!(row.custom.contains(&format!("\"order\": {}", i)));
                 }
             }
@@ -1014,7 +1014,7 @@ mod tests {
                 tracking: None,
             });
 
-            assert_eq!(batch.plugin_events.len(), 1);
+            assert_eq!(batch.mods_events.len(), 1);
             assert_eq!(batch.errors.len(), 1);
             assert_eq!(batch.web_vitals.len(), 1);
             assert!(batch.web_events.is_empty());
@@ -1036,7 +1036,7 @@ mod tests {
 
             let queued = batch.into_queued_events();
             assert_eq!(queued.len(), 2);
-            assert!(matches!(queued[0], QueuedEvent::PluginEvent { .. }));
+            assert!(matches!(queued[0], QueuedEvent::ModsEvent { .. }));
             assert!(matches!(queued[1], QueuedEvent::Error(_)));
         }
     }
@@ -1073,7 +1073,7 @@ mod tests {
 
         #[test]
         fn test_datasource_names() {
-            assert_eq!(create_test_queued_event().datasource(), "plugin_events");
+            assert_eq!(create_test_queued_event().datasource(), "mods_events");
             assert_eq!(
                 QueuedEvent::Error(ErrorRow {
                     id: Uuid::new_v4(),
@@ -1150,8 +1150,8 @@ mod tests {
             let deserialized: QueuedEvent = serde_json::from_str(&json).unwrap();
 
             if let (
-                QueuedEvent::PluginEvent { row: orig, .. },
-                QueuedEvent::PluginEvent { row: deser, .. },
+                QueuedEvent::ModsEvent { row: orig, .. },
+                QueuedEvent::ModsEvent { row: deser, .. },
             ) = (&event, &deserialized)
             {
                 assert_eq!(orig.id, deser.id);

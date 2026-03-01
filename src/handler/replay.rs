@@ -12,6 +12,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use serde::Deserialize;
 use serde_json::Value;
+use sqlx::types::Uuid as SqlxUuid;
 use std::collections::HashMap;
 use tracing::{error, warn};
 use uuid::Uuid;
@@ -40,6 +41,8 @@ pub(crate) struct ReplayRequest {
     pub(crate) timestamp: u64,
     #[allow(dead_code)]
     pub(crate) url: String,
+    #[serde(default, alias = "anonymousId")]
+    pub(crate) identifier: Option<SqlxUuid>,
     pub(crate) events: Vec<Value>,
 }
 
@@ -65,8 +68,17 @@ pub async fn replay(
             return error_response(StatusCode::BAD_REQUEST, &format!("Invalid JSON: {}", e));
         }
     };
+    let ReplayRequest {
+        token,
+        session_id,
+        sequence: _,
+        timestamp: _,
+        url: _,
+        identifier,
+        events,
+    } = parsed;
 
-    let context = match load_project_context(&state.pool, &parsed.token).await {
+    let context = match load_project_context(&state.pool, &token).await {
         Ok(ctx) => ctx,
         Err(e) => {
             if e.0 == StatusCode::UNAUTHORIZED {
@@ -75,7 +87,7 @@ pub async fn replay(
 
             let failed = FailedRequest {
                 request_type: RequestType::Replay,
-                token: parsed.token.clone(),
+                token: token.clone(),
                 body: body.to_vec(),
                 country: None,
                 client_ip: None,
@@ -99,12 +111,21 @@ pub async fn replay(
     if let Err(msg) = check_ip_allowed(&context.ip_rules, client_ip) {
         return error_response(StatusCode::FORBIDDEN, msg);
     }
+    let user_agent = headers
+        .get("User-Agent")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
 
-    let valid_events: Vec<Value> = parsed
-        .events
-        .into_iter()
-        .filter(is_valid_rrweb_event)
-        .collect();
+    let server_id = if context.cookieless_mode {
+        crate::utils::cookieless_server_id(client_ip, user_agent, context.project_id)
+    } else {
+        let Some(identifier) = identifier else {
+            return error_response(StatusCode::BAD_REQUEST, "identifier is required");
+        };
+        crate::utils::hash_server_id(identifier, context.project_id)
+    };
+
+    let valid_events: Vec<Value> = events.into_iter().filter(is_valid_rrweb_event).collect();
 
     if valid_events.is_empty() {
         return error_response(StatusCode::BAD_REQUEST, "No valid events");
@@ -122,14 +143,15 @@ pub async fn replay(
 
     let tracking_ctx = TrackingContext {
         owner_id: context.owner_id.as_str().into(),
-        token: parsed.token.as_str().into(),
+        token: token.as_str().into(),
         organization_id: context.organization_id.as_deref().map(Into::into),
     };
 
     let replay_row = ReplayRow {
         id: Uuid::new_v4(),
         project_id: context.project_id,
-        session_id: parsed.session_id,
+        session_id,
+        identifier: Some(server_id.to_string()),
         events: events_json,
         created_at: chrono::Utc::now(),
     };

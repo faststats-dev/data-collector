@@ -136,6 +136,7 @@ async fn main() {
         .route("/v1/health", get(|| async { (StatusCode::OK, "OK") }))
         .route("/v1/collect", post(handler::collect))
         .route("/v1/web", post(handler::web))
+        .route("/v1/identify", post(handler::identify))
         .route("/v1/vitals", post(handler::vitals))
         .route("/v1/replay", post(handler::replay))
         .layer(axum::middleware::from_fn(track_metrics))

@@ -51,6 +51,8 @@ pub struct Request {
     pub id: RequestIdentifier,
     pub data: HashMap<String, Value>,
     pub errors: Option<Vec<ErrorTracking>>,
+    #[serde(default, rename = "sessionId")]
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

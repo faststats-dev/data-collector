@@ -1,6 +1,7 @@
 use super::{
-    check_ip_allowed, error_response, get_authorization, get_client_ip, get_country,
-    insert_error_entries, insert_event, load_project_context, success_response,
+    MODS_EVENT_FIELDS, check_ip_allowed, error_response, extract_known_fields, get_authorization,
+    get_client_ip, get_country, insert_error_entries, insert_mods_event, load_project_context,
+    success_response,
 };
 use crate::batch_queue::{FailedRequest, RequestType, TrackingContext};
 use crate::models::{AppState, Request};
@@ -66,8 +67,14 @@ pub async fn collect(
         Ok(req) => req,
         Err(_) => return error_response(StatusCode::BAD_REQUEST, "Invalid JSON"),
     };
+    let Request {
+        id,
+        mut data,
+        errors,
+        session_id: _,
+    } = req;
 
-    let server_id = match req.id.value().parse::<Uuid>() {
+    let server_id = match id.value().parse::<Uuid>() {
         Ok(id) => crate::utils::hash_server_id(id, ctx.project_id),
         Err(_) => {
             return error_response(StatusCode::BAD_REQUEST, "Invalid server_id or identifier");
@@ -75,7 +82,12 @@ pub async fn collect(
     };
 
     let country = get_country(&headers);
-    let (valid_data, warnings) = validate_and_filter_payload(req.data, &ctx.datasources);
+
+    // Extract known row fields before datasource validation
+    let mut known = extract_known_fields(&mut data, MODS_EVENT_FIELDS);
+
+    // Remaining fields go through datasource validation → custom JSON
+    let (valid_custom, warnings) = validate_and_filter_payload(data, &ctx.datasources);
 
     let tracking_ctx = TrackingContext {
         owner_id: ctx.owner_id.as_str().into(),
@@ -83,12 +95,13 @@ pub async fn collect(
         organization_id: ctx.organization_id.as_deref().map(Into::into),
     };
 
-    let data_entry_id = match insert_event(
+    let data_entry_id = match insert_mods_event(
         &state.batch_queue,
         ctx.project_id,
         server_id,
         country,
-        &valid_data,
+        &mut known,
+        &valid_custom,
         Some(tracking_ctx.clone()),
     )
     .await
@@ -101,7 +114,7 @@ pub async fn collect(
         return success_response(warnings);
     }
 
-    if let Some(errors) = req.errors {
+    if let Some(errors) = errors {
         for error in errors {
             if let Err(e) = insert_error_entries(
                 &state.batch_queue,

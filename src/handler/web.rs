@@ -1,6 +1,6 @@
 use super::{
     EncodingQuery, check_ip_allowed, decompress_body, error_response, get_authorization,
-    get_client_ip, get_country, get_request_origin, insert_error_entries, insert_event,
+    get_client_ip, get_country, get_request_origin, insert_error_entries, insert_web_event,
     load_project_context, success_response, validate_domain,
 };
 use crate::batch_queue::{FailedRequest, RequestType, TrackingContext};
@@ -167,7 +167,7 @@ pub async fn web(
     let data_entry_id = if is_debounced {
         Uuid::nil()
     } else {
-        match insert_event(
+        match insert_web_event(
             &state.batch_queue,
             ctx.project_id,
             server_id,

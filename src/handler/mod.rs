@@ -12,7 +12,7 @@ pub use web::web;
 
 use crate::batch_queue::{BatchQueue, FailedRequest, QueuedEvent, RequestType, TrackingContext};
 use crate::models::{DataSource, Error, ErrorTracking};
-use crate::tinybird::{ErrorRow, ErrorTrackingRow, EventRow};
+use crate::tinybird::{ErrorRow, ErrorTrackingRow, PluginEventRow, WebEventRow};
 use axum::Json;
 use axum::http::{HeaderMap, StatusCode};
 use moka::future::Cache;
@@ -294,7 +294,30 @@ pub fn get_country(headers: &HeaderMap) -> Option<String> {
         .map(String::from)
 }
 
-pub async fn insert_event(
+fn extract_optional_string(data: &mut HashMap<String, Value>, key: &str) -> Option<String> {
+    data.remove(key).and_then(|v| match v {
+        Value::String(s) => Some(s),
+        _ => None,
+    })
+}
+
+fn extract_optional_f64(data: &mut HashMap<String, Value>, key: &str) -> Option<f64> {
+    data.remove(key).and_then(|v| v.as_f64())
+}
+
+fn extract_optional_bool(data: &mut HashMap<String, Value>, key: &str) -> Option<bool> {
+    data.remove(key).and_then(|v| v.as_bool())
+}
+
+fn to_custom_json(data: &HashMap<String, Value>) -> String {
+    if data.is_empty() {
+        "{}".to_string()
+    } else {
+        serde_json::to_string(data).unwrap_or_else(|_| "{}".to_string())
+    }
+}
+
+pub async fn insert_web_event(
     batch_queue: &BatchQueue,
     project_id: Uuid,
     server_id: Uuid,
@@ -308,25 +331,81 @@ pub async fn insert_event(
     }
 
     let event_id = Uuid::new_v4();
-    let data_json = serde_json::to_string(data).map_err(|_| {
-        error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to serialize data",
-        )
-    })?;
+    let mut data = data.clone();
 
-    let row = EventRow {
+    let row = WebEventRow {
         id: event_id,
         project_id,
         server_id,
         session_id,
+        event: extract_optional_string(&mut data, "event"),
+        user_id: extract_optional_string(&mut data, "user_id"),
+        browser: extract_optional_string(&mut data, "browser"),
+        browser_version: extract_optional_string(&mut data, "browser_version"),
+        device: extract_optional_string(&mut data, "device"),
+        os: extract_optional_string(&mut data, "os"),
+        os_version: extract_optional_string(&mut data, "os_version"),
+        referrer: extract_optional_string(&mut data, "referrer"),
+        utm_source: extract_optional_string(&mut data, "utm_source"),
+        utm_medium: extract_optional_string(&mut data, "utm_medium"),
+        utm_campaign: extract_optional_string(&mut data, "utm_campaign"),
+        utm_term: extract_optional_string(&mut data, "utm_term"),
+        utm_content: extract_optional_string(&mut data, "utm_content"),
+        title: extract_optional_string(&mut data, "title"),
+        page: extract_optional_string(&mut data, "page"),
+        url: extract_optional_string(&mut data, "url"),
+        outbound_link: extract_optional_string(&mut data, "outbound_link"),
         country,
-        data: data_json,
+        custom: to_custom_json(&data),
         created_at: chrono::Utc::now(),
     };
 
     batch_queue
-        .queue_event(QueuedEvent::Event { row, tracking })
+        .queue_event(QueuedEvent::WebEvent { row, tracking })
+        .await
+        .map_err(|e| {
+            error!("Failed to queue event: {}", e);
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Failed to queue event")
+        })?;
+    Ok(event_id)
+}
+
+pub async fn insert_plugin_event(
+    batch_queue: &BatchQueue,
+    project_id: Uuid,
+    server_id: Uuid,
+    country: Option<String>,
+    data: &HashMap<String, Value>,
+    tracking: Option<TrackingContext>,
+) -> Result<Uuid, HandlerResponse> {
+    if data.is_empty() {
+        return Ok(Uuid::nil());
+    }
+
+    let event_id = Uuid::new_v4();
+    let mut data = data.clone();
+
+    let row = PluginEventRow {
+        id: event_id,
+        project_id,
+        server_id,
+        player_count: extract_optional_f64(&mut data, "player_count"),
+        online_mode: extract_optional_bool(&mut data, "online_mode"),
+        plugin_version: extract_optional_string(&mut data, "plugin_version"),
+        minecraft_version: extract_optional_string(&mut data, "minecraft_version"),
+        server_type: extract_optional_string(&mut data, "server_type"),
+        java_version: extract_optional_string(&mut data, "java_version"),
+        os_name: extract_optional_string(&mut data, "os_name"),
+        os_arch: extract_optional_string(&mut data, "os_arch"),
+        os_version: extract_optional_string(&mut data, "os_version"),
+        core_count: extract_optional_f64(&mut data, "core_count"),
+        country,
+        custom: to_custom_json(&data),
+        created_at: chrono::Utc::now(),
+    };
+
+    batch_queue
+        .queue_event(QueuedEvent::PluginEvent { row, tracking })
         .await
         .map_err(|e| {
             error!("Failed to queue event: {}", e);
@@ -429,7 +508,7 @@ async fn process_collect_request(
         id,
         data,
         errors,
-        session_id,
+        session_id: _,
     } = req;
 
     let server_id = id
@@ -446,11 +525,10 @@ async fn process_collect_request(
         organization_id: ctx.organization_id.as_deref().map(Into::into),
     };
 
-    let data_entry_id = insert_event(
+    let data_entry_id = insert_plugin_event(
         batch_queue,
         ctx.project_id,
         server_id,
-        session_id,
         request.country.clone(),
         &valid_data,
         Some(tracking_ctx.clone()),
@@ -551,7 +629,7 @@ async fn process_web_request(
         organization_id: ctx.organization_id.as_deref().map(Into::into),
     };
 
-    let data_entry_id = insert_event(
+    let data_entry_id = insert_web_event(
         batch_queue,
         ctx.project_id,
         server_id,

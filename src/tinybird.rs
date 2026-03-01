@@ -15,14 +15,51 @@ pub struct TinybirdClient {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EventRow {
+pub struct WebEventRow {
     pub id: Uuid,
     pub project_id: Uuid,
     pub server_id: Uuid,
     pub session_id: Option<String>,
-
+    pub event: Option<String>,
+    pub user_id: Option<String>,
+    pub browser: Option<String>,
+    pub browser_version: Option<String>,
+    pub device: Option<String>,
+    pub os: Option<String>,
+    pub os_version: Option<String>,
+    pub referrer: Option<String>,
+    pub utm_source: Option<String>,
+    pub utm_medium: Option<String>,
+    pub utm_campaign: Option<String>,
+    pub utm_term: Option<String>,
+    pub utm_content: Option<String>,
+    pub title: Option<String>,
+    pub page: Option<String>,
+    pub url: Option<String>,
+    pub outbound_link: Option<String>,
     pub country: Option<String>,
-    pub data: String,
+    pub custom: String,
+    #[serde(with = "chrono::serde::ts_milliseconds")]
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginEventRow {
+    pub id: Uuid,
+    pub project_id: Uuid,
+    pub server_id: Uuid,
+    pub player_count: Option<f64>,
+    pub online_mode: Option<bool>,
+    pub plugin_version: Option<String>,
+    pub minecraft_version: Option<String>,
+    pub server_type: Option<String>,
+    pub java_version: Option<String>,
+    pub os_name: Option<String>,
+    pub os_arch: Option<String>,
+    pub os_version: Option<String>,
+    pub core_count: Option<f64>,
+    pub country: Option<String>,
+    pub custom: String,
     #[serde(with = "chrono::serde::ts_milliseconds")]
     pub created_at: DateTime<Utc>,
 }
@@ -190,8 +227,15 @@ impl TinybirdClient {
         Ok(())
     }
 
-    pub async fn insert_events(&self, events: &[&EventRow]) -> Result<(), TinybirdError> {
-        self.send_batch("events", events).await
+    pub async fn insert_web_events(&self, events: &[&WebEventRow]) -> Result<(), TinybirdError> {
+        self.send_batch("web_events", events).await
+    }
+
+    pub async fn insert_plugin_events(
+        &self,
+        events: &[&PluginEventRow],
+    ) -> Result<(), TinybirdError> {
+        self.send_batch("plugin_events", events).await
     }
 
     pub async fn insert_errors(&self, errors: &[ErrorRow]) -> Result<(), TinybirdError> {

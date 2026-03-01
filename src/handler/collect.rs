@@ -1,6 +1,6 @@
 use super::{
     check_ip_allowed, error_response, get_authorization, get_client_ip, get_country,
-    insert_error_entries, insert_event, load_project_context, success_response,
+    insert_error_entries, insert_plugin_event, load_project_context, success_response,
 };
 use crate::batch_queue::{FailedRequest, RequestType, TrackingContext};
 use crate::models::{AppState, Request};
@@ -70,7 +70,7 @@ pub async fn collect(
         id,
         data,
         errors,
-        session_id,
+        session_id: _,
     } = req;
 
     let server_id = match id.value().parse::<Uuid>() {
@@ -89,11 +89,10 @@ pub async fn collect(
         organization_id: ctx.organization_id.as_deref().map(Into::into),
     };
 
-    let data_entry_id = match insert_event(
+    let data_entry_id = match insert_plugin_event(
         &state.batch_queue,
         ctx.project_id,
         server_id,
-        session_id,
         country,
         &valid_data,
         Some(tracking_ctx.clone()),

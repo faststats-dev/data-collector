@@ -100,7 +100,7 @@ pub async fn identify(
         return error_response(StatusCode::BAD_REQUEST, "identifier is required");
     };
 
-    let server_id = crate::utils::hash_server_id(source_id, ctx.project_id).to_string();
+    let user_id = crate::utils::hash_server_id(source_id, ctx.project_id).to_string();
     let traits_value = Value::Object(traits.unwrap_or_default());
     let name = normalize_optional_text(name);
     let phone = normalize_optional_text(phone);
@@ -110,7 +110,7 @@ pub async fn identify(
         r#"
 		INSERT INTO identified_project_users (
 			project_id,
-			server_id,
+			user_id,
 			external_id,
 			email,
 			name,
@@ -121,7 +121,7 @@ pub async fn identify(
 			updated_at
 		)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, NOW(), NOW())
-		ON CONFLICT (project_id, server_id)
+		ON CONFLICT (project_id, user_id)
 		DO UPDATE SET
 			external_id = EXCLUDED.external_id,
 			email = EXCLUDED.email,
@@ -134,7 +134,7 @@ pub async fn identify(
 		"#,
     )
     .bind(ctx.project_id)
-    .bind(server_id)
+    .bind(user_id)
     .bind(external_id)
     .bind(email)
     .bind(name)

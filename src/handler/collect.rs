@@ -1,6 +1,7 @@
 use super::{
-    check_ip_allowed, error_response, get_authorization, get_client_ip, get_country,
-    insert_error_entries, insert_plugin_event, load_project_context, success_response,
+    PLUGIN_EVENT_FIELDS, check_ip_allowed, error_response, extract_known_fields, get_authorization,
+    get_client_ip, get_country, insert_error_entries, insert_plugin_event, load_project_context,
+    success_response,
 };
 use crate::batch_queue::{FailedRequest, RequestType, TrackingContext};
 use crate::models::{AppState, Request};
@@ -68,7 +69,7 @@ pub async fn collect(
     };
     let Request {
         id,
-        data,
+        mut data,
         errors,
         session_id: _,
     } = req;
@@ -81,7 +82,12 @@ pub async fn collect(
     };
 
     let country = get_country(&headers);
-    let (valid_data, warnings) = validate_and_filter_payload(data, &ctx.datasources);
+
+    // Extract known row fields before datasource validation
+    let mut known = extract_known_fields(&mut data, PLUGIN_EVENT_FIELDS);
+
+    // Remaining fields go through datasource validation → custom JSON
+    let (valid_custom, warnings) = validate_and_filter_payload(data, &ctx.datasources);
 
     let tracking_ctx = TrackingContext {
         owner_id: ctx.owner_id.as_str().into(),
@@ -94,7 +100,8 @@ pub async fn collect(
         ctx.project_id,
         server_id,
         country,
-        &valid_data,
+        &mut known,
+        &valid_custom,
         Some(tracking_ctx.clone()),
     )
     .await

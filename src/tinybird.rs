@@ -18,10 +18,9 @@ pub struct TinybirdClient {
 pub struct WebEventRow {
     pub id: Uuid,
     pub project_id: Uuid,
-    pub server_id: Uuid,
+    pub user_id: Option<String>,
     pub session_id: Option<String>,
     pub event: Option<String>,
-    pub user_id: Option<String>,
     pub browser: Option<String>,
     pub browser_version: Option<String>,
     pub device: Option<String>,

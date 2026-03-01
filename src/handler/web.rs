@@ -1,7 +1,8 @@
 use super::{
-    EncodingQuery, check_ip_allowed, decompress_body, error_response, get_authorization,
-    get_client_ip, get_country, get_request_origin, insert_error_entries, insert_web_event,
-    load_project_context, success_response, validate_domain,
+    EncodingQuery, WEB_EVENT_FIELDS, check_ip_allowed, decompress_body, error_response,
+    extract_known_fields, get_authorization, get_client_ip, get_country, get_request_origin,
+    insert_error_entries, insert_web_event, load_project_context, success_response,
+    validate_domain,
 };
 use crate::batch_queue::{FailedRequest, RequestType, TrackingContext};
 use crate::models::{AppState, ErrorTracking};
@@ -20,8 +21,8 @@ use tracing::error;
 #[serde(rename_all = "camelCase")]
 pub(crate) struct WebRequest {
     pub(crate) token: Option<String>,
-    #[serde(default, alias = "anonymousId")]
-    pub(crate) identifier: Option<Uuid>,
+    #[serde(default, alias = "identifier", alias = "anonymousId")]
+    pub(crate) user_id: Option<Uuid>,
     pub(crate) data: HashMap<String, Value>,
     pub(crate) errors: Option<Vec<ErrorTracking>>,
     #[serde(default)]
@@ -43,8 +44,8 @@ pub async fn web(
 
     let WebRequest {
         token: body_token,
-        identifier,
-        data,
+        user_id,
+        mut data,
         errors,
         session_id: parsed_session_id,
     } = match serde_json::from_slice(&body) {
@@ -117,7 +118,11 @@ pub async fn web(
             .map(String::from)
     });
 
-    let (mut valid_data, warnings) = validate_and_filter_payload(data, &ctx.datasources);
+    // Extract known row fields before datasource validation
+    let mut known = extract_known_fields(&mut data, WEB_EVENT_FIELDS);
+
+    // Remaining fields go through datasource validation → custom JSON
+    let (valid_custom, warnings) = validate_and_filter_payload(data, &ctx.datasources);
 
     let user_agent = headers
         .get("User-Agent")
@@ -129,34 +134,39 @@ pub async fn web(
         None => return success_response(HashMap::new()),
     };
 
-    let server_id = if ctx.cookieless_mode {
+    let resolved_user_id = if ctx.cookieless_mode {
         crate::utils::cookieless_server_id(client_ip, user_agent, ctx.project_id)
     } else {
-        let Some(identifier) = identifier else {
-            return error_response(StatusCode::BAD_REQUEST, "identifier is required");
+        let Some(uid) = user_id else {
+            return error_response(StatusCode::BAD_REQUEST, "userId is required");
         };
-        crate::utils::hash_server_id(identifier, ctx.project_id)
+        uid
     };
 
+    known.insert(
+        "user_id".into(),
+        Value::String(resolved_user_id.to_string()),
+    );
+
     if !ua_info.browser.is_empty() {
-        valid_data.insert("browser".into(), Value::String(ua_info.browser));
+        known.insert("browser".into(), Value::String(ua_info.browser));
     }
     if !ua_info.browser_version.is_empty() {
-        valid_data.insert(
+        known.insert(
             "browser_version".into(),
             Value::String(ua_info.browser_version),
         );
     }
     if !ua_info.os.is_empty() {
-        valid_data.insert("os".into(), Value::String(ua_info.os));
+        known.insert("os".into(), Value::String(ua_info.os));
     }
     if !ua_info.os_version.is_empty() {
-        valid_data.insert("os_version".into(), Value::String(ua_info.os_version));
+        known.insert("os_version".into(), Value::String(ua_info.os_version));
     }
-    valid_data.insert("device".into(), Value::String(ua_info.device.to_string()));
+    known.insert("device".into(), Value::String(ua_info.device.to_string()));
 
-    let url = valid_data.get("url").and_then(|v| v.as_str()).unwrap_or("");
-    let is_debounced = should_debounce(server_id, url);
+    let url = known.get("url").and_then(|v| v.as_str()).unwrap_or("");
+    let is_debounced = should_debounce(resolved_user_id, url);
 
     let tracking_ctx = TrackingContext {
         owner_id: ctx.owner_id.as_str().into(),
@@ -170,10 +180,10 @@ pub async fn web(
         match insert_web_event(
             &state.batch_queue,
             ctx.project_id,
-            server_id,
             session_id.clone(),
             country,
-            &valid_data,
+            &mut known,
+            &valid_custom,
             Some(tracking_ctx.clone()),
         )
         .await

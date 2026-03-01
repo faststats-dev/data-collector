@@ -317,51 +317,98 @@ fn to_custom_json(data: &HashMap<String, Value>) -> String {
     }
 }
 
+/// Known internal fields for web_events row. These are extracted before
+/// datasource validation so they always reach the Tinybird row.
+const WEB_EVENT_FIELDS: &[&str] = &[
+    "event",
+    "browser",
+    "browser_version",
+    "device",
+    "os",
+    "os_version",
+    "referrer",
+    "utm_source",
+    "utm_medium",
+    "utm_campaign",
+    "utm_term",
+    "utm_content",
+    "title",
+    "page",
+    "url",
+    "outbound_link",
+];
+
+/// Known internal fields for plugin_events row.
+const PLUGIN_EVENT_FIELDS: &[&str] = &[
+    "player_count",
+    "online_mode",
+    "plugin_version",
+    "minecraft_version",
+    "server_type",
+    "java_version",
+    "os_name",
+    "os_arch",
+    "os_version",
+    "core_count",
+];
+
+/// Extract known row fields from raw data, returning them separately.
+/// The remaining data should go through datasource validation for `custom`.
+pub fn extract_known_fields(
+    data: &mut HashMap<String, Value>,
+    fields: &[&str],
+) -> HashMap<String, Value> {
+    let mut extracted = HashMap::with_capacity(fields.len());
+    for &key in fields {
+        if let Some(val) = data.remove(key) {
+            extracted.insert(key.to_string(), val);
+        }
+    }
+    extracted
+}
+
 pub async fn insert_web_event(
     batch_queue: &BatchQueue,
     project_id: Uuid,
-    server_id: Uuid,
     session_id: Option<String>,
     country: Option<String>,
-    data: &HashMap<String, Value>,
+    known: &mut HashMap<String, Value>,
+    custom: &HashMap<String, Value>,
     tracking: Option<TrackingContext>,
 ) -> Result<Uuid, HandlerResponse> {
-    if data.is_empty() {
-        return Ok(Uuid::nil());
-    }
-
     let event_id = Uuid::new_v4();
-    let mut data = data.clone();
 
     let row = WebEventRow {
         id: event_id,
         project_id,
-        server_id,
+        user_id: extract_optional_string(known, "user_id"),
         session_id,
-        event: extract_optional_string(&mut data, "event"),
-        user_id: extract_optional_string(&mut data, "user_id"),
-        browser: extract_optional_string(&mut data, "browser"),
-        browser_version: extract_optional_string(&mut data, "browser_version"),
-        device: extract_optional_string(&mut data, "device"),
-        os: extract_optional_string(&mut data, "os"),
-        os_version: extract_optional_string(&mut data, "os_version"),
-        referrer: extract_optional_string(&mut data, "referrer"),
-        utm_source: extract_optional_string(&mut data, "utm_source"),
-        utm_medium: extract_optional_string(&mut data, "utm_medium"),
-        utm_campaign: extract_optional_string(&mut data, "utm_campaign"),
-        utm_term: extract_optional_string(&mut data, "utm_term"),
-        utm_content: extract_optional_string(&mut data, "utm_content"),
-        title: extract_optional_string(&mut data, "title"),
-        page: extract_optional_string(&mut data, "page"),
-        url: extract_optional_string(&mut data, "url"),
-        outbound_link: extract_optional_string(&mut data, "outbound_link"),
+        event: extract_optional_string(known, "event"),
+        browser: extract_optional_string(known, "browser"),
+        browser_version: extract_optional_string(known, "browser_version"),
+        device: extract_optional_string(known, "device"),
+        os: extract_optional_string(known, "os"),
+        os_version: extract_optional_string(known, "os_version"),
+        referrer: extract_optional_string(known, "referrer"),
+        utm_source: extract_optional_string(known, "utm_source"),
+        utm_medium: extract_optional_string(known, "utm_medium"),
+        utm_campaign: extract_optional_string(known, "utm_campaign"),
+        utm_term: extract_optional_string(known, "utm_term"),
+        utm_content: extract_optional_string(known, "utm_content"),
+        title: extract_optional_string(known, "title"),
+        page: extract_optional_string(known, "page"),
+        url: extract_optional_string(known, "url"),
+        outbound_link: extract_optional_string(known, "outbound_link"),
         country,
-        custom: to_custom_json(&data),
+        custom: to_custom_json(custom),
         created_at: chrono::Utc::now(),
     };
 
     batch_queue
-        .queue_event(QueuedEvent::WebEvent { row, tracking })
+        .queue_event(QueuedEvent::WebEvent {
+            row: Box::new(row),
+            tracking,
+        })
         .await
         .map_err(|e| {
             error!("Failed to queue event: {}", e);
@@ -375,32 +422,28 @@ pub async fn insert_plugin_event(
     project_id: Uuid,
     server_id: Uuid,
     country: Option<String>,
-    data: &HashMap<String, Value>,
+    known: &mut HashMap<String, Value>,
+    custom: &HashMap<String, Value>,
     tracking: Option<TrackingContext>,
 ) -> Result<Uuid, HandlerResponse> {
-    if data.is_empty() {
-        return Ok(Uuid::nil());
-    }
-
     let event_id = Uuid::new_v4();
-    let mut data = data.clone();
 
     let row = PluginEventRow {
         id: event_id,
         project_id,
         server_id,
-        player_count: extract_optional_f64(&mut data, "player_count"),
-        online_mode: extract_optional_bool(&mut data, "online_mode"),
-        plugin_version: extract_optional_string(&mut data, "plugin_version"),
-        minecraft_version: extract_optional_string(&mut data, "minecraft_version"),
-        server_type: extract_optional_string(&mut data, "server_type"),
-        java_version: extract_optional_string(&mut data, "java_version"),
-        os_name: extract_optional_string(&mut data, "os_name"),
-        os_arch: extract_optional_string(&mut data, "os_arch"),
-        os_version: extract_optional_string(&mut data, "os_version"),
-        core_count: extract_optional_f64(&mut data, "core_count"),
+        player_count: extract_optional_f64(known, "player_count"),
+        online_mode: extract_optional_bool(known, "online_mode"),
+        plugin_version: extract_optional_string(known, "plugin_version"),
+        minecraft_version: extract_optional_string(known, "minecraft_version"),
+        server_type: extract_optional_string(known, "server_type"),
+        java_version: extract_optional_string(known, "java_version"),
+        os_name: extract_optional_string(known, "os_name"),
+        os_arch: extract_optional_string(known, "os_arch"),
+        os_version: extract_optional_string(known, "os_version"),
+        core_count: extract_optional_f64(known, "core_count"),
         country,
-        custom: to_custom_json(&data),
+        custom: to_custom_json(custom),
         created_at: chrono::Utc::now(),
     };
 
@@ -506,7 +549,7 @@ async fn process_collect_request(
         serde_json::from_slice(&request.body).map_err(|_| "Invalid JSON")?;
     let crate::models::Request {
         id,
-        data,
+        mut data,
         errors,
         session_id: _,
     } = req;
@@ -517,7 +560,8 @@ async fn process_collect_request(
         .map(|id| crate::utils::hash_server_id(id, ctx.project_id))
         .map_err(|_| "Invalid server_id".to_string())?;
 
-    let (valid_data, _) = crate::validation::validate_and_filter_payload(data, &ctx.datasources);
+    let mut known = extract_known_fields(&mut data, PLUGIN_EVENT_FIELDS);
+    let (valid_custom, _) = crate::validation::validate_and_filter_payload(data, &ctx.datasources);
 
     let tracking_ctx = TrackingContext {
         owner_id: ctx.owner_id.as_str().into(),
@@ -530,7 +574,8 @@ async fn process_collect_request(
         ctx.project_id,
         server_id,
         request.country.clone(),
-        &valid_data,
+        &mut known,
+        &valid_custom,
         Some(tracking_ctx.clone()),
     )
     .await
@@ -575,24 +620,28 @@ async fn process_web_request(
         return Err("Origin not allowed".to_string());
     }
 
-    let server_id = if ctx.cookieless_mode {
+    let resolved_user_id = if ctx.cookieless_mode {
         let ip = request.client_ip.as_deref().unwrap_or("");
         let ua = request.user_agent.as_deref().unwrap_or("");
         crate::utils::cookieless_server_id(ip, ua, ctx.project_id)
     } else {
-        let identifier = parsed
-            .identifier
-            .ok_or_else(|| "identifier is required".to_string())?;
-        crate::utils::hash_server_id(identifier, ctx.project_id)
+        parsed
+            .user_id
+            .ok_or_else(|| "userId is required".to_string())?
     };
 
-    let (valid_data, _) =
-        crate::validation::validate_and_filter_payload(parsed.data, &ctx.datasources);
+    let mut data = parsed.data;
+    let mut known = extract_known_fields(&mut data, WEB_EVENT_FIELDS);
+    known.insert(
+        "user_id".into(),
+        Value::String(resolved_user_id.to_string()),
+    );
+    let (valid_custom, _) = crate::validation::validate_and_filter_payload(data, &ctx.datasources);
 
     use crate::utils::debounce::should_debounce;
 
-    let url = valid_data.get("url").and_then(|v| v.as_str()).unwrap_or("");
-    if should_debounce(server_id, url) {
+    let url = known.get("url").and_then(|v| v.as_str()).unwrap_or("");
+    if should_debounce(resolved_user_id, url) {
         return Ok(());
     }
 
@@ -605,23 +654,22 @@ async fn process_web_request(
         None => return Ok(()), // Bot detected or no UA
     };
 
-    let mut valid_data = valid_data;
     if !ua_info.browser.is_empty() {
-        valid_data.insert("browser".into(), Value::String(ua_info.browser));
+        known.insert("browser".into(), Value::String(ua_info.browser));
     }
     if !ua_info.browser_version.is_empty() {
-        valid_data.insert(
+        known.insert(
             "browser_version".into(),
             Value::String(ua_info.browser_version),
         );
     }
     if !ua_info.os.is_empty() {
-        valid_data.insert("os".into(), Value::String(ua_info.os));
+        known.insert("os".into(), Value::String(ua_info.os));
     }
     if !ua_info.os_version.is_empty() {
-        valid_data.insert("os_version".into(), Value::String(ua_info.os_version));
+        known.insert("os_version".into(), Value::String(ua_info.os_version));
     }
-    valid_data.insert("device".into(), Value::String(ua_info.device.to_string()));
+    known.insert("device".into(), Value::String(ua_info.device.to_string()));
 
     let tracking_ctx = TrackingContext {
         owner_id: ctx.owner_id.as_str().into(),
@@ -632,10 +680,10 @@ async fn process_web_request(
     let data_entry_id = insert_web_event(
         batch_queue,
         ctx.project_id,
-        server_id,
         parsed.session_id.clone(),
         request.country.clone(),
-        &valid_data,
+        &mut known,
+        &valid_custom,
         Some(tracking_ctx.clone()),
     )
     .await

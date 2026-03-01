@@ -67,7 +67,7 @@ pub struct TrackingContext {
 #[serde(tag = "type")]
 pub enum QueuedEvent {
     WebEvent {
-        row: WebEventRow,
+        row: Box<WebEventRow>,
         #[serde(skip_serializing_if = "Option::is_none")]
         tracking: Option<TrackingContext>,
     },
@@ -153,7 +153,7 @@ impl InMemoryBatch {
 
     fn push(&mut self, event: QueuedEvent) {
         match event {
-            QueuedEvent::WebEvent { row, tracking } => self.web_events.push((row, tracking)),
+            QueuedEvent::WebEvent { row, tracking } => self.web_events.push((*row, tracking)),
             QueuedEvent::PluginEvent { row, tracking } => self.plugin_events.push((row, tracking)),
             QueuedEvent::Error(e) => self.errors.push(e),
             QueuedEvent::ErrorTracking { row, tracking } => {
@@ -169,7 +169,10 @@ impl InMemoryBatch {
         result.extend(
             self.web_events
                 .into_iter()
-                .map(|(row, tracking)| QueuedEvent::WebEvent { row, tracking }),
+                .map(|(row, tracking)| QueuedEvent::WebEvent {
+                    row: Box::new(row),
+                    tracking,
+                }),
         );
         result.extend(
             self.plugin_events

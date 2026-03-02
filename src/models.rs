@@ -42,6 +42,8 @@ pub struct ErrorTracking {
     pub count: Option<i32>,
     #[serde(default, rename = "sessionId")]
     pub session_id: Option<String>,
+    #[serde(default, rename = "buildId")]
+    pub build_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

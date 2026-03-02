@@ -1096,6 +1096,7 @@ mod tests {
                         count: 1,
                         data_entry_id: Uuid::new_v4(),
                         session_id: None,
+                        build_id: None,
                         created_at: Utc::now(),
                     },
                     tracking: None,

@@ -504,6 +504,7 @@ pub async fn insert_error_entries(
         count: data.count.unwrap_or(1).max(0) as u32,
         data_entry_id,
         session_id: data.session_id,
+        build_id: data.build_id,
         created_at: chrono::Utc::now(),
     };
 

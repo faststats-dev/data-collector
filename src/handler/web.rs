@@ -27,6 +27,8 @@ pub(crate) struct WebRequest {
     pub(crate) errors: Option<Vec<ErrorTracking>>,
     #[serde(default)]
     pub(crate) session_id: Option<String>,
+    #[serde(default)]
+    pub(crate) build_id: Option<String>,
 }
 
 pub async fn web(
@@ -48,6 +50,7 @@ pub async fn web(
         mut data,
         errors,
         session_id: parsed_session_id,
+        build_id,
     } = match serde_json::from_slice(&body) {
         Ok(req) => req,
         Err(_) => return error_response(StatusCode::BAD_REQUEST, "Invalid JSON"),
@@ -199,6 +202,9 @@ pub async fn web(
         for mut error in error_list {
             if error.session_id.is_none() {
                 error.session_id = session_id.clone();
+            }
+            if error.build_id.is_none() {
+                error.build_id = build_id.clone();
             }
             if let Err(e) = insert_error_entries(
                 &state.batch_queue,

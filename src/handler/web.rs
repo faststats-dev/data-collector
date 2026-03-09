@@ -169,7 +169,9 @@ pub async fn web(
     known.insert("device".into(), Value::String(ua_info.device.to_string()));
 
     let url = known.get("url").and_then(|v| v.as_str()).unwrap_or("");
-    let is_debounced = should_debounce(resolved_user_id, url);
+    const HAS_ERRORS: fn(&Option<Vec<ErrorTracking>>) -> bool =
+        |errors| errors.as_ref().is_some_and(|items| !items.is_empty());
+    let is_debounced = !HAS_ERRORS(&errors) && should_debounce(resolved_user_id, url);
 
     let tracking_ctx = TrackingContext {
         owner_id: ctx.owner_id.as_str().into(),
@@ -178,7 +180,7 @@ pub async fn web(
     };
 
     let data_entry_id = if is_debounced {
-        Uuid::nil()
+        None
     } else {
         match insert_web_event(
             &state.batch_queue,
@@ -191,7 +193,7 @@ pub async fn web(
         )
         .await
         {
-            Ok(id) => id,
+            Ok(id) => Some(id),
             Err(e) => return e,
         }
     };
@@ -209,7 +211,7 @@ pub async fn web(
             if let Err(e) = insert_error_entries(
                 &state.batch_queue,
                 ctx.project_id,
-                data_entry_id,
+                data_entry_id.unwrap_or_else(Uuid::new_v4),
                 error,
                 Some(tracking_ctx.clone()),
             )

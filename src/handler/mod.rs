@@ -496,31 +496,35 @@ pub async fn insert_error_entries(
             })?;
     }
 
-    let error_tracking = ErrorTrackingRow {
-        id: Uuid::new_v4(),
-        project_id,
-        hash: data.hash,
-        error_id,
-        count: data.count.unwrap_or(1).max(0) as u32,
-        data_entry_id,
-        session_id: data.session_id,
-        build_id: data.build_id,
-        created_at: chrono::Utc::now(),
-    };
+    let occurrence_count = data.count.unwrap_or(1).max(1) as usize;
+    let created_at = chrono::Utc::now();
 
-    batch_queue
-        .queue_event(QueuedEvent::ErrorTracking {
-            row: error_tracking,
-            tracking: tracking_ctx,
-        })
-        .await
-        .map_err(|e| {
-            error!("Failed to queue error tracking: {}", e);
-            error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to queue error tracking",
-            )
-        })?;
+    for _ in 0..occurrence_count {
+        let error_tracking = ErrorTrackingRow {
+            id: Uuid::new_v4(),
+            project_id,
+            hash: data.hash.clone(),
+            error_id,
+            data_entry_id,
+            session_id: data.session_id.clone(),
+            build_id: data.build_id.clone(),
+            created_at,
+        };
+
+        batch_queue
+            .queue_event(QueuedEvent::ErrorTracking {
+                row: error_tracking,
+                tracking: tracking_ctx.clone(),
+            })
+            .await
+            .map_err(|e| {
+                error!("Failed to queue error tracking: {}", e);
+                error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to queue error tracking",
+                )
+            })?;
+    }
     Ok(())
 }
 
@@ -642,7 +646,11 @@ async fn process_web_request(
     use crate::utils::debounce::should_debounce;
 
     let url = known.get("url").and_then(|v| v.as_str()).unwrap_or("");
-    if should_debounce(resolved_user_id, url) {
+    let has_errors = parsed
+        .errors
+        .as_ref()
+        .is_some_and(|items| !items.is_empty());
+    if !has_errors && should_debounce(resolved_user_id, url) {
         return Ok(());
     }
 

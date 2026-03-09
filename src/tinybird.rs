@@ -79,7 +79,6 @@ pub struct ErrorTrackingRow {
     pub project_id: Uuid,
     pub hash: String,
     pub error_id: Uuid,
-    pub count: u32,
     pub data_entry_id: Uuid,
     pub session_id: Option<String>,
     pub build_id: Option<String>,
@@ -243,7 +242,7 @@ impl TinybirdClient {
         &self,
         rows: &[&ErrorTrackingRow],
     ) -> Result<(), TinybirdError> {
-        self.send_batch("error_tracking", rows).await
+        self.send_batch("error_tracking_occurrences", rows).await
     }
 
     pub async fn insert_web_vitals(&self, rows: &[&WebVitalRow]) -> Result<(), TinybirdError> {

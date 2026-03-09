@@ -100,7 +100,7 @@ impl QueuedEvent {
             QueuedEvent::WebEvent { .. } => "web_events",
             QueuedEvent::ModsEvent { .. } => "mods_events",
             QueuedEvent::Error(_) => "error_",
-            QueuedEvent::ErrorTracking { .. } => "error_tracking",
+            QueuedEvent::ErrorTracking { .. } => "error_tracking_occurrences",
             QueuedEvent::WebVital { .. } => "web_vitals",
             QueuedEvent::Replay { .. } => "session_replays",
         }
@@ -1093,7 +1093,6 @@ mod tests {
                         project_id: Uuid::new_v4(),
                         hash: "hash".to_string(),
                         error_id,
-                        count: 1,
                         data_entry_id: Uuid::new_v4(),
                         session_id: None,
                         build_id: None,
@@ -1102,7 +1101,7 @@ mod tests {
                     tracking: None,
                 }
                 .datasource(),
-                "error_tracking"
+                "error_tracking_occurrences"
             );
             assert_eq!(
                 QueuedEvent::WebVital {

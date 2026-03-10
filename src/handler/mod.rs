@@ -13,6 +13,7 @@ pub use web::web;
 use crate::batch_queue::{BatchQueue, FailedRequest, QueuedEvent, RequestType, TrackingContext};
 use crate::models::{DataSource, Error, ErrorTracking};
 use crate::tinybird::{ErrorRow, ErrorTrackingRow, ModsEventRow, WebEventRow};
+use crate::utils::sha256_hex;
 use axum::Json;
 use axum::http::{HeaderMap, StatusCode};
 use moka::future::Cache;
@@ -457,23 +458,33 @@ pub async fn insert_mods_event(
     Ok(event_id)
 }
 
-fn build_error_rows(error: &Error, errors: &mut Vec<ErrorRow>) -> Uuid {
-    let error_id = Uuid::new_v4();
-
-    let cause_id = error
+fn build_error_rows(error: &Error, errors: &mut Vec<ErrorRow>) -> String {
+    let cause = error
         .cause
         .as_ref()
         .map(|cause| build_error_rows(cause, errors));
-
+    let cause_hash = cause.as_ref().map(String::as_str).unwrap_or("");
+    let message = error.message.clone().unwrap_or_default();
+    let stack = error.stack.clone().unwrap_or_default();
+    let stack_json = serde_json::to_string(&stack).unwrap_or_default();
+    let hash = sha256_hex(&[
+        error.error.as_bytes(),
+        b"\x1f",
+        message.as_bytes(),
+        b"\x1f",
+        stack_json.as_bytes(),
+        b"\x1f",
+        cause_hash.as_bytes(),
+    ]);
     errors.push(ErrorRow {
-        id: error_id,
+        hash: hash.clone(),
         name: error.error.clone(),
-        message: error.message.clone().unwrap_or_default(),
-        stack: error.stack.clone().unwrap_or_default(),
-        cause_id,
+        message,
+        stack,
+        cause_hash: cause,
     });
 
-    error_id
+    hash
 }
 
 pub async fn insert_error_entries(
@@ -484,7 +495,7 @@ pub async fn insert_error_entries(
     tracking_ctx: Option<TrackingContext>,
 ) -> Result<(), HandlerResponse> {
     let mut error_rows = Vec::new();
-    let error_id = build_error_rows(&data.error, &mut error_rows);
+    let error_hash = build_error_rows(&data.error, &mut error_rows);
 
     for error_row in error_rows {
         batch_queue
@@ -496,35 +507,33 @@ pub async fn insert_error_entries(
             })?;
     }
 
-    let occurrence_count = data.count.unwrap_or(1).max(1) as usize;
+    let occurrence_count = data.count.unwrap_or(1).max(1) as u32;
     let created_at = chrono::Utc::now();
+    let error_tracking = ErrorTrackingRow {
+        id: Uuid::new_v4(),
+        project_id,
+        hash: data.hash.clone(),
+        error_hash,
+        count: occurrence_count,
+        data_entry_id,
+        session_id: data.session_id.clone(),
+        build_id: data.build_id.clone(),
+        created_at,
+    };
 
-    for _ in 0..occurrence_count {
-        let error_tracking = ErrorTrackingRow {
-            id: Uuid::new_v4(),
-            project_id,
-            hash: data.hash.clone(),
-            error_id,
-            data_entry_id,
-            session_id: data.session_id.clone(),
-            build_id: data.build_id.clone(),
-            created_at,
-        };
-
-        batch_queue
-            .queue_event(QueuedEvent::ErrorTracking {
-                row: error_tracking,
-                tracking: tracking_ctx.clone(),
-            })
-            .await
-            .map_err(|e| {
-                error!("Failed to queue error tracking: {}", e);
-                error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Failed to queue error tracking",
-                )
-            })?;
-    }
+    batch_queue
+        .queue_event(QueuedEvent::ErrorTracking {
+            row: error_tracking,
+            tracking: tracking_ctx.clone(),
+        })
+        .await
+        .map_err(|e| {
+            error!("Failed to queue error tracking: {}", e);
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to queue error tracking",
+            )
+        })?;
     Ok(())
 }
 

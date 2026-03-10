@@ -99,8 +99,8 @@ impl QueuedEvent {
         match self {
             QueuedEvent::WebEvent { .. } => "web_events",
             QueuedEvent::ModsEvent { .. } => "mods_events",
-            QueuedEvent::Error(_) => "error_",
-            QueuedEvent::ErrorTracking { .. } => "error_tracking_occurrences",
+            QueuedEvent::Error(_) => "errors",
+            QueuedEvent::ErrorTracking { .. } => "error_occurences",
             QueuedEvent::WebVital { .. } => "web_vitals",
             QueuedEvent::Replay { .. } => "session_replays",
         }
@@ -849,11 +849,11 @@ mod tests {
             store.backup_events(&[event], None).await.unwrap();
 
             let error = QueuedEvent::Error(ErrorRow {
-                id: Uuid::new_v4(),
+                hash: "error-hash".to_string(),
                 name: "TestError".to_string(),
                 message: "Test message".to_string(),
                 stack: vec!["line1".to_string()],
-                cause_id: None,
+                cause_hash: None,
             });
             store.backup_events(&[error], None).await.unwrap();
 
@@ -972,11 +972,11 @@ mod tests {
             batch.push(create_test_queued_event());
             batch.push(create_test_queued_event());
             batch.push(QueuedEvent::Error(ErrorRow {
-                id: Uuid::new_v4(),
+                hash: "error-hash".to_string(),
                 name: "E".to_string(),
                 message: "M".to_string(),
                 stack: vec![],
-                cause_id: None,
+                cause_hash: None,
             }));
 
             assert_eq!(batch.total_count(), 3);
@@ -988,11 +988,11 @@ mod tests {
 
             batch.push(create_test_queued_event());
             batch.push(QueuedEvent::Error(ErrorRow {
-                id: Uuid::new_v4(),
+                hash: "error-hash".to_string(),
                 name: "E".to_string(),
                 message: "M".to_string(),
                 stack: vec![],
-                cause_id: None,
+                cause_hash: None,
             }));
             batch.push(QueuedEvent::WebVital {
                 row: WebVitalRow {
@@ -1027,11 +1027,11 @@ mod tests {
             let mut batch = InMemoryBatch::default();
             batch.push(create_test_queued_event());
             batch.push(QueuedEvent::Error(ErrorRow {
-                id: Uuid::new_v4(),
+                hash: "error-hash".to_string(),
                 name: "E".to_string(),
                 message: "M".to_string(),
                 stack: vec![],
-                cause_id: None,
+                cause_hash: None,
             }));
 
             let queued = batch.into_queued_events();
@@ -1076,23 +1076,23 @@ mod tests {
             assert_eq!(create_test_queued_event().datasource(), "mods_events");
             assert_eq!(
                 QueuedEvent::Error(ErrorRow {
-                    id: Uuid::new_v4(),
+                    hash: "error-hash".to_string(),
                     name: "E".to_string(),
                     message: "M".to_string(),
                     stack: vec![],
-                    cause_id: None,
+                    cause_hash: None,
                 })
                 .datasource(),
-                "error_"
+                "errors"
             );
-            let error_id = Uuid::new_v4();
             assert_eq!(
                 QueuedEvent::ErrorTracking {
                     row: ErrorTrackingRow {
                         id: Uuid::new_v4(),
                         project_id: Uuid::new_v4(),
                         hash: "hash".to_string(),
-                        error_id,
+                        error_hash: "error-hash".to_string(),
+                        count: 3,
                         data_entry_id: Uuid::new_v4(),
                         session_id: None,
                         build_id: None,
@@ -1101,7 +1101,7 @@ mod tests {
                     tracking: None,
                 }
                 .datasource(),
-                "error_tracking_occurrences"
+                "error_occurences"
             );
             assert_eq!(
                 QueuedEvent::WebVital {

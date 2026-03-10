@@ -65,12 +65,11 @@ pub struct ModsEventRow {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorRow {
-    pub id: Uuid,
+    pub hash: String,
     pub name: String,
     pub message: String,
     pub stack: Vec<String>,
-
-    pub cause_id: Option<Uuid>,
+    pub cause_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,7 +77,8 @@ pub struct ErrorTrackingRow {
     pub id: Uuid,
     pub project_id: Uuid,
     pub hash: String,
-    pub error_id: Uuid,
+    pub error_hash: String,
+    pub count: u32,
     pub data_entry_id: Uuid,
     pub session_id: Option<String>,
     pub build_id: Option<String>,
@@ -235,14 +235,14 @@ impl TinybirdClient {
     }
 
     pub async fn insert_errors(&self, errors: &[ErrorRow]) -> Result<(), TinybirdError> {
-        self.send_batch("error_", errors).await
+        self.send_batch("errors", errors).await
     }
 
     pub async fn insert_error_trackings(
         &self,
         rows: &[&ErrorTrackingRow],
     ) -> Result<(), TinybirdError> {
-        self.send_batch("error_tracking_occurrences", rows).await
+        self.send_batch("error_occurences", rows).await
     }
 
     pub async fn insert_web_vitals(&self, rows: &[&WebVitalRow]) -> Result<(), TinybirdError> {

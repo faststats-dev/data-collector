@@ -3,13 +3,23 @@ pub mod debounce;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+pub fn sha256_hex(parts: &[&[u8]]) -> String {
+    let mut hasher = Sha256::new();
+    for part in parts {
+        hasher.update(part);
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+pub fn hash_to_uuid(hash: &str) -> Uuid {
+    let bytes = hex_to_bytes(hash);
+    Uuid::from_slice(&bytes[..16]).unwrap()
+}
+
 /// SHA256 hash the server_id with the project_id to produce a deterministic UUID.
 pub fn hash_server_id(server_id: Uuid, project_id: Uuid) -> Uuid {
-    let mut hasher = Sha256::new();
-    hasher.update(server_id.as_bytes());
-    hasher.update(project_id.as_bytes());
-    let hash = hasher.finalize();
-    Uuid::from_slice(&hash[..16]).unwrap()
+    let hash = sha256_hex(&[server_id.as_bytes(), project_id.as_bytes()]);
+    hash_to_uuid(&hash)
 }
 
 /// GDPR-compliant daily-rotating hash for cookieless tracking.
@@ -18,13 +28,23 @@ pub fn hash_server_id(server_id: Uuid, project_id: Uuid) -> Uuid {
 /// and the original IP/UA cannot be recovered.
 pub fn cookieless_server_id(ip: &str, user_agent: &str, project_id: Uuid) -> Uuid {
     let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
-    let mut hasher = Sha256::new();
-    hasher.update(ip.as_bytes());
-    hasher.update(user_agent.as_bytes());
-    hasher.update(project_id.as_bytes());
-    hasher.update(today.as_bytes());
-    let hash = hasher.finalize();
-    Uuid::from_slice(&hash[..16]).unwrap()
+    let hash = sha256_hex(&[
+        ip.as_bytes(),
+        user_agent.as_bytes(),
+        project_id.as_bytes(),
+        today.as_bytes(),
+    ]);
+    hash_to_uuid(&hash)
+}
+
+fn hex_to_bytes(hash: &str) -> Vec<u8> {
+    hash.as_bytes()
+        .chunks(2)
+        .map(|chunk| {
+            let hex = std::str::from_utf8(chunk).unwrap();
+            u8::from_str_radix(hex, 16).unwrap()
+        })
+        .collect()
 }
 
 #[cfg(test)]

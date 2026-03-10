@@ -463,7 +463,7 @@ fn build_error_rows(error: &Error, errors: &mut Vec<ErrorRow>) -> String {
         .cause
         .as_ref()
         .map(|cause| build_error_rows(cause, errors));
-    let cause_hash = cause.as_ref().map(String::as_str).unwrap_or("");
+    let cause_hash = cause.as_deref().unwrap_or("");
     let message = error.message.clone().unwrap_or_default();
     let stack = error.stack.clone().unwrap_or_default();
     let stack_json = serde_json::to_string(&stack).unwrap_or_default();

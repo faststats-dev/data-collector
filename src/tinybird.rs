@@ -81,6 +81,7 @@ pub struct ErrorTrackingRow {
     pub count: u32,
     pub data_entry_id: Uuid,
     pub session_id: Option<String>,
+    pub identity_key: Option<String>,
     pub build_id: Option<String>,
     #[serde(with = "chrono::serde::ts_milliseconds")]
     pub created_at: DateTime<Utc>,

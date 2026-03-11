@@ -1,7 +1,7 @@
 use super::{
     MODS_EVENT_FIELDS, check_ip_allowed, error_response, extract_known_fields, get_authorization,
     get_client_ip, get_country, insert_error_entries, insert_mods_event, load_project_context,
-    success_response,
+    resolve_identity_key, success_response,
 };
 use crate::batch_queue::{FailedRequest, RequestType, TrackingContext};
 use crate::models::{AppState, Request};
@@ -71,7 +71,7 @@ pub async fn collect(
         id,
         mut data,
         errors,
-        session_id: _,
+        session_id,
     } = req;
 
     let server_id = match id.value().parse::<Uuid>() {
@@ -115,12 +115,21 @@ pub async fn collect(
     }
 
     if let Some(errors) = errors {
-        for error in errors {
+        let fallback_identity = server_id.to_string();
+        for mut error in errors {
+            if error.session_id.is_none() {
+                error.session_id = session_id.clone();
+            }
+            let identity_key = resolve_identity_key(
+                error.session_id.as_deref(),
+                Some(fallback_identity.as_str()),
+            );
             if let Err(e) = insert_error_entries(
                 &state.batch_queue,
                 ctx.project_id,
                 data_entry_id,
                 error,
+                identity_key,
                 Some(tracking_ctx.clone()),
             )
             .await

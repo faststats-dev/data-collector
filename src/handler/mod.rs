@@ -492,6 +492,7 @@ pub async fn insert_error_entries(
     project_id: Uuid,
     data_entry_id: Uuid,
     data: ErrorTracking,
+    identity_key: Option<String>,
     tracking_ctx: Option<TrackingContext>,
 ) -> Result<(), HandlerResponse> {
     let mut error_rows = Vec::new();
@@ -517,6 +518,7 @@ pub async fn insert_error_entries(
         count: occurrence_count,
         data_entry_id,
         session_id: data.session_id.clone(),
+        identity_key,
         build_id: data.build_id.clone(),
         created_at,
     };
@@ -535,6 +537,20 @@ pub async fn insert_error_entries(
             )
         })?;
     Ok(())
+}
+
+pub fn resolve_identity_key(
+    session_id: Option<&str>,
+    fallback_identifier: Option<&str>,
+) -> Option<String> {
+    session_id
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            fallback_identifier
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
 }
 
 pub async fn process_failed_request(
@@ -565,7 +581,7 @@ async fn process_collect_request(
         id,
         mut data,
         errors,
-        session_id: _,
+        session_id,
     } = req;
 
     let server_id = id
@@ -598,12 +614,21 @@ async fn process_collect_request(
     if ctx.error_tracking_enabled
         && let Some(errors) = errors
     {
-        for error in errors {
+        let fallback_identity = server_id.to_string();
+        for mut error in errors {
+            if error.session_id.is_none() {
+                error.session_id = session_id.clone();
+            }
+            let identity_key = resolve_identity_key(
+                error.session_id.as_deref(),
+                Some(fallback_identity.as_str()),
+            );
             insert_error_entries(
                 batch_queue,
                 ctx.project_id,
                 data_entry_id,
                 error,
+                identity_key,
                 Some(tracking_ctx.clone()),
             )
             .await
@@ -694,6 +719,7 @@ async fn process_web_request(
         token: token.into(),
         organization_id: ctx.organization_id.as_deref().map(Into::into),
     };
+    let fallback_identity = resolved_user_id.to_string();
 
     let data_entry_id = insert_web_event(
         batch_queue,
@@ -714,11 +740,19 @@ async fn process_web_request(
             if error.session_id.is_none() {
                 error.session_id = parsed.session_id.clone();
             }
+            if error.build_id.is_none() {
+                error.build_id = parsed.build_id.clone();
+            }
+            let identity_key = resolve_identity_key(
+                error.session_id.as_deref(),
+                Some(fallback_identity.as_str()),
+            );
             insert_error_entries(
                 batch_queue,
                 ctx.project_id,
                 data_entry_id,
                 error,
+                identity_key,
                 Some(tracking_ctx.clone()),
             )
             .await
@@ -1100,6 +1134,31 @@ mod tests {
                 get_request_origin(&headers),
                 Some("example.com".to_string())
             );
+        }
+    }
+
+    mod identity_resolution {
+        use super::*;
+
+        #[test]
+        fn prefers_session_id_when_present() {
+            assert_eq!(
+                resolve_identity_key(Some("session-1"), Some("fallback-1")),
+                Some("session-1".to_string())
+            );
+        }
+
+        #[test]
+        fn falls_back_when_session_missing() {
+            assert_eq!(
+                resolve_identity_key(None, Some("fallback-1")),
+                Some("fallback-1".to_string())
+            );
+        }
+
+        #[test]
+        fn ignores_empty_values() {
+            assert_eq!(resolve_identity_key(Some(""), Some("")), None);
         }
     }
 }

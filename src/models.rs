@@ -83,8 +83,6 @@ mod tests {
     fn test_web_request_parsing() {
         #[derive(serde::Deserialize, Debug)]
         struct WebRequest {
-            token: Option<String>,
-            data: HashMap<String, Value>,
             errors: Option<Vec<ErrorTracking>>,
             #[serde(rename = "sessionId")]
             session_id: Option<String>,

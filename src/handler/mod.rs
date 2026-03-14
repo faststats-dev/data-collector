@@ -114,7 +114,9 @@ pub struct IpRule {
 #[derive(Clone)]
 pub struct ProjectContext {
     pub project_id: Uuid,
-    pub owner_id: String,
+    /// The user ID to bill — either the owner_id directly (if it's a user)
+    /// or the org owner's user_id (if owner_id is an organization).
+    pub billing_customer_id: String,
     pub organization_id: Option<String>,
     pub allowed_hostnames: Vec<String>,
     pub datasources: HashMap<String, DataSource>,
@@ -135,11 +137,13 @@ pub async fn load_project_context(
         r#"
         SELECT p.id, p.owner_id, p.allowed_hostnames, p.error_tracking_enabled, p.cookieless_mode,
                o.id AS organization_id,
+               m.user_id AS org_owner_user_id,
                d.reference_id, d.name, d.data_type::text, d.regex, d.allow_negative,
                d.allow_float, d.min_value, d.max_value, d.is_array
         FROM project p
         LEFT JOIN data_sources d ON d.project_id = p.id
         LEFT JOIN organization o ON o.id = p.owner_id
+        LEFT JOIN member m ON m.organization_id = o.id AND m.role = 'owner'
         WHERE p.token = $1
         "#,
     )
@@ -190,10 +194,15 @@ pub async fn load_project_context(
     .await
     .unwrap_or_default();
 
+    let owner_id: String = first.get("owner_id");
+    let organization_id: Option<String> = first.get("organization_id");
+    let org_owner_user_id: Option<String> = first.get("org_owner_user_id");
+    let billing_customer_id = org_owner_user_id.unwrap_or(owner_id);
+
     let ctx = Arc::new(ProjectContext {
         project_id: first.get("id"),
-        owner_id: first.get("owner_id"),
-        organization_id: first.get("organization_id"),
+        billing_customer_id,
+        organization_id,
         allowed_hostnames: first
             .try_get::<sqlx::types::Json<Vec<String>>, _>("allowed_hostnames")
             .ok()
@@ -610,7 +619,7 @@ async fn process_collect_request(
     let (valid_custom, _) = crate::validation::validate_and_filter_payload(data, &ctx.datasources);
 
     let tracking_ctx = TrackingContext {
-        owner_id: ctx.owner_id.as_str().into(),
+        owner_id: ctx.billing_customer_id.as_str().into(),
         token: request.token.as_str().into(),
         organization_id: ctx.organization_id.as_deref().map(Into::into),
     };
@@ -731,7 +740,7 @@ async fn process_web_request(
     known.insert("device".into(), Value::String(ua_info.device.to_string()));
 
     let tracking_ctx = TrackingContext {
-        owner_id: ctx.owner_id.as_str().into(),
+        owner_id: ctx.billing_customer_id.as_str().into(),
         token: token.into(),
         organization_id: ctx.organization_id.as_deref().map(Into::into),
     };
@@ -805,7 +814,7 @@ async fn process_vitals_request(
     let url = metadata.and_then(|m| m.url.clone()).unwrap_or_default();
 
     let tracking_ctx = TrackingContext {
-        owner_id: ctx.owner_id.as_str().into(),
+        owner_id: ctx.billing_customer_id.as_str().into(),
         token: request.token.as_str().into(),
         organization_id: ctx.organization_id.as_deref().map(Into::into),
     };
@@ -888,7 +897,7 @@ async fn process_replay_request(
     };
 
     let tracking_ctx = TrackingContext {
-        owner_id: ctx.owner_id.as_str().into(),
+        owner_id: ctx.billing_customer_id.as_str().into(),
         token: token.as_str().into(),
         organization_id: ctx.organization_id.as_deref().map(Into::into),
     };

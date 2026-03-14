@@ -142,7 +142,7 @@ pub async fn replay(
     };
 
     let tracking_ctx = TrackingContext {
-        owner_id: context.owner_id.as_str().into(),
+        owner_id: context.billing_customer_id.as_str().into(),
         token: token.as_str().into(),
         organization_id: context.organization_id.as_deref().map(Into::into),
     };

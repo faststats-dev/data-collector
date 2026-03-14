@@ -174,7 +174,7 @@ pub async fn web(
     let is_debounced = !HAS_ERRORS(&errors) && should_debounce(resolved_user_id, url);
 
     let tracking_ctx = TrackingContext {
-        owner_id: ctx.owner_id.as_str().into(),
+        owner_id: ctx.billing_customer_id.as_str().into(),
         token: token.into(),
         organization_id: ctx.organization_id.as_deref().map(Into::into),
     };

@@ -116,7 +116,7 @@ pub struct ProjectContext {
     pub project_id: Uuid,
     pub owner_id: String,
     pub organization_id: Option<String>,
-    pub domain: Option<String>,
+    pub allowed_hostnames: Vec<String>,
     pub datasources: HashMap<String, DataSource>,
     pub error_tracking_enabled: bool,
     pub cookieless_mode: bool,
@@ -133,7 +133,7 @@ pub async fn load_project_context(
 
     let rows = sqlx::query(
         r#"
-        SELECT p.id, p.owner_id, p.domain, p.error_tracking_enabled, p.cookieless_mode,
+        SELECT p.id, p.owner_id, p.allowed_hostnames, p.error_tracking_enabled, p.cookieless_mode,
                o.id AS organization_id,
                d.reference_id, d.name, d.data_type::text, d.regex, d.allow_negative,
                d.allow_float, d.min_value, d.max_value, d.is_array
@@ -194,7 +194,11 @@ pub async fn load_project_context(
         project_id: first.get("id"),
         owner_id: first.get("owner_id"),
         organization_id: first.get("organization_id"),
-        domain: first.get("domain"),
+        allowed_hostnames: first
+            .try_get::<sqlx::types::Json<Vec<String>>, _>("allowed_hostnames")
+            .ok()
+            .map(|j| j.0)
+            .unwrap_or_default(),
         datasources,
         error_tracking_enabled: first.get("error_tracking_enabled"),
         cookieless_mode: first.get("cookieless_mode"),
@@ -222,12 +226,24 @@ pub fn get_request_origin(headers: &HeaderMap) -> Option<String> {
     None
 }
 
-pub fn validate_domain(project_domain: Option<&str>, request_origin: Option<&str>) -> bool {
-    match (project_domain, request_origin) {
-        (None, _) | (Some(""), _) => true,
-        (Some(_), None) => false,
-        (Some(domain), Some(origin)) => domain.eq_ignore_ascii_case(origin),
+pub fn validate_hostname(allowed_hostnames: &[String], request_origin: Option<&str>) -> bool {
+    if allowed_hostnames.is_empty() {
+        return true;
     }
+    let Some(origin) = request_origin else {
+        return false;
+    };
+    let origin_lower = origin.to_ascii_lowercase();
+    allowed_hostnames.iter().any(|pattern| {
+        let p = pattern.to_ascii_lowercase();
+        if p == "*" {
+            true
+        } else if let Some(suffix) = p.strip_prefix("*.") {
+            origin_lower == suffix || origin_lower.ends_with(&format!(".{suffix}"))
+        } else {
+            p == origin_lower
+        }
+    })
 }
 
 pub fn get_client_ip(headers: &HeaderMap) -> &str {
@@ -655,7 +671,7 @@ async fn process_web_request(
         .await
         .map_err(|_| "Unauthorized or database error")?;
 
-    if !validate_domain(ctx.domain.as_deref(), request.origin.as_deref()) {
+    if !validate_hostname(&ctx.allowed_hostnames, request.origin.as_deref()) {
         return Err("Origin not allowed".to_string());
     }
 
@@ -902,44 +918,70 @@ mod tests {
     use super::*;
     use axum::http::HeaderValue;
 
-    mod domain_validation {
+    mod hostname_validation {
         use super::*;
 
         #[test]
-        fn allows_all_when_no_domain_configured() {
-            assert!(validate_domain(None, Some("example.com")));
-            assert!(validate_domain(None, None));
+        fn allows_all_when_no_hostnames_configured() {
+            assert!(validate_hostname(&[], Some("example.com")));
+            assert!(validate_hostname(&[], None));
         }
 
         #[test]
-        fn allows_all_when_empty_domain_configured() {
-            assert!(validate_domain(Some(""), Some("example.com")));
-            assert!(validate_domain(Some(""), None));
+        fn rejects_when_hostnames_configured_but_no_origin() {
+            assert!(!validate_hostname(&["example.com".into()], None));
         }
 
         #[test]
-        fn rejects_when_domain_configured_but_no_origin() {
-            assert!(!validate_domain(Some("example.com"), None));
-        }
-
-        #[test]
-        fn allows_matching_domain() {
-            assert!(validate_domain(Some("example.com"), Some("example.com")));
-        }
-
-        #[test]
-        fn allows_matching_domain_case_insensitive() {
-            assert!(validate_domain(Some("Example.COM"), Some("example.com")));
-            assert!(validate_domain(Some("example.com"), Some("EXAMPLE.COM")));
-        }
-
-        #[test]
-        fn rejects_non_matching_domain() {
-            assert!(!validate_domain(Some("example.com"), Some("other.com")));
-            assert!(!validate_domain(
-                Some("example.com"),
-                Some("sub.example.com")
+        fn allows_matching_hostname() {
+            assert!(validate_hostname(
+                &["example.com".into()],
+                Some("example.com")
             ));
+        }
+
+        #[test]
+        fn allows_matching_hostname_case_insensitive() {
+            assert!(validate_hostname(
+                &["Example.COM".into()],
+                Some("example.com")
+            ));
+            assert!(validate_hostname(
+                &["example.com".into()],
+                Some("EXAMPLE.COM")
+            ));
+        }
+
+        #[test]
+        fn rejects_non_matching_hostname() {
+            assert!(!validate_hostname(
+                &["example.com".into()],
+                Some("other.com")
+            ));
+        }
+
+        #[test]
+        fn allows_any_from_multiple_hostnames() {
+            let hostnames: Vec<String> = vec!["example.com".into(), "other.com".into()];
+            assert!(validate_hostname(&hostnames, Some("example.com")));
+            assert!(validate_hostname(&hostnames, Some("other.com")));
+            assert!(!validate_hostname(&hostnames, Some("nope.com")));
+        }
+
+        #[test]
+        fn wildcard_matches_subdomains() {
+            let hostnames: Vec<String> = vec!["*.example.com".into()];
+            assert!(validate_hostname(&hostnames, Some("sub.example.com")));
+            assert!(validate_hostname(&hostnames, Some("deep.sub.example.com")));
+            assert!(validate_hostname(&hostnames, Some("example.com")));
+            assert!(!validate_hostname(&hostnames, Some("other.com")));
+        }
+
+        #[test]
+        fn star_allows_everything() {
+            let hostnames: Vec<String> = vec!["*".into()];
+            assert!(validate_hostname(&hostnames, Some("anything.com")));
+            assert!(validate_hostname(&hostnames, Some("example.com")));
         }
     }
 

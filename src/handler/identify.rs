@@ -1,6 +1,6 @@
 use super::{
     check_ip_allowed, error_response, get_authorization, get_client_ip, get_request_origin,
-    load_project_context, success_response, validate_domain,
+    load_project_context, success_response, validate_hostname,
 };
 use crate::models::AppState;
 use axum::body::Bytes;
@@ -71,7 +71,7 @@ pub async fn identify(
         Err(e) => return e,
     };
 
-    if !validate_domain(ctx.domain.as_deref(), request_origin.as_deref()) {
+    if !validate_hostname(&ctx.allowed_hostnames, request_origin.as_deref()) {
         return error_response(StatusCode::FORBIDDEN, "Origin not allowed");
     }
 

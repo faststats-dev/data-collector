@@ -2,7 +2,7 @@ use super::{
     EncodingQuery, WEB_EVENT_FIELDS, check_ip_allowed, decompress_body, error_response,
     extract_known_fields, get_authorization, get_client_ip, get_country, get_request_origin,
     insert_error_entries, insert_web_event, load_project_context, resolve_identity_key,
-    success_response, validate_domain,
+    success_response, validate_hostname,
 };
 use crate::batch_queue::{FailedRequest, RequestType, TrackingContext};
 use crate::models::{AppState, ErrorTracking};
@@ -104,7 +104,7 @@ pub async fn web(
         }
     };
 
-    if !validate_domain(ctx.domain.as_deref(), request_origin.as_deref()) {
+    if !validate_hostname(&ctx.allowed_hostnames, request_origin.as_deref()) {
         return error_response(StatusCode::FORBIDDEN, "Origin not allowed");
     }
 

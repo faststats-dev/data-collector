@@ -2,6 +2,7 @@ use crate::batch_queue::AggregatedUsage;
 use chrono::{DateTime, Utc};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 #[cfg(debug_assertions)]
@@ -23,6 +24,8 @@ struct EventMetadata {
     token: Arc<str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     organization_id: Option<Arc<str>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -76,6 +79,7 @@ pub struct UsageCounts {
     pub error_tracking: u64,
     pub web_vitals: u64,
     pub session_replays: u64,
+    pub session_replay_ids: HashSet<String>,
 }
 
 impl PolarClient {
@@ -102,7 +106,6 @@ impl PolarClient {
                 ("events", owner_usage.counts.events),
                 ("error_tracking", owner_usage.counts.error_tracking),
                 ("web_vitals", owner_usage.counts.web_vitals),
-                ("session_replays", owner_usage.counts.session_replays),
             ];
 
             for (i, (name, count)) in counts.into_iter().enumerate() {
@@ -118,6 +121,23 @@ impl PolarClient {
                         count,
                         token: Arc::clone(&owner_usage.token),
                         organization_id: owner_usage.org.as_ref().map(Arc::clone),
+                        session_id: None,
+                    }),
+                });
+            }
+
+            for (i, session_id) in owner_usage.counts.session_replay_ids.iter().enumerate() {
+                events.push(EventCreateExternalCustomer {
+                    timestamp: Some(
+                        base_timestamp + chrono::Duration::microseconds((3 + i) as i64),
+                    ),
+                    name: "session_replays",
+                    external_customer_id: Arc::clone(owner_id),
+                    metadata: Some(EventMetadata {
+                        count: 1,
+                        token: Arc::clone(&owner_usage.token),
+                        organization_id: owner_usage.org.as_ref().map(Arc::clone),
+                        session_id: Some(session_id.clone()),
                     }),
                 });
             }

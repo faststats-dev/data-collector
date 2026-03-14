@@ -230,7 +230,22 @@ impl InMemoryBatch {
         count_usage!(&self.mods_events, events);
         count_usage!(&self.error_trackings, error_tracking);
         count_usage!(&self.web_vitals, web_vitals);
-        count_usage!(&self.replays, session_replays);
+        for (row, ctx) in &self.replays {
+            if let Some(ctx) = ctx {
+                let entry = usage
+                    .entry(Arc::clone(&ctx.owner_id))
+                    .or_insert_with(|| OwnerUsage {
+                        counts: UsageCounts::default(),
+                        token: Arc::clone(&ctx.token),
+                        org: ctx.organization_id.as_ref().map(Arc::clone),
+                    });
+                entry.counts.session_replays += 1;
+                entry
+                    .counts
+                    .session_replay_ids
+                    .insert(row.session_id.clone());
+            }
+        }
 
         usage
     }

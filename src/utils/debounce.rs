@@ -5,7 +5,7 @@ use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-const DEBOUNCE_WINDOW: Duration = Duration::from_secs(30);
+const DEBOUNCE_WINDOW: Duration = Duration::from_secs(5);
 const MAX_ENTRIES: u64 = 10_000;
 const MAINTENANCE_INTERVAL: u64 = 500;
 

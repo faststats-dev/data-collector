@@ -25,7 +25,15 @@ fn debounce_key(visitor_id: Uuid, url: &str) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-pub fn should_debounce(visitor_id: Uuid, url: &str) -> bool {
+fn should_debounce_event(event: Option<&str>) -> bool {
+    matches!(event, Some("pageview" | "pageleave"))
+}
+
+pub fn should_debounce(visitor_id: Uuid, url: &str, event: Option<&str>) -> bool {
+    if !should_debounce_event(event) {
+        return false;
+    }
+
     let key = debounce_key(visitor_id, url);
 
     let entry = DEBOUNCE_CACHE.entry(key).or_insert(());
@@ -55,7 +63,11 @@ mod tests {
     #[test]
     fn test_first_request_not_debounced() {
         let unique_id = random_uuid();
-        assert!(!should_debounce(unique_id, "https://example.com/page1"));
+        assert!(!should_debounce(
+            unique_id,
+            "https://example.com/page1",
+            Some("pageview")
+        ));
     }
 
     #[test]
@@ -63,16 +75,24 @@ mod tests {
         let unique_id = random_uuid();
         let url = "https://example.com/page2";
 
-        assert!(!should_debounce(unique_id, url));
-        assert!(should_debounce(unique_id, url));
+        assert!(!should_debounce(unique_id, url, Some("pageview")));
+        assert!(should_debounce(unique_id, url, Some("pageview")));
     }
 
     #[test]
     fn test_different_urls_not_debounced() {
         let unique_id = random_uuid();
 
-        assert!(!should_debounce(unique_id, "https://example.com/page-a"));
-        assert!(!should_debounce(unique_id, "https://example.com/page-b"));
+        assert!(!should_debounce(
+            unique_id,
+            "https://example.com/page-a",
+            Some("pageview")
+        ));
+        assert!(!should_debounce(
+            unique_id,
+            "https://example.com/page-b",
+            Some("pageview")
+        ));
     }
 
     #[test]
@@ -81,7 +101,34 @@ mod tests {
         let id1 = random_uuid();
         let id2 = random_uuid();
 
-        assert!(!should_debounce(id1, url));
-        assert!(!should_debounce(id2, url));
+        assert!(!should_debounce(id1, url, Some("pageview")));
+        assert!(!should_debounce(id2, url, Some("pageview")));
+    }
+
+    #[test]
+    fn test_non_page_events_are_never_debounced() {
+        let unique_id = random_uuid();
+        let url = "https://example.com/page3";
+
+        assert!(!should_debounce(unique_id, url, Some("processImage")));
+        assert!(!should_debounce(unique_id, url, Some("processImage")));
+    }
+
+    #[test]
+    fn test_pageleave_is_debounced() {
+        let unique_id = random_uuid();
+        let url = "https://example.com/page4";
+
+        assert!(!should_debounce(unique_id, url, Some("pageleave")));
+        assert!(should_debounce(unique_id, url, Some("pageleave")));
+    }
+
+    #[test]
+    fn test_missing_event_is_not_debounced() {
+        let unique_id = random_uuid();
+        let url = "https://example.com/page5";
+
+        assert!(!should_debounce(unique_id, url, None));
+        assert!(!should_debounce(unique_id, url, None));
     }
 }

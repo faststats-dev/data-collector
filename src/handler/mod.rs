@@ -705,11 +705,12 @@ async fn process_web_request(
     use crate::utils::debounce::should_debounce;
 
     let url = known.get("url").and_then(|v| v.as_str()).unwrap_or("");
+    let event = known.get("event").and_then(|v| v.as_str());
     let has_errors = parsed
         .errors
         .as_ref()
         .is_some_and(|items| !items.is_empty());
-    if !has_errors && should_debounce(resolved_user_id, url) {
+    if !has_errors && should_debounce(resolved_user_id, url, event) {
         return Ok(());
     }
 

@@ -169,9 +169,10 @@ pub async fn web(
     known.insert("device".into(), Value::String(ua_info.device.to_string()));
 
     let url = known.get("url").and_then(|v| v.as_str()).unwrap_or("");
+    let event = known.get("event").and_then(|v| v.as_str());
     const HAS_ERRORS: fn(&Option<Vec<ErrorTracking>>) -> bool =
         |errors| errors.as_ref().is_some_and(|items| !items.is_empty());
-    let is_debounced = !HAS_ERRORS(&errors) && should_debounce(resolved_user_id, url);
+    let is_debounced = !HAS_ERRORS(&errors) && should_debounce(resolved_user_id, url, event);
 
     let tracking_ctx = TrackingContext {
         owner_id: ctx.billing_customer_id.as_str().into(),

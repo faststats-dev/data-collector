@@ -1,10 +1,12 @@
 mod collect;
+mod error;
 mod identify;
 mod replay;
 mod vitals;
 mod web;
 
 pub use collect::collect;
+pub use error::error;
 pub use identify::identify;
 pub use replay::replay;
 pub use vitals::vitals;
@@ -515,9 +517,10 @@ fn build_error_rows(error: &Error, errors: &mut Vec<ErrorRow>) -> String {
 pub async fn insert_error_entries(
     batch_queue: &BatchQueue,
     project_id: Uuid,
-    data_entry_id: Uuid,
+    data_entry_id: Option<Uuid>,
     data: ErrorTracking,
     identity_key: Option<String>,
+    context: Option<String>,
     tracking_ctx: Option<TrackingContext>,
 ) -> Result<(), HandlerResponse> {
     let mut error_rows = Vec::new();
@@ -545,6 +548,7 @@ pub async fn insert_error_entries(
         session_id: data.session_id.clone(),
         identity_key,
         build_id: data.build_id.clone(),
+        context,
         created_at,
     };
 
@@ -651,9 +655,10 @@ async fn process_collect_request(
             insert_error_entries(
                 batch_queue,
                 ctx.project_id,
-                data_entry_id,
+                Some(data_entry_id),
                 error,
                 identity_key,
+                None,
                 Some(tracking_ctx.clone()),
             )
             .await
@@ -776,9 +781,10 @@ async fn process_web_request(
             insert_error_entries(
                 batch_queue,
                 ctx.project_id,
-                data_entry_id,
+                Some(data_entry_id),
                 error,
                 identity_key,
+                None,
                 Some(tracking_ctx.clone()),
             )
             .await

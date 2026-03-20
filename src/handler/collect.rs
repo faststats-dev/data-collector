@@ -127,9 +127,10 @@ pub async fn collect(
             if let Err(e) = insert_error_entries(
                 &state.batch_queue,
                 ctx.project_id,
-                data_entry_id,
+                Some(data_entry_id),
                 error,
                 identity_key,
+                None,
                 Some(tracking_ctx.clone()),
             )
             .await

@@ -217,9 +217,10 @@ pub async fn web(
             if let Err(e) = insert_error_entries(
                 &state.batch_queue,
                 ctx.project_id,
-                data_entry_id.unwrap_or_else(Uuid::new_v4),
+                data_entry_id,
                 error,
                 identity_key,
+                None,
                 Some(tracking_ctx.clone()),
             )
             .await

@@ -1,7 +1,7 @@
 use super::{
-    MODS_EVENT_FIELDS, check_ip_allowed, error_response, extract_known_fields, get_authorization,
-    get_client_ip, get_country, insert_error_entries, insert_mods_event, load_project_context,
-    resolve_identity_key, success_response,
+    ErrorEntryParams, MODS_EVENT_FIELDS, check_ip_allowed, error_response, extract_known_fields,
+    get_authorization, get_client_ip, get_country, insert_error_entries, insert_mods_event,
+    load_project_context, resolve_identity_key, success_response,
 };
 use crate::batch_queue::{FailedRequest, RequestType, TrackingContext};
 use crate::models::{AppState, Request};
@@ -134,10 +134,12 @@ pub async fn collect(
                 ctx.project_id,
                 Some(data_entry_id),
                 error,
-                identity_key,
-                plugin_version.clone(),
-                None,
-                Some(tracking_ctx.clone()),
+                ErrorEntryParams {
+                    identity_key,
+                    plugin_version: plugin_version.clone(),
+                    context: None,
+                    tracking_ctx: Some(tracking_ctx.clone()),
+                },
             )
             .await
             {

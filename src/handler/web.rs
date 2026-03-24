@@ -1,8 +1,8 @@
 use super::{
-    EncodingQuery, WEB_EVENT_FIELDS, check_ip_allowed, decompress_body, error_response,
-    extract_known_fields, get_authorization, get_client_ip, get_country, get_request_origin,
-    insert_error_entries, insert_web_event, load_project_context, resolve_identity_key,
-    success_response, validate_hostname,
+    EncodingQuery, ErrorEntryParams, WEB_EVENT_FIELDS, check_ip_allowed, decompress_body,
+    error_response, extract_known_fields, get_authorization, get_client_ip, get_country,
+    get_request_origin, insert_error_entries, insert_web_event, load_project_context,
+    resolve_identity_key, success_response, validate_hostname,
 };
 use crate::batch_queue::{FailedRequest, RequestType, TrackingContext};
 use crate::models::{AppState, ErrorTracking};
@@ -219,10 +219,12 @@ pub async fn web(
                 ctx.project_id,
                 data_entry_id,
                 error,
-                identity_key,
-                None,
-                None,
-                Some(tracking_ctx.clone()),
+                ErrorEntryParams {
+                    identity_key,
+                    plugin_version: None,
+                    context: None,
+                    tracking_ctx: Some(tracking_ctx.clone()),
+                },
             )
             .await
             {

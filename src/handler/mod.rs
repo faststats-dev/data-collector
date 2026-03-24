@@ -39,6 +39,13 @@ static PROJECT_CACHE: LazyLock<Cache<String, Arc<ProjectContext>>> = LazyLock::n
 
 pub type HandlerResponse = (StatusCode, Json<Value>);
 
+pub struct ErrorEntryParams {
+    pub identity_key: Option<String>,
+    pub plugin_version: Option<String>,
+    pub context: Option<String>,
+    pub tracking_ctx: Option<TrackingContext>,
+}
+
 #[derive(Debug, Deserialize, Default)]
 pub struct EncodingQuery {
     pub encoding: Option<String>,
@@ -519,10 +526,7 @@ pub async fn insert_error_entries(
     project_id: Uuid,
     data_entry_id: Option<Uuid>,
     data: ErrorTracking,
-    identity_key: Option<String>,
-    plugin_version: Option<String>,
-    context: Option<String>,
-    tracking_ctx: Option<TrackingContext>,
+    params: ErrorEntryParams,
 ) -> Result<(), HandlerResponse> {
     let mut error_rows = Vec::new();
     let error_hash = build_error_rows(&data.error, &mut error_rows);
@@ -547,17 +551,17 @@ pub async fn insert_error_entries(
         count: occurrence_count,
         data_entry_id,
         session_id: data.session_id.clone(),
-        identity_key,
+        identity_key: params.identity_key,
         build_id: data.build_id.clone(),
-        plugin_version,
-        context,
+        plugin_version: params.plugin_version,
+        context: params.context,
         created_at,
     };
 
     batch_queue
         .queue_event(QueuedEvent::ErrorTracking {
             row: error_tracking,
-            tracking: tracking_ctx.clone(),
+            tracking: params.tracking_ctx,
         })
         .await
         .map_err(|e| {
@@ -664,10 +668,12 @@ async fn process_collect_request(
                 ctx.project_id,
                 Some(data_entry_id),
                 error,
-                identity_key,
-                plugin_version.clone(),
-                None,
-                Some(tracking_ctx.clone()),
+                ErrorEntryParams {
+                    identity_key,
+                    plugin_version: plugin_version.clone(),
+                    context: None,
+                    tracking_ctx: Some(tracking_ctx.clone()),
+                },
             )
             .await
             .map_err(|_| "Failed to queue error".to_string())?;
@@ -791,10 +797,12 @@ async fn process_web_request(
                 ctx.project_id,
                 Some(data_entry_id),
                 error,
-                identity_key,
-                None,
-                None,
-                Some(tracking_ctx.clone()),
+                ErrorEntryParams {
+                    identity_key,
+                    plugin_version: None,
+                    context: None,
+                    tracking_ctx: Some(tracking_ctx.clone()),
+                },
             )
             .await
             .map_err(|_| "Failed to queue error".to_string())?;

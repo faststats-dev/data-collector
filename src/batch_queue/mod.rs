@@ -100,7 +100,7 @@ impl QueuedEvent {
             QueuedEvent::WebEvent { .. } => "web_events",
             QueuedEvent::ModsEvent { .. } => "mods_events",
             QueuedEvent::Error(_) => "errors",
-            QueuedEvent::ErrorTracking { .. } => "error_occurences",
+            QueuedEvent::ErrorTracking { .. } => "error_occurences_v2",
             QueuedEvent::WebVital { .. } => "web_vitals",
             QueuedEvent::Replay { .. } => "session_replays",
         }
@@ -1112,13 +1112,14 @@ mod tests {
                         session_id: None,
                         identity_key: None,
                         build_id: None,
+                        plugin_version: None,
                         context: None,
                         created_at: Utc::now(),
                     },
                     tracking: None,
                 }
                 .datasource(),
-                "error_occurences"
+                "error_occurences_v2"
             );
             assert_eq!(
                 QueuedEvent::WebVital {

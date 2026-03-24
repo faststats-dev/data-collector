@@ -72,6 +72,7 @@ pub async fn error(
             None,
             error,
             identity_key,
+            None,
             context.clone(),
             Some(tracking_ctx.clone()),
         )

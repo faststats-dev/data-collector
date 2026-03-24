@@ -520,6 +520,7 @@ pub async fn insert_error_entries(
     data_entry_id: Option<Uuid>,
     data: ErrorTracking,
     identity_key: Option<String>,
+    plugin_version: Option<String>,
     context: Option<String>,
     tracking_ctx: Option<TrackingContext>,
 ) -> Result<(), HandlerResponse> {
@@ -548,6 +549,7 @@ pub async fn insert_error_entries(
         session_id: data.session_id.clone(),
         identity_key,
         build_id: data.build_id.clone(),
+        plugin_version,
         context,
         created_at,
     };
@@ -628,6 +630,11 @@ async fn process_collect_request(
         organization_id: ctx.organization_id.as_deref().map(Into::into),
     };
 
+    let plugin_version = known
+        .get("plugin_version")
+        .and_then(|value| value.as_str())
+        .map(str::to_owned);
+
     let data_entry_id = insert_mods_event(
         batch_queue,
         ctx.project_id,
@@ -658,6 +665,7 @@ async fn process_collect_request(
                 Some(data_entry_id),
                 error,
                 identity_key,
+                plugin_version.clone(),
                 None,
                 Some(tracking_ctx.clone()),
             )
@@ -784,6 +792,7 @@ async fn process_web_request(
                 Some(data_entry_id),
                 error,
                 identity_key,
+                None,
                 None,
                 Some(tracking_ctx.clone()),
             )

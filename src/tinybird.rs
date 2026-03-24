@@ -83,6 +83,7 @@ pub struct ErrorTrackingRow {
     pub session_id: Option<String>,
     pub identity_key: Option<String>,
     pub build_id: Option<String>,
+    pub plugin_version: Option<String>,
     pub context: Option<String>,
     #[serde(with = "chrono::serde::ts_milliseconds")]
     pub created_at: DateTime<Utc>,
@@ -244,7 +245,7 @@ impl TinybirdClient {
         &self,
         rows: &[&ErrorTrackingRow],
     ) -> Result<(), TinybirdError> {
-        self.send_batch("error_occurences", rows).await
+        self.send_batch("error_occurences_v2", rows).await
     }
 
     pub async fn insert_web_vitals(&self, rows: &[&WebVitalRow]) -> Result<(), TinybirdError> {

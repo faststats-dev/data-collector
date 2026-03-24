@@ -95,6 +95,11 @@ pub async fn collect(
         organization_id: ctx.organization_id.as_deref().map(Into::into),
     };
 
+    let plugin_version = known
+        .get("plugin_version")
+        .and_then(|value| value.as_str())
+        .map(str::to_owned);
+
     let data_entry_id = match insert_mods_event(
         &state.batch_queue,
         ctx.project_id,
@@ -130,6 +135,7 @@ pub async fn collect(
                 Some(data_entry_id),
                 error,
                 identity_key,
+                plugin_version.clone(),
                 None,
                 Some(tracking_ctx.clone()),
             )

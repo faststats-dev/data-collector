@@ -1,8 +1,8 @@
 use super::{
-    EncodingQuery, WEB_EVENT_FIELDS, check_ip_allowed, decompress_body, error_response,
-    extract_known_fields, get_authorization, get_client_ip, get_country, get_request_origin,
-    insert_error_entries, insert_web_event, load_project_context, resolve_identity_key,
-    success_response, validate_hostname,
+    EncodingQuery, ErrorEntryParams, WEB_EVENT_FIELDS, build_web_error_entry_details,
+    check_ip_allowed, decompress_body, error_response, extract_known_fields, get_authorization,
+    get_client_ip, get_country, get_request_origin, insert_error_entries, insert_web_event,
+    load_project_context, resolve_identity_key, success_response, validate_hostname,
 };
 use crate::batch_queue::{FailedRequest, RequestType, TrackingContext};
 use crate::models::{AppState, ErrorTracking};
@@ -180,6 +180,12 @@ pub async fn web(
         organization_id: ctx.organization_id.as_deref().map(Into::into),
     };
     let fallback_identity = resolved_user_id.to_string();
+    let error_entry_details = build_web_error_entry_details(
+        session_id.as_deref(),
+        country.as_deref(),
+        &known,
+        &valid_custom,
+    );
 
     let data_entry_id = if is_debounced {
         None
@@ -217,10 +223,14 @@ pub async fn web(
             if let Err(e) = insert_error_entries(
                 &state.batch_queue,
                 ctx.project_id,
-                data_entry_id.unwrap_or_else(Uuid::new_v4),
+                data_entry_id,
                 error,
-                identity_key,
-                Some(tracking_ctx.clone()),
+                ErrorEntryParams {
+                    identity_key,
+                    context: None,
+                    details: error_entry_details.clone(),
+                    tracking_ctx: Some(tracking_ctx.clone()),
+                },
             )
             .await
             {

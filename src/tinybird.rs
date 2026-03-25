@@ -79,10 +79,27 @@ pub struct ErrorTrackingRow {
     pub hash: String,
     pub error_hash: String,
     pub count: u32,
-    pub data_entry_id: Uuid,
+    pub data_entry_id: Option<Uuid>,
     pub session_id: Option<String>,
     pub identity_key: Option<String>,
     pub build_id: Option<String>,
+    pub plugin_version: String,
+    pub source_kind: String,
+    pub entry_session_id: String,
+    pub entry_country: String,
+    pub entry_browser: String,
+    pub entry_device: String,
+    pub entry_os: String,
+    pub player_count: Option<f64>,
+    pub online_mode: Option<bool>,
+    pub minecraft_version: String,
+    pub server_type: String,
+    pub java_version: String,
+    pub os_version: String,
+    pub os_arch: String,
+    pub core_count: Option<f64>,
+    pub entry_data: String,
+    pub context: Option<String>,
     #[serde(with = "chrono::serde::ts_milliseconds")]
     pub created_at: DateTime<Utc>,
 }
@@ -243,7 +260,7 @@ impl TinybirdClient {
         &self,
         rows: &[&ErrorTrackingRow],
     ) -> Result<(), TinybirdError> {
-        self.send_batch("error_occurences", rows).await
+        self.send_batch("error_occurences_v2", rows).await
     }
 
     pub async fn insert_web_vitals(&self, rows: &[&WebVitalRow]) -> Result<(), TinybirdError> {

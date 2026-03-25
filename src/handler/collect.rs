@@ -1,7 +1,8 @@
 use super::{
-    MODS_EVENT_FIELDS, check_ip_allowed, error_response, extract_known_fields, get_authorization,
-    get_client_ip, get_country, insert_error_entries, insert_mods_event, load_project_context,
-    resolve_identity_key, success_response,
+    ErrorEntryParams, MODS_EVENT_FIELDS, build_mods_error_entry_details, check_ip_allowed,
+    error_response, extract_known_fields, get_authorization, get_client_ip, get_country,
+    insert_error_entries, insert_mods_event, load_project_context, resolve_identity_key,
+    success_response,
 };
 use crate::batch_queue::{FailedRequest, RequestType, TrackingContext};
 use crate::models::{AppState, Request};
@@ -95,6 +96,9 @@ pub async fn collect(
         organization_id: ctx.organization_id.as_deref().map(Into::into),
     };
 
+    let error_entry_details =
+        build_mods_error_entry_details(server_id, country.as_deref(), &known, &valid_custom);
+
     let data_entry_id = match insert_mods_event(
         &state.batch_queue,
         ctx.project_id,
@@ -127,10 +131,14 @@ pub async fn collect(
             if let Err(e) = insert_error_entries(
                 &state.batch_queue,
                 ctx.project_id,
-                data_entry_id,
+                Some(data_entry_id),
                 error,
-                identity_key,
-                Some(tracking_ctx.clone()),
+                ErrorEntryParams {
+                    identity_key,
+                    context: None,
+                    details: error_entry_details.clone(),
+                    tracking_ctx: Some(tracking_ctx.clone()),
+                },
             )
             .await
             {

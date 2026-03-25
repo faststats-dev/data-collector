@@ -138,6 +138,7 @@ async fn main() {
         .route("/v1/web", post(handler::web))
         .route("/v1/identify", post(handler::identify))
         .route("/v1/vitals", post(handler::vitals))
+        .route("/v1/error", post(handler::error))
         .route("/v1/replay", post(handler::replay))
         .layer(axum::middleware::from_fn(track_metrics))
         .layer(RequestDecompressionLayer::new())

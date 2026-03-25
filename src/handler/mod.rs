@@ -41,9 +41,39 @@ pub type HandlerResponse = (StatusCode, Json<Value>);
 
 pub struct ErrorEntryParams {
     pub identity_key: Option<String>,
-    pub plugin_version: Option<String>,
     pub context: Option<String>,
+    pub details: ErrorEntryDetails,
     pub tracking_ctx: Option<TrackingContext>,
+}
+
+#[derive(Clone, Default)]
+pub struct ErrorEntryDetails {
+    pub plugin_version: String,
+    pub source_kind: String,
+    pub entry_session_id: String,
+    pub entry_country: String,
+    pub entry_browser: String,
+    pub entry_device: String,
+    pub entry_os: String,
+    pub player_count: Option<f64>,
+    pub online_mode: Option<bool>,
+    pub minecraft_version: String,
+    pub server_type: String,
+    pub java_version: String,
+    pub os_version: String,
+    pub os_arch: String,
+    pub core_count: Option<f64>,
+    pub entry_data: String,
+}
+
+impl ErrorEntryDetails {
+    pub fn error_only() -> Self {
+        Self {
+            source_kind: "error".to_string(),
+            entry_data: "{}".to_string(),
+            ..Self::default()
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -352,6 +382,66 @@ fn to_custom_json(data: &HashMap<String, Value>) -> String {
     }
 }
 
+fn read_known_string(known: &HashMap<String, Value>, key: &str) -> String {
+    known
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_default()
+}
+
+fn read_known_f64(known: &HashMap<String, Value>, key: &str) -> Option<f64> {
+    known.get(key).and_then(Value::as_f64)
+}
+
+fn read_known_bool(known: &HashMap<String, Value>, key: &str) -> Option<bool> {
+    known.get(key).and_then(Value::as_bool)
+}
+
+pub fn build_web_error_entry_details(
+    session_id: Option<&str>,
+    country: Option<&str>,
+    known: &HashMap<String, Value>,
+    custom: &HashMap<String, Value>,
+) -> ErrorEntryDetails {
+    ErrorEntryDetails {
+        source_kind: "web-analytics".to_string(),
+        entry_session_id: session_id.unwrap_or_default().to_string(),
+        entry_country: country.unwrap_or_default().to_string(),
+        entry_browser: read_known_string(known, "browser"),
+        entry_device: read_known_string(known, "device"),
+        entry_os: read_known_string(known, "os"),
+        os_version: read_known_string(known, "os_version"),
+        entry_data: to_custom_json(custom),
+        ..ErrorEntryDetails::default()
+    }
+}
+
+pub fn build_mods_error_entry_details(
+    server_id: Uuid,
+    country: Option<&str>,
+    known: &HashMap<String, Value>,
+    custom: &HashMap<String, Value>,
+) -> ErrorEntryDetails {
+    ErrorEntryDetails {
+        plugin_version: read_known_string(known, "plugin_version"),
+        source_kind: "minecraft-plugin".to_string(),
+        entry_session_id: server_id.to_string(),
+        entry_country: country.unwrap_or_default().to_string(),
+        entry_os: read_known_string(known, "os_name"),
+        player_count: read_known_f64(known, "player_count"),
+        online_mode: read_known_bool(known, "online_mode"),
+        minecraft_version: read_known_string(known, "minecraft_version"),
+        server_type: read_known_string(known, "server_type"),
+        java_version: read_known_string(known, "java_version"),
+        os_version: read_known_string(known, "os_version"),
+        os_arch: read_known_string(known, "os_arch"),
+        core_count: read_known_f64(known, "core_count"),
+        entry_data: to_custom_json(custom),
+        ..ErrorEntryDetails::default()
+    }
+}
+
 /// Known internal fields for web_events row. These are extracted before
 /// datasource validation so they always reach the Tinybird row.
 const WEB_EVENT_FIELDS: &[&str] = &[
@@ -553,14 +643,29 @@ pub async fn insert_error_entries(
         session_id: data.session_id.clone(),
         identity_key: params.identity_key,
         build_id: data.build_id.clone(),
-        plugin_version: params.plugin_version,
+        plugin_version: params.details.plugin_version,
+        source_kind: params.details.source_kind,
+        entry_session_id: params.details.entry_session_id,
+        entry_country: params.details.entry_country,
+        entry_browser: params.details.entry_browser,
+        entry_device: params.details.entry_device,
+        entry_os: params.details.entry_os,
+        player_count: params.details.player_count,
+        online_mode: params.details.online_mode,
+        minecraft_version: params.details.minecraft_version,
+        server_type: params.details.server_type,
+        java_version: params.details.java_version,
+        os_version: params.details.os_version,
+        os_arch: params.details.os_arch,
+        core_count: params.details.core_count,
+        entry_data: params.details.entry_data,
         context: params.context,
         created_at,
     };
 
     batch_queue
         .queue_event(QueuedEvent::ErrorTracking {
-            row: error_tracking,
+            row: Box::new(error_tracking),
             tracking: params.tracking_ctx,
         })
         .await
@@ -634,10 +739,12 @@ async fn process_collect_request(
         organization_id: ctx.organization_id.as_deref().map(Into::into),
     };
 
-    let plugin_version = known
-        .get("plugin_version")
-        .and_then(|value| value.as_str())
-        .map(str::to_owned);
+    let error_entry_details = build_mods_error_entry_details(
+        server_id,
+        request.country.as_deref(),
+        &known,
+        &valid_custom,
+    );
 
     let data_entry_id = insert_mods_event(
         batch_queue,
@@ -670,8 +777,8 @@ async fn process_collect_request(
                 error,
                 ErrorEntryParams {
                     identity_key,
-                    plugin_version: plugin_version.clone(),
                     context: None,
+                    details: error_entry_details.clone(),
                     tracking_ctx: Some(tracking_ctx.clone()),
                 },
             )
@@ -765,6 +872,12 @@ async fn process_web_request(
         organization_id: ctx.organization_id.as_deref().map(Into::into),
     };
     let fallback_identity = resolved_user_id.to_string();
+    let error_entry_details = build_web_error_entry_details(
+        parsed.session_id.as_deref(),
+        request.country.as_deref(),
+        &known,
+        &valid_custom,
+    );
 
     let data_entry_id = insert_web_event(
         batch_queue,
@@ -799,8 +912,8 @@ async fn process_web_request(
                 error,
                 ErrorEntryParams {
                     identity_key,
-                    plugin_version: None,
                     context: None,
+                    details: error_entry_details.clone(),
                     tracking_ctx: Some(tracking_ctx.clone()),
                 },
             )

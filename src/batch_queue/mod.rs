@@ -78,7 +78,7 @@ pub enum QueuedEvent {
     },
     Error(ErrorRow),
     ErrorTracking {
-        row: ErrorTrackingRow,
+        row: Box<ErrorTrackingRow>,
         #[serde(skip_serializing_if = "Option::is_none")]
         tracking: Option<TrackingContext>,
     },
@@ -157,7 +157,7 @@ impl InMemoryBatch {
             QueuedEvent::ModsEvent { row, tracking } => self.mods_events.push((row, tracking)),
             QueuedEvent::Error(e) => self.errors.push(e),
             QueuedEvent::ErrorTracking { row, tracking } => {
-                self.error_trackings.push((row, tracking))
+                self.error_trackings.push((*row, tracking))
             }
             QueuedEvent::WebVital { row, tracking } => self.web_vitals.push((row, tracking)),
             QueuedEvent::Replay { row, tracking } => self.replays.push((row, tracking)),
@@ -180,11 +180,12 @@ impl InMemoryBatch {
                 .map(|(row, tracking)| QueuedEvent::ModsEvent { row, tracking }),
         );
         result.extend(self.errors.into_iter().map(QueuedEvent::Error));
-        result.extend(
-            self.error_trackings
-                .into_iter()
-                .map(|(row, tracking)| QueuedEvent::ErrorTracking { row, tracking }),
-        );
+        result.extend(self.error_trackings.into_iter().map(|(row, tracking)| {
+            QueuedEvent::ErrorTracking {
+                row: Box::new(row),
+                tracking,
+            }
+        }));
         result.extend(
             self.web_vitals
                 .into_iter()
@@ -1102,7 +1103,7 @@ mod tests {
             );
             assert_eq!(
                 QueuedEvent::ErrorTracking {
-                    row: ErrorTrackingRow {
+                    row: Box::new(ErrorTrackingRow {
                         id: Uuid::new_v4(),
                         project_id: Uuid::new_v4(),
                         hash: "hash".to_string(),
@@ -1112,10 +1113,25 @@ mod tests {
                         session_id: None,
                         identity_key: None,
                         build_id: None,
-                        plugin_version: None,
+                        plugin_version: String::new(),
+                        source_kind: "error".to_string(),
+                        entry_session_id: String::new(),
+                        entry_country: String::new(),
+                        entry_browser: String::new(),
+                        entry_device: String::new(),
+                        entry_os: String::new(),
+                        player_count: None,
+                        online_mode: None,
+                        minecraft_version: String::new(),
+                        server_type: String::new(),
+                        java_version: String::new(),
+                        os_version: String::new(),
+                        os_arch: String::new(),
+                        core_count: None,
+                        entry_data: "{}".to_string(),
                         context: None,
                         created_at: Utc::now(),
-                    },
+                    }),
                     tracking: None,
                 }
                 .datasource(),

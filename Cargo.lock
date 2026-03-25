@@ -1184,9 +1184,9 @@ dependencies = [
 
 [[package]]
 name = "itertools"
-version = "0.13.0"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "413ee7dfc52ee1a4949ceeb7dbc8a33f2d6c088194d9f922fb8318faf1f01186"
+checksum = "2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285"
 dependencies = [
  "either",
 ]
@@ -1446,12 +1446,6 @@ dependencies = [
  "tagptr",
  "uuid",
 ]
-
-[[package]]
-name = "nohash"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a0f889fb66f7acdf83442c35775764b51fed3c606ab9cee51500dbde2cf528ca"
 
 [[package]]
 name = "nu-ansi-term"
@@ -1881,14 +1875,12 @@ dependencies = [
 
 [[package]]
 name = "regex-filtered"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4c11639076bf147be211b90e47790db89f4c22b6c8a9ca6e960833869da67166"
+checksum = "ac5f7b31fbef748cc46643c1f9ba17f6d5c7c6f0ba5e372fc9c48d31ad1c8612"
 dependencies = [
  "aho-corasick",
- "indexmap",
  "itertools",
- "nohash",
  "regex",
  "regex-syntax",
 ]
@@ -2910,9 +2902,9 @@ checksum = "562d481066bde0658276a35467c4af00bdc6ee726305698a55b86e61d7ad82bb"
 
 [[package]]
 name = "ua-parser"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c06b979bd5606d182759ff9cd3dda2b034b584a1ed41116407cb92abf3c995a"
+checksum = "f01b7ba339f8874b643216c6c957d792047143abe848568131e5d91d2ae2ada1"
 dependencies = [
  "regex",
  "regex-filtered",

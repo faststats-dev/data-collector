@@ -44,6 +44,7 @@ pub struct ErrorTracking {
     pub session_id: Option<String>,
     #[serde(default, rename = "buildId")]
     pub build_id: Option<String>,
+    pub handled: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -116,6 +117,21 @@ mod tests {
         let errors = req.errors.unwrap();
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].error.error, "Error");
+        assert_eq!(errors[0].handled, None);
         assert_eq!(req.session_id, Some("mkqsr2zu-rhhe8v3j".to_string()));
+    }
+
+    #[test]
+    fn test_error_tracking_handled_parsing() {
+        let json = r#"{
+            "hash": "err_3d39cc9f28fb81e8b7064481c7deb8c0bb349cb0877558cc73b677c1fb9a704d",
+            "error": "Error",
+            "message": "Uncaught Error: Render error",
+            "handled": true
+        }"#;
+
+        let result = serde_json::from_str::<ErrorTracking>(json);
+        assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+        assert_eq!(result.unwrap().handled, Some(true));
     }
 }

@@ -100,6 +100,8 @@ pub struct ErrorTrackingRow {
     pub core_count: Option<f64>,
     pub entry_data: String,
     pub context: Option<String>,
+    #[serde(default)]
+    pub handled: bool,
     #[serde(with = "chrono::serde::ts_milliseconds")]
     pub created_at: DateTime<Utc>,
 }

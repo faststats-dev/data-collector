@@ -660,6 +660,7 @@ pub async fn insert_error_entries(
         core_count: params.details.core_count,
         entry_data: params.details.entry_data,
         context: params.context,
+        handled: data.handled,
         created_at,
     };
 

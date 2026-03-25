@@ -44,8 +44,7 @@ pub struct ErrorTracking {
     pub session_id: Option<String>,
     #[serde(default, rename = "buildId")]
     pub build_id: Option<String>,
-    #[serde(default)]
-    pub handled: bool,
+    pub handled: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -118,7 +117,7 @@ mod tests {
         let errors = req.errors.unwrap();
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].error.error, "Error");
-        assert!(!errors[0].handled);
+        assert_eq!(errors[0].handled, None);
         assert_eq!(req.session_id, Some("mkqsr2zu-rhhe8v3j".to_string()));
     }
 
@@ -133,6 +132,6 @@ mod tests {
 
         let result = serde_json::from_str::<ErrorTracking>(json);
         assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
-        assert!(result.unwrap().handled);
+        assert_eq!(result.unwrap().handled, Some(true));
     }
 }

@@ -1130,7 +1130,7 @@ mod tests {
                         core_count: None,
                         entry_data: "{}".to_string(),
                         context: None,
-                        handled: false,
+                        handled: None,
                         created_at: Utc::now(),
                     }),
                     tracking: None,

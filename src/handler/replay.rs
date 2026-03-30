@@ -17,17 +17,38 @@ use std::collections::HashMap;
 use tracing::{error, warn};
 use uuid::Uuid;
 
-fn is_valid_rrweb_event(event: &Value) -> bool {
-    let obj = match event.as_object() {
-        Some(o) => o,
-        None => return false,
-    };
+fn rrweb_timestamp_ms(value: &Value) -> Option<u64> {
+    let v = value.get("timestamp")?;
+    if let Some(u) = v.as_u64() {
+        return Some(u);
+    }
+    if let Some(i) = v.as_i64() {
+        return u64::try_from(i).ok();
+    }
+    let f = v.as_f64()?;
+    if f.is_finite() && f >= 0.0 {
+        Some(f.round() as u64)
+    } else {
+        None
+    }
+}
 
-    if obj.get("timestamp").and_then(|v| v.as_u64()).is_none() {
+fn rrweb_event_type(value: &Value) -> Option<u64> {
+    let v = value.get("type")?;
+    v.as_u64()
+        .or_else(|| v.as_i64().and_then(|i| u64::try_from(i).ok()))
+}
+
+fn is_valid_rrweb_event(event: &Value) -> bool {
+    if !event.is_object() {
         return false;
     }
 
-    matches!(obj.get("type").and_then(|v| v.as_u64()), Some(t) if t <= 6)
+    if rrweb_timestamp_ms(event).is_none() {
+        return false;
+    }
+
+    matches!(rrweb_event_type(event), Some(t) if t <= 32)
 }
 
 #[derive(Debug, Deserialize)]

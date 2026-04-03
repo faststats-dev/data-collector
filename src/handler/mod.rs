@@ -383,6 +383,34 @@ fn to_custom_json(data: &HashMap<String, Value>) -> String {
     }
 }
 
+fn build_web_entry_data(
+    session_id: Option<&str>,
+    country: Option<&str>,
+    known: &HashMap<String, Value>,
+    custom: &HashMap<String, Value>,
+) -> String {
+    let mut data = serde_json::Map::with_capacity(known.len() + custom.len() + 2);
+
+    for (key, value) in known {
+        data.insert(key.clone(), value.clone());
+    }
+
+    data.insert(
+        "session_id".to_string(),
+        Value::String(session_id.unwrap_or_default().to_string()),
+    );
+    data.insert(
+        "country".to_string(),
+        Value::String(country.unwrap_or_default().to_string()),
+    );
+
+    for (key, value) in custom {
+        data.insert(key.clone(), value.clone());
+    }
+
+    serde_json::to_string(&data).unwrap_or_else(|_| "{}".to_string())
+}
+
 fn read_known_string(known: &HashMap<String, Value>, key: &str) -> String {
     known
         .get(key)
@@ -413,7 +441,7 @@ pub fn build_web_error_entry_details(
         entry_device: read_known_string(known, "device"),
         entry_os: read_known_string(known, "os"),
         os_version: read_known_string(known, "os_version"),
-        entry_data: to_custom_json(custom),
+        entry_data: build_web_entry_data(session_id, country, known, custom),
         ..ErrorEntryDetails::default()
     }
 }

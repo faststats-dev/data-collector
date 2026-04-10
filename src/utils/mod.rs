@@ -8,7 +8,11 @@ pub fn sha256_hex(parts: &[&[u8]]) -> String {
     for part in parts {
         hasher.update(part);
     }
-    hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect()
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect()
 }
 
 pub fn hash_to_uuid(hash: &str) -> Uuid {

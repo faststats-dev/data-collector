@@ -1131,6 +1131,7 @@ mod tests {
                         os_arch: String::new(),
                         core_count: None,
                         entry_data: "{}".to_string(),
+                        stack_placeholders: "{}".to_string(),
                         context: None,
                         handled: None,
                         created_at: Utc::now(),

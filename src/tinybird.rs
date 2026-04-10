@@ -101,6 +101,7 @@ pub struct ErrorTrackingRow {
     pub os_arch: String,
     pub core_count: Option<f64>,
     pub entry_data: String,
+    pub stack_placeholders: String,
     pub context: Option<String>,
     pub handled: Option<bool>,
     #[serde(with = "chrono::serde::ts_milliseconds")]

@@ -1,7 +1,7 @@
 use super::{
-    ErrorEntryDetails, ErrorEntryParams, check_ip_allowed, error_response, get_authorization,
-    get_client_ip, insert_error_entries, load_project_context, resolve_identity_key,
-    success_response,
+    ErrorEntryDetails, ErrorEntryParams, ErrorStackProcessing, check_ip_allowed, error_response,
+    get_authorization, get_client_ip, insert_error_entries, load_project_context,
+    resolve_identity_key, success_response,
 };
 use crate::batch_queue::TrackingContext;
 use crate::models::{AppState, ErrorTracking};
@@ -77,6 +77,7 @@ pub async fn error(
                 context: context.clone(),
                 details: ErrorEntryDetails::error_only(),
                 tracking_ctx: Some(tracking_ctx.clone()),
+                stack_processing: ErrorStackProcessing::Raw,
             },
         )
         .await

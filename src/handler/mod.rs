@@ -1,6 +1,7 @@
 mod collect;
 mod error;
 mod identify;
+mod java_stack_parameterization;
 mod replay;
 mod vitals;
 mod web;
@@ -12,6 +13,7 @@ pub use replay::replay;
 pub use vitals::vitals;
 pub use web::web;
 
+use self::java_stack_parameterization::build_parameterized_error_rows;
 use crate::batch_queue::{BatchQueue, FailedRequest, QueuedEvent, RequestType, TrackingContext};
 use crate::models::{DataSource, Error, ErrorTracking};
 use crate::tinybird::{ErrorRow, ErrorTrackingRow, ModsEventRow, WebEventRow};
@@ -39,11 +41,19 @@ static PROJECT_CACHE: LazyLock<Cache<String, Arc<ProjectContext>>> = LazyLock::n
 
 pub type HandlerResponse = (StatusCode, Json<Value>);
 
+#[derive(Clone, Copy, Debug, Default)]
+pub enum ErrorStackProcessing {
+    #[default]
+    Raw,
+    JavaCollect,
+}
+
 pub struct ErrorEntryParams {
     pub identity_key: Option<String>,
     pub context: Option<String>,
     pub details: ErrorEntryDetails,
     pub tracking_ctx: Option<TrackingContext>,
+    pub stack_processing: ErrorStackProcessing,
 }
 
 #[derive(Clone, Default)]
@@ -650,8 +660,21 @@ pub async fn insert_error_entries(
     data: ErrorTracking,
     params: ErrorEntryParams,
 ) -> Result<(), HandlerResponse> {
-    let mut error_rows = Vec::new();
-    let error_hash = build_error_rows(&data.error, &mut error_rows);
+    let (error_hash, error_rows, stack_placeholders) = match params.stack_processing {
+        ErrorStackProcessing::Raw => {
+            let mut error_rows = Vec::new();
+            let error_hash = build_error_rows(&data.error, &mut error_rows);
+            (error_hash, error_rows, "{}".to_string())
+        }
+        ErrorStackProcessing::JavaCollect => {
+            let parameterized = build_parameterized_error_rows(&data.error);
+            (
+                parameterized.error_hash,
+                parameterized.rows,
+                parameterized.stack_placeholders,
+            )
+        }
+    };
 
     for error_row in error_rows {
         batch_queue
@@ -692,6 +715,7 @@ pub async fn insert_error_entries(
         os_arch: params.details.os_arch,
         core_count: params.details.core_count,
         entry_data: params.details.entry_data,
+        stack_placeholders,
         context: params.context,
         handled: data.handled,
         created_at,
@@ -814,6 +838,7 @@ async fn process_collect_request(
                     context: None,
                     details: error_entry_details.clone(),
                     tracking_ctx: Some(tracking_ctx.clone()),
+                    stack_processing: ErrorStackProcessing::JavaCollect,
                 },
             )
             .await
@@ -949,6 +974,7 @@ async fn process_web_request(
                     context: None,
                     details: error_entry_details.clone(),
                     tracking_ctx: Some(tracking_ctx.clone()),
+                    stack_processing: ErrorStackProcessing::Raw,
                 },
             )
             .await

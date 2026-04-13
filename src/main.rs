@@ -128,6 +128,7 @@ async fn main() {
         .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
         .allow_headers([
             HeaderName::from_static("content-type"),
+            HeaderName::from_static("content-encoding"),
             HeaderName::from_static("authorization"),
         ])
         .allow_credentials(true);

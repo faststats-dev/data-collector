@@ -1172,6 +1172,7 @@ mod tests {
                         session_id: "session".to_string(),
                         identifier: Some(Uuid::new_v4().to_string()),
                         events: "[]".to_string(),
+                        has_full_snapshot: 0,
                         created_at: Utc::now(),
                     },
                     tracking: None,

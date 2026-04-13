@@ -134,6 +134,7 @@ pub struct ReplayRow {
     pub session_id: String,
     pub identifier: Option<String>,
     pub events: String,
+    pub has_full_snapshot: u8,
     #[serde(with = "chrono::serde::ts_milliseconds")]
     pub created_at: DateTime<Utc>,
 }

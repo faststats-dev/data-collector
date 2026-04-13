@@ -17,6 +17,8 @@ use std::collections::HashMap;
 use tracing::{error, warn};
 use uuid::Uuid;
 
+const RRWEB_FULL_SNAPSHOT_TYPE: u64 = 2;
+
 fn rrweb_timestamp_ms(value: &Value) -> Option<u64> {
     let v = value.get("timestamp")?;
     if let Some(u) = v.as_u64() {
@@ -49,6 +51,10 @@ fn is_valid_rrweb_event(event: &Value) -> bool {
     }
 
     matches!(rrweb_event_type(event), Some(t) if t <= 32)
+}
+
+fn is_full_snapshot_event(event: &Value) -> bool {
+    rrweb_event_type(event) == Some(RRWEB_FULL_SNAPSHOT_TYPE)
 }
 
 #[derive(Debug, Deserialize)]
@@ -152,6 +158,8 @@ pub async fn replay(
         return error_response(StatusCode::BAD_REQUEST, "No valid events");
     }
 
+    let has_full_snapshot = u8::from(valid_events.iter().any(is_full_snapshot_event));
+
     let events_json = match serde_json::to_string(&valid_events) {
         Ok(json) => json,
         Err(_) => {
@@ -174,6 +182,7 @@ pub async fn replay(
         session_id,
         identifier: Some(server_id.to_string()),
         events: events_json,
+        has_full_snapshot,
         created_at: chrono::Utc::now(),
     };
 

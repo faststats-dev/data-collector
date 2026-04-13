@@ -1060,6 +1060,19 @@ async fn process_vitals_request(
     Ok(())
 }
 
+const RRWEB_FULL_SNAPSHOT_TYPE: u64 = 2;
+
+fn is_replay_full_snapshot_event(event: &Value) -> bool {
+    let Some(value) = event.get("type") else {
+        return false;
+    };
+
+    value
+        .as_u64()
+        .or_else(|| value.as_i64().and_then(|i| u64::try_from(i).ok()))
+        == Some(RRWEB_FULL_SNAPSHOT_TYPE)
+}
+
 async fn process_replay_request(
     batch_queue: &BatchQueue,
     pool: &sqlx::PgPool,
@@ -1083,6 +1096,7 @@ async fn process_replay_request(
         .await
         .map_err(|_| "Unauthorized or database error")?;
 
+    let has_full_snapshot = u8::from(events.iter().any(is_replay_full_snapshot_event));
     let events_json = serde_json::to_string(&events).map_err(|_| "Failed to serialize events")?;
     let server_id = if ctx.cookieless_mode {
         let ip = request.client_ip.as_deref().unwrap_or("");
@@ -1105,6 +1119,7 @@ async fn process_replay_request(
         session_id,
         identifier: Some(server_id.to_string()),
         events: events_json,
+        has_full_snapshot,
         created_at: chrono::Utc::now(),
     };
 

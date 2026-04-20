@@ -3,6 +3,7 @@ mod error;
 mod identify;
 mod java_stack_parameterization;
 mod replay;
+mod server_web;
 mod vitals;
 mod web;
 
@@ -10,6 +11,7 @@ pub use collect::collect;
 pub use error::error;
 pub use identify::identify;
 pub use replay::replay;
+pub use server_web::server_web;
 pub use vitals::vitals;
 pub use web::web;
 
@@ -759,6 +761,9 @@ pub async fn process_failed_request(
     match request.request_type {
         RequestType::Collect => process_collect_request(batch_queue, pool, request).await,
         RequestType::Web => process_web_request(batch_queue, pool, request).await,
+        RequestType::ServerWeb => {
+            server_web::process_server_web_request(batch_queue, pool, request).await
+        }
         RequestType::Vitals => process_vitals_request(batch_queue, pool, request).await,
         RequestType::Replay => process_replay_request(batch_queue, pool, request).await,
     }

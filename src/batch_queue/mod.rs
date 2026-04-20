@@ -39,6 +39,7 @@ pub type AggregatedUsage = HashMap<Arc<str>, OwnerUsage>;
 pub enum RequestType {
     Collect,
     Web,
+    ServerWeb,
     Vitals,
     Replay,
 }

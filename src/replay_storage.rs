@@ -82,12 +82,6 @@ impl From<sqlx::Error> for ReplayStorageError {
 }
 
 #[derive(sqlx::FromRow)]
-struct ReplaySessionSummary {
-    actual_started_at_ms: Option<i64>,
-    actual_ended_at_ms: Option<i64>,
-}
-
-#[derive(sqlx::FromRow)]
 struct ReplayFilterMetadata {
     browser: Option<String>,
     country: Option<String>,
@@ -217,38 +211,7 @@ impl ReplayStorage {
             .fetch_optional(&mut *tx)
             .await?;
 
-            let existing_session = sqlx::query_as::<_, ReplaySessionSummary>(
-                r#"
-                SELECT actual_started_at_ms, actual_ended_at_ms
-                FROM replay_sessions
-                WHERE project_id = $1 AND session_id = $2
-                FOR UPDATE
-                "#,
-            )
-            .bind(input.project_id)
-            .bind(&input.session_id)
-            .fetch_optional(&mut *tx)
-            .await?;
-
-            let next_actual_started_at_ms = match (
-                existing_session.as_ref().and_then(|row| row.actual_started_at_ms),
-                first_event_timestamp_ms,
-            ) {
-                (Some(existing), Some(next)) => Some(existing.min(next)),
-                (Some(existing), None) => Some(existing),
-                (None, Some(next)) => Some(next),
-                (None, None) => None,
-            };
-            let next_actual_ended_at_ms = match (
-                existing_session.as_ref().and_then(|row| row.actual_ended_at_ms),
-                last_event_timestamp_ms,
-            ) {
-                (Some(existing), Some(next)) => Some(existing.max(next)),
-                (Some(existing), None) => Some(existing),
-                (None, Some(next)) => Some(next),
-                (None, None) => None,
-            };
-            let next_actual_duration_ms = match (next_actual_started_at_ms, next_actual_ended_at_ms)
+            let initial_actual_duration_ms = match (first_event_timestamp_ms, last_event_timestamp_ms)
             {
                 (Some(started_at_ms), Some(ended_at_ms)) if ended_at_ms >= started_at_ms => {
                     Some(ended_at_ms - started_at_ms)
@@ -256,84 +219,108 @@ impl ReplayStorage {
                 _ => None,
             };
 
-            if existing_session.is_some() {
-                sqlx::query(
-                    r#"
-                    UPDATE replay_sessions
-                    SET
-                        identifier = COALESCE($3, identifier),
-                        ended_at = GREATEST(ended_at, NOW()),
-                        actual_started_at_ms = $4,
-                        actual_ended_at_ms = $5,
-                        actual_duration_ms = $6,
-                        event_count = event_count + $7,
-                        snapshot_count = snapshot_count + 1,
-                        total_bytes = total_bytes + $8,
-                        has_full_snapshot = has_full_snapshot OR $9,
-                        browser = COALESCE($10, browser),
-                        country = COALESCE($11, country),
-                        os = COALESCE($12, os),
-                        updated_at = NOW()
-                    WHERE project_id = $1 AND session_id = $2
-                    "#,
+            sqlx::query(
+                r#"
+                INSERT INTO replay_sessions (
+                    id,
+                    project_id,
+                    session_id,
+                    identifier,
+                    started_at,
+                    ended_at,
+                    actual_started_at_ms,
+                    actual_ended_at_ms,
+                    actual_duration_ms,
+                    event_count,
+                    snapshot_count,
+                    total_bytes,
+                    has_full_snapshot,
+                    browser,
+                    country,
+                    os,
+                    has_errors,
+                    has_poor_vitals
+                ) VALUES (
+                    $1, $2, $3, $4, NOW(), NOW(), $5, $6, $7, $8, 1, $9, $10, $11, $12, $13, false, false
                 )
-                .bind(input.project_id)
-                .bind(&input.session_id)
-                .bind(&input.identifier)
-                .bind(next_actual_started_at_ms)
-                .bind(next_actual_ended_at_ms)
-                .bind(next_actual_duration_ms)
-                .bind(event_count)
-                .bind(compressed_bytes)
-                .bind(has_full_snapshot)
-                .bind(latest_filter_metadata.as_ref().and_then(|row| row.browser.as_deref()))
-                .bind(latest_filter_metadata.as_ref().and_then(|row| row.country.as_deref()))
-                .bind(latest_filter_metadata.as_ref().and_then(|row| row.os.as_deref()))
-                .execute(&mut *tx)
-                .await?;
-            } else {
-                sqlx::query(
-                    r#"
-                    INSERT INTO replay_sessions (
-                        id,
-                        project_id,
-                        session_id,
-                        identifier,
-                        started_at,
-                        ended_at,
-                        actual_started_at_ms,
-                        actual_ended_at_ms,
-                        actual_duration_ms,
-                        event_count,
-                        snapshot_count,
-                        total_bytes,
-                        has_full_snapshot,
-                        browser,
-                        country,
-                        os,
-                        has_errors,
-                        has_poor_vitals
-                    ) VALUES (
-                        $1, $2, $3, $4, NOW(), NOW(), $5, $6, $7, $8, 1, $9, $10, $11, $12, $13, false, false
-                    )
-                    "#,
-                )
-                .bind(Uuid::new_v4())
-                .bind(input.project_id)
-                .bind(&input.session_id)
-                .bind(&input.identifier)
-                .bind(next_actual_started_at_ms)
-                .bind(next_actual_ended_at_ms)
-                .bind(next_actual_duration_ms)
-                .bind(event_count)
-                .bind(compressed_bytes)
-                .bind(has_full_snapshot)
-                .bind(latest_filter_metadata.as_ref().and_then(|row| row.browser.as_deref()))
-                .bind(latest_filter_metadata.as_ref().and_then(|row| row.country.as_deref()))
-                .bind(latest_filter_metadata.as_ref().and_then(|row| row.os.as_deref()))
-                .execute(&mut *tx)
-                .await?;
-            }
+                ON CONFLICT (project_id, session_id) DO UPDATE
+                SET
+                    identifier = COALESCE(EXCLUDED.identifier, replay_sessions.identifier),
+                    ended_at = GREATEST(replay_sessions.ended_at, EXCLUDED.ended_at),
+                    actual_started_at_ms = COALESCE(
+                        LEAST(
+                            replay_sessions.actual_started_at_ms,
+                            EXCLUDED.actual_started_at_ms
+                        ),
+                        replay_sessions.actual_started_at_ms,
+                        EXCLUDED.actual_started_at_ms
+                    ),
+                    actual_ended_at_ms = COALESCE(
+                        GREATEST(
+                            replay_sessions.actual_ended_at_ms,
+                            EXCLUDED.actual_ended_at_ms
+                        ),
+                        replay_sessions.actual_ended_at_ms,
+                        EXCLUDED.actual_ended_at_ms
+                    ),
+                    actual_duration_ms = CASE
+                        WHEN COALESCE(
+                            GREATEST(
+                                replay_sessions.actual_ended_at_ms,
+                                EXCLUDED.actual_ended_at_ms
+                            ),
+                            replay_sessions.actual_ended_at_ms,
+                            EXCLUDED.actual_ended_at_ms
+                        ) >= COALESCE(
+                            LEAST(
+                                replay_sessions.actual_started_at_ms,
+                                EXCLUDED.actual_started_at_ms
+                            ),
+                            replay_sessions.actual_started_at_ms,
+                            EXCLUDED.actual_started_at_ms
+                        )
+                        THEN COALESCE(
+                            GREATEST(
+                                replay_sessions.actual_ended_at_ms,
+                                EXCLUDED.actual_ended_at_ms
+                            ),
+                            replay_sessions.actual_ended_at_ms,
+                            EXCLUDED.actual_ended_at_ms
+                        ) - COALESCE(
+                            LEAST(
+                                replay_sessions.actual_started_at_ms,
+                                EXCLUDED.actual_started_at_ms
+                            ),
+                            replay_sessions.actual_started_at_ms,
+                            EXCLUDED.actual_started_at_ms
+                        )
+                        ELSE NULL
+                    END,
+                    event_count = replay_sessions.event_count + EXCLUDED.event_count,
+                    snapshot_count = replay_sessions.snapshot_count + EXCLUDED.snapshot_count,
+                    total_bytes = replay_sessions.total_bytes + EXCLUDED.total_bytes,
+                    has_full_snapshot = replay_sessions.has_full_snapshot OR EXCLUDED.has_full_snapshot,
+                    browser = COALESCE(EXCLUDED.browser, replay_sessions.browser),
+                    country = COALESCE(EXCLUDED.country, replay_sessions.country),
+                    os = COALESCE(EXCLUDED.os, replay_sessions.os),
+                    updated_at = NOW()
+                "#,
+            )
+            .bind(Uuid::new_v4())
+            .bind(input.project_id)
+            .bind(&input.session_id)
+            .bind(&input.identifier)
+            .bind(first_event_timestamp_ms)
+            .bind(last_event_timestamp_ms)
+            .bind(initial_actual_duration_ms)
+            .bind(event_count)
+            .bind(compressed_bytes)
+            .bind(has_full_snapshot)
+            .bind(latest_filter_metadata.as_ref().and_then(|row| row.browser.as_deref()))
+            .bind(latest_filter_metadata.as_ref().and_then(|row| row.country.as_deref()))
+            .bind(latest_filter_metadata.as_ref().and_then(|row| row.os.as_deref()))
+            .execute(&mut *tx)
+            .await?;
 
             tx.commit().await?;
             Ok::<(), sqlx::Error>(())

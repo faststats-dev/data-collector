@@ -27,6 +27,7 @@ metrics = "0.24"
 metrics-exporter-prometheus = "0.18"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+aws-sdk-s3 = { version = "1.107.0", features = ["behavior-version-latest"] }
 
 [dev-dependencies]
 tempfile = "3"

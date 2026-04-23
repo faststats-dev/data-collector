@@ -16,7 +16,7 @@ use axum::response::IntoResponse;
 use serde_json::Value;
 use sqlx::types::Uuid;
 use std::collections::HashMap;
-use tracing::error;
+use tracing::{error, warn};
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -187,6 +187,39 @@ pub async fn web(
         &known,
         &valid_custom,
     );
+    let replay_browser = known
+        .get("browser")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    let replay_os = known
+        .get("os")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    let replay_url = known
+        .get("url")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+
+    if let Some(session_id) = session_id.as_deref()
+        && let Some(replay_storage) = state.replay_storage.as_deref()
+        && let Err(error) = replay_storage
+            .record_filter_event(
+                &state.pool,
+                crate::replay_storage::ReplayFilterEventInput {
+                    project_id: ctx.project_id,
+                    session_id,
+                    identifier: Some(fallback_identity.as_str()),
+                    browser: replay_browser.as_deref(),
+                    os: replay_os.as_deref(),
+                    country: country.as_deref(),
+                    url: replay_url.as_deref(),
+                    custom: &valid_custom,
+                },
+            )
+            .await
+    {
+        warn!("Failed to persist replay filter metadata: {}", error);
+    }
 
     let data_entry_id = if is_debounced {
         None
@@ -238,6 +271,15 @@ pub async fn web(
             {
                 return e;
             }
+        }
+
+        if let Some(session_id) = session_id.as_deref()
+            && let Some(replay_storage) = state.replay_storage.as_deref()
+            && let Err(error) = replay_storage
+                .mark_session_error(&state.pool, ctx.project_id, session_id)
+                .await
+        {
+            warn!("Failed to persist replay error flag: {}", error);
         }
     }
 

@@ -12,6 +12,7 @@ use axum::response::IntoResponse;
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
+use tracing::warn;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -66,6 +67,7 @@ pub async fn error(
         if error.build_id.is_none() {
             error.build_id = payload.build_id.clone();
         }
+        let replay_session_id = error.session_id.clone();
         let identity_key = resolve_identity_key(error.session_id.as_deref(), None);
         if let Err(e) = insert_error_entries(
             &state.batch_queue,
@@ -83,6 +85,15 @@ pub async fn error(
         .await
         {
             return e;
+        }
+
+        if let Some(session_id) = replay_session_id.as_deref()
+            && let Some(replay_storage) = state.replay_storage.as_deref()
+            && let Err(err) = replay_storage
+                .mark_session_error(&state.pool, ctx.project_id, session_id)
+                .await
+        {
+            warn!("Failed to persist replay error flag: {}", err);
         }
     }
 

@@ -24,6 +24,7 @@ mod batch_queue;
 mod handler;
 mod models;
 mod polar;
+mod replay_storage;
 mod tinybird;
 pub mod ua_parser;
 mod utils;
@@ -99,6 +100,19 @@ async fn main() {
 
     let batch_queue =
         batch_queue::BatchQueue::new(Arc::clone(&tinybird_client), polar_client, &backup_path);
+    let replay_storage = match replay_storage::ReplayStorage::from_env() {
+        Ok(Some(storage)) => {
+            info!("Replay object storage enabled");
+            Some(Arc::new(storage))
+        }
+        Ok(None) => {
+            warn!("Replay object storage is not configured; replay ingestion is disabled");
+            None
+        }
+        Err(error) => {
+            panic!("Invalid replay storage configuration: {}", error);
+        }
+    };
 
     let recorder_handle = setup_metrics_recorder();
 
@@ -119,9 +133,10 @@ async fn main() {
     let state = models::AppState {
         pool: pool.clone(),
         batch_queue: Arc::clone(&batch_queue),
+        replay_storage: replay_storage.clone(),
     };
 
-    start_failed_request_replayer(pool, Arc::clone(&batch_queue));
+    start_failed_request_replayer(pool, Arc::clone(&batch_queue), replay_storage);
 
     let cors = CorsLayer::new()
         .allow_origin(AllowOrigin::mirror_request())
@@ -187,13 +202,19 @@ async fn main() {
     info!("Shutdown complete");
 }
 
-fn start_failed_request_replayer(pool: sqlx::PgPool, batch_queue: Arc<batch_queue::BatchQueue>) {
+fn start_failed_request_replayer(
+    pool: sqlx::PgPool,
+    batch_queue: Arc<batch_queue::BatchQueue>,
+    replay_storage: Option<Arc<replay_storage::ReplayStorage>>,
+) {
     tokio::spawn(async move {
         let replay_interval = std::time::Duration::from_secs(60);
 
         loop {
             tokio::time::sleep(replay_interval).await;
-            batch_queue.replay_failed_requests(&pool).await;
+            batch_queue
+                .replay_failed_requests(&pool, replay_storage.as_deref())
+                .await;
         }
     });
 }

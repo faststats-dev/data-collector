@@ -2,9 +2,8 @@ use super::{
     EncodingQuery, check_ip_allowed, decompress_body, error_response, get_client_ip,
     load_project_context, success_response,
 };
-use crate::batch_queue::{FailedRequest, QueuedEvent, RequestType, TrackingContext};
+use crate::batch_queue::{FailedRequest, RequestType, TrackingContext};
 use crate::models::AppState;
-use crate::tinybird::ReplayRow;
 use axum::body::Bytes;
 use axum::extract::{Query, State};
 use axum::http::HeaderMap;
@@ -15,9 +14,6 @@ use serde_json::Value;
 use sqlx::types::Uuid as SqlxUuid;
 use std::collections::HashMap;
 use tracing::{error, warn};
-use uuid::Uuid;
-
-const RRWEB_FULL_SNAPSHOT_TYPE: u64 = 2;
 
 fn rrweb_timestamp_ms(value: &Value) -> Option<u64> {
     let v = value.get("timestamp")?;
@@ -53,20 +49,14 @@ fn is_valid_rrweb_event(event: &Value) -> bool {
     matches!(rrweb_event_type(event), Some(t) if t <= 32)
 }
 
-fn is_full_snapshot_event(event: &Value) -> bool {
-    rrweb_event_type(event) == Some(RRWEB_FULL_SNAPSHOT_TYPE)
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ReplayRequest {
     pub(crate) token: String,
     pub(crate) session_id: String,
-    #[allow(dead_code)]
     pub(crate) sequence: u32,
     #[allow(dead_code)]
     pub(crate) timestamp: u64,
-    #[allow(dead_code)]
     pub(crate) url: String,
     #[serde(default, alias = "anonymousId")]
     pub(crate) identifier: Option<SqlxUuid>,
@@ -98,9 +88,9 @@ pub async fn replay(
     let ReplayRequest {
         token,
         session_id,
-        sequence: _,
+        sequence,
         timestamp: _,
-        url: _,
+        url,
         identifier,
         events,
     } = parsed;
@@ -112,13 +102,21 @@ pub async fn replay(
                 return e;
             }
 
+            let client_ip = get_client_ip(&headers);
             let failed = FailedRequest {
                 request_type: RequestType::Replay,
                 token: token.clone(),
                 body: body.to_vec(),
                 country: None,
-                client_ip: None,
-                user_agent: None,
+                client_ip: if client_ip.is_empty() {
+                    None
+                } else {
+                    Some(client_ip.to_string())
+                },
+                user_agent: headers
+                    .get("User-Agent")
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_string),
                 origin: None,
             };
 
@@ -158,16 +156,11 @@ pub async fn replay(
         return error_response(StatusCode::BAD_REQUEST, "No valid events");
     }
 
-    let has_full_snapshot = u8::from(valid_events.iter().any(is_full_snapshot_event));
-
-    let events_json = match serde_json::to_string(&valid_events) {
-        Ok(json) => json,
-        Err(_) => {
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to serialize events",
-            );
-        }
+    let Some(replay_storage) = state.replay_storage.as_deref() else {
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Replay storage is not configured",
+        );
     };
 
     let tracking_ctx = TrackingContext {
@@ -176,27 +169,27 @@ pub async fn replay(
         organization_id: context.organization_id.as_deref().map(Into::into),
     };
 
-    let replay_row = ReplayRow {
-        id: Uuid::new_v4(),
-        project_id: context.project_id,
-        session_id,
-        identifier: Some(server_id.to_string()),
-        events: events_json,
-        has_full_snapshot,
-        created_at: chrono::Utc::now(),
-    };
-
-    if let Err(e) = state
-        .batch_queue
-        .queue_event(QueuedEvent::Replay {
-            row: replay_row,
-            tracking: Some(tracking_ctx),
-        })
+    if let Err(e) = replay_storage
+        .store_replay_chunk(
+            &state.pool,
+            crate::replay_storage::ReplayChunkInput {
+                project_id: context.project_id,
+                session_id: session_id.clone(),
+                sequence: i32::try_from(sequence).ok(),
+                identifier: Some(server_id.to_string()),
+                url: Some(url),
+                events: valid_events,
+            },
+        )
         .await
     {
-        error!("Failed to queue replay: {}", e);
+        error!("Failed to store replay: {}", e);
         return error_response(StatusCode::INTERNAL_SERVER_ERROR, "Failed to store replay");
     }
+
+    state
+        .batch_queue
+        .track_replay_usage(&session_id, tracking_ctx);
 
     success_response(HashMap::new())
 }

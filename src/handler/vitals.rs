@@ -14,7 +14,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tracing::error;
+use tracing::{error, warn};
 use uuid::Uuid;
 
 #[derive(Debug, Deserialize)]
@@ -192,7 +192,29 @@ pub async fn vitals(
                 "Failed to queue web vital",
             );
         }
+
+        if let Some(session_id) = req.session_id.as_deref()
+            && let Some(replay_storage) = state.replay_storage.as_deref()
+            && is_poor_web_vital(&vital.metric, vital.value)
+            && let Err(error) = replay_storage
+                .mark_session_poor_vital(&state.pool, ctx.project_id, session_id)
+                .await
+        {
+            warn!("Failed to persist replay poor-vital flag: {}", error);
+        }
     }
 
     (StatusCode::OK, Json(json!({ "status": "success" })))
+}
+
+fn is_poor_web_vital(metric: &str, value: f64) -> bool {
+    match metric {
+        "LCP" => value >= 4000.0,
+        "FCP" => value >= 3000.0,
+        "INP" => value >= 500.0,
+        "CLS" => value >= 0.25,
+        "TTFB" => value >= 1800.0,
+        "FID" => value >= 300.0,
+        _ => false,
+    }
 }

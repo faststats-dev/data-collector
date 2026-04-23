@@ -348,6 +348,32 @@ impl BatchQueue {
         self.sender.send(event).await
     }
 
+    pub fn track_replay_usage(&self, session_id: &str, tracking: TrackingContext) {
+        let Some(polar) = &self.polar else {
+            return;
+        };
+
+        let mut usage = AggregatedUsage::new();
+        let mut owner_usage = OwnerUsage {
+            counts: UsageCounts::default(),
+            token: Arc::clone(&tracking.token),
+            org: tracking.organization_id.as_ref().map(Arc::clone),
+        };
+        owner_usage.counts.session_replays = 1;
+        owner_usage
+            .counts
+            .session_replay_ids
+            .insert(session_id.to_string());
+        usage.insert(Arc::clone(&tracking.owner_id), owner_usage);
+
+        let polar = Arc::clone(polar);
+        tokio::spawn(async move {
+            if let Err(error) = polar.ingest_usage(&usage).await {
+                error!("Failed to ingest replay usage to Polar: {}", error);
+            }
+        });
+    }
+
     pub fn channel_capacity(&self) -> usize {
         self.sender.capacity()
     }
@@ -704,7 +730,11 @@ impl BatchQueue {
         }
     }
 
-    pub(crate) async fn replay_failed_requests(&self, pool: &sqlx::PgPool) {
+    pub(crate) async fn replay_failed_requests(
+        &self,
+        pool: &sqlx::PgPool,
+        replay_storage: Option<&crate::replay_storage::ReplayStorage>,
+    ) {
         match self.backup_store.cleanup_stale_requests().await {
             Ok(count) if count > 0 => {
                 info!("Cleaned up {} stale failed requests", count);
@@ -742,7 +772,8 @@ impl BatchQueue {
         }
 
         for (id, request) in requests {
-            let result = super::handler::process_failed_request(self, pool, &request).await;
+            let result =
+                super::handler::process_failed_request(self, pool, replay_storage, &request).await;
 
             match result {
                 Ok(()) => {

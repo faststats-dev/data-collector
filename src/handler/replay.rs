@@ -13,6 +13,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use sqlx::types::Uuid as SqlxUuid;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tracing::{error, warn};
 
 fn rrweb_timestamp_ms(value: &Value) -> Option<u64> {
@@ -85,6 +86,7 @@ pub async fn replay(
             return error_response(StatusCode::BAD_REQUEST, &format!("Invalid JSON: {}", e));
         }
     };
+    let request_body = body.into_owned();
     let ReplayRequest {
         token,
         session_id,
@@ -106,7 +108,7 @@ pub async fn replay(
             let failed = FailedRequest {
                 request_type: RequestType::Replay,
                 token: token.clone(),
-                body: body.to_vec(),
+                body: request_body,
                 country: None,
                 client_ip: if client_ip.is_empty() {
                     None
@@ -156,7 +158,7 @@ pub async fn replay(
         return error_response(StatusCode::BAD_REQUEST, "No valid events");
     }
 
-    let Some(replay_storage) = state.replay_storage.as_deref() else {
+    let Some(replay_storage) = state.replay_storage.clone() else {
         return error_response(
             StatusCode::SERVICE_UNAVAILABLE,
             "Replay storage is not configured",
@@ -169,27 +171,61 @@ pub async fn replay(
         organization_id: context.organization_id.as_deref().map(Into::into),
     };
 
-    if let Err(e) = replay_storage
-        .store_replay_chunk(
-            &state.pool,
-            crate::replay_storage::ReplayChunkInput {
-                project_id: context.project_id,
-                session_id: session_id.clone(),
-                sequence: i32::try_from(sequence).ok(),
-                identifier: Some(server_id.to_string()),
-                url: Some(url),
-                events: valid_events,
-            },
-        )
-        .await
-    {
-        error!("Failed to store replay: {}", e);
-        return error_response(StatusCode::INTERNAL_SERVER_ERROR, "Failed to store replay");
-    }
+    let pool = state.pool.clone();
+    let batch_queue = Arc::clone(&state.batch_queue);
+    let client_ip = if client_ip.is_empty() {
+        None
+    } else {
+        Some(client_ip.to_string())
+    };
+    let user_agent = headers
+        .get("User-Agent")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let failed_request = FailedRequest {
+        request_type: RequestType::Replay,
+        token: token.clone(),
+        body: request_body,
+        country: None,
+        client_ip,
+        user_agent,
+        origin: None,
+    };
 
-    state
-        .batch_queue
-        .track_replay_usage(&session_id, tracking_ctx);
+    tokio::spawn(async move {
+        let store_result = replay_storage
+            .store_replay_chunk(
+                &pool,
+                crate::replay_storage::ReplayChunkInput {
+                    project_id: context.project_id,
+                    session_id: session_id.clone(),
+                    sequence: i32::try_from(sequence).ok(),
+                    identifier: Some(server_id.to_string()),
+                    url: Some(url),
+                    events: valid_events,
+                },
+            )
+            .await;
+
+        match store_result {
+            Ok(()) => {
+                batch_queue.track_replay_usage(&session_id, tracking_ctx);
+            }
+            Err(error) => {
+                error!("Failed to store replay asynchronously: {}", error);
+                if let Err(backup_error) = batch_queue
+                    .backup_store
+                    .backup_request(&failed_request)
+                    .await
+                {
+                    error!(
+                        "Failed to store replay request after async storage failure: {}",
+                        backup_error
+                    );
+                }
+            }
+        }
+    });
 
     success_response(HashMap::new())
 }

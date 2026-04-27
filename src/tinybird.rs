@@ -57,7 +57,7 @@ pub struct ModsEventRow {
     pub os_name: Option<String>,
     pub os_arch: Option<String>,
     pub os_version: Option<String>,
-    pub core_count: Option<f64>,
+    pub core_count: Option<u16>,
     pub country: Option<String>,
     pub custom: String,
     #[serde(with = "chrono::serde::ts_milliseconds")]
@@ -99,7 +99,7 @@ pub struct ErrorTrackingRow {
     pub java_vendor: String,
     pub os_version: String,
     pub os_arch: String,
-    pub core_count: Option<f64>,
+    pub core_count: Option<u16>,
     pub entry_data: String,
     pub stack_placeholders: String,
     pub context: Option<String>,

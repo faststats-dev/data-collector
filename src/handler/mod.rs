@@ -73,7 +73,7 @@ pub struct ErrorEntryDetails {
     pub java_vendor: String,
     pub os_version: String,
     pub os_arch: String,
-    pub core_count: Option<f64>,
+    pub core_count: Option<u16>,
     pub entry_data: String,
 }
 
@@ -381,6 +381,29 @@ fn extract_optional_f64(data: &mut HashMap<String, Value>, key: &str) -> Option<
     data.remove(key).and_then(|v| v.as_f64())
 }
 
+fn extract_optional_u16(data: &mut HashMap<String, Value>, key: &str) -> Option<u16> {
+    data.remove(key).and_then(|v| value_as_u16(&v))
+}
+
+fn value_as_u16(v: &Value) -> Option<u16> {
+    match v {
+        Value::Number(n) => n
+            .as_u64()
+            .or_else(|| n.as_i64().and_then(|i| u64::try_from(i).ok()))
+            .or_else(|| {
+                n.as_f64().and_then(|f| {
+                    if f.is_finite() && f >= 0.0 && f <= u16::MAX as f64 && f.fract() == 0.0 {
+                        Some(f as u64)
+                    } else {
+                        None
+                    }
+                })
+            })
+            .and_then(|u| u16::try_from(u).ok()),
+        _ => None,
+    }
+}
+
 fn extract_optional_bool(data: &mut HashMap<String, Value>, key: &str) -> Option<bool> {
     data.remove(key).and_then(|v| v.as_bool())
 }
@@ -433,6 +456,10 @@ fn read_known_f64(known: &HashMap<String, Value>, key: &str) -> Option<f64> {
     known.get(key).and_then(Value::as_f64)
 }
 
+fn read_known_u16(known: &HashMap<String, Value>, key: &str) -> Option<u16> {
+    known.get(key).and_then(value_as_u16)
+}
+
 fn read_known_bool(known: &HashMap<String, Value>, key: &str) -> Option<bool> {
     known.get(key).and_then(Value::as_bool)
 }
@@ -476,7 +503,7 @@ pub fn build_mods_error_entry_details(
         java_vendor: read_known_string(known, "java_vendor"),
         os_version: read_known_string(known, "os_version"),
         os_arch: read_known_string(known, "os_arch"),
-        core_count: read_known_f64(known, "core_count"),
+        core_count: read_known_u16(known, "core_count"),
         entry_data: to_custom_json(custom),
         ..ErrorEntryDetails::default()
     }
@@ -608,7 +635,7 @@ pub async fn insert_mods_event(
         os_name: extract_optional_string(known, "os_name"),
         os_arch: extract_optional_string(known, "os_arch"),
         os_version: extract_optional_string(known, "os_version"),
-        core_count: extract_optional_f64(known, "core_count"),
+        core_count: extract_optional_u16(known, "core_count"),
         country,
         custom: to_custom_json(custom),
         created_at: chrono::Utc::now(),

@@ -1,13 +1,13 @@
 use aws_sdk_s3::Client;
 use aws_sdk_s3::config::{Builder as S3ConfigBuilder, Credentials, Region};
 use aws_sdk_s3::primitives::ByteStream;
-use flate2::Compression;
-use flate2::write::GzEncoder;
 use serde_json::{Map, Value};
 use std::collections::HashMap;
-use std::io::Write;
 use tracing::warn;
 use uuid::Uuid;
+
+const REPLAY_CONTENT_ENCODING: &str = "zstd";
+const ZSTD_COMPRESSION_LEVEL: i32 = 3;
 
 #[derive(Clone)]
 pub struct ReplayStorage {
@@ -137,7 +137,7 @@ impl ReplayStorage {
         let snapshot_id = Uuid::new_v4();
         let serialized = serde_json::to_vec(&input.events)?;
         let uncompressed_bytes = i64::try_from(serialized.len()).unwrap_or(i64::MAX);
-        let compressed = gzip_bytes(&serialized)?;
+        let compressed = zstd_bytes(&serialized)?;
         let compressed_bytes = i64::try_from(compressed.len()).unwrap_or(i64::MAX);
         let first_event_timestamp_ms = replay_first_event_timestamp_ms(&input.events);
         let last_event_timestamp_ms = replay_last_event_timestamp_ms(&input.events);
@@ -175,7 +175,7 @@ impl ReplayStorage {
                     source_url,
                     normalized_route
                 ) VALUES (
-                    $1, $2, $3, $4, $5, $6, $7, 'gzip', $8, $9, $10, $11, $12, $13, $14, $15
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16
                 )
                 "#,
             )
@@ -186,6 +186,7 @@ impl ReplayStorage {
             .bind(&input.identifier)
             .bind(&self.bucket)
             .bind(&object_key)
+            .bind(REPLAY_CONTENT_ENCODING)
             .bind(compressed_bytes)
             .bind(uncompressed_bytes)
             .bind(event_count)
@@ -455,7 +456,7 @@ impl ReplayStorage {
         snapshot_id: Uuid,
     ) -> String {
         format!(
-            "{}/{}/{}/{}-{}.json.gz",
+            "{}/{}/{}/{}-{}.json.zst",
             self.prefix, project_id, session_id, first_event_timestamp_ms, snapshot_id
         )
     }
@@ -466,7 +467,7 @@ impl ReplayStorage {
             .bucket(&self.bucket)
             .key(key)
             .content_type("application/json")
-            .content_encoding("gzip")
+            .content_encoding(REPLAY_CONTENT_ENCODING)
             .body(ByteStream::from(body))
             .send()
             .await
@@ -488,10 +489,8 @@ impl ReplayStorage {
     }
 }
 
-fn gzip_bytes(bytes: &[u8]) -> Result<Vec<u8>, std::io::Error> {
-    let mut encoder = GzEncoder::new(Vec::with_capacity(bytes.len() / 2), Compression::fast());
-    encoder.write_all(bytes)?;
-    encoder.finish()
+fn zstd_bytes(bytes: &[u8]) -> Result<Vec<u8>, std::io::Error> {
+    zstd::bulk::compress(bytes, ZSTD_COMPRESSION_LEVEL)
 }
 
 fn replay_timestamp_ms(event: &Value) -> Option<i64> {

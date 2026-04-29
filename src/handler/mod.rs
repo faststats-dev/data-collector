@@ -1,7 +1,6 @@
 mod collect;
 mod error;
 mod identify;
-mod java_stack_parameterization;
 mod replay;
 mod vitals;
 mod web;
@@ -13,7 +12,6 @@ pub use replay::replay;
 pub use vitals::vitals;
 pub use web::web;
 
-use self::java_stack_parameterization::build_parameterized_error_rows;
 use crate::batch_queue::{BatchQueue, FailedRequest, QueuedEvent, RequestType, TrackingContext};
 use crate::models::{DataSource, Error, ErrorTracking};
 use crate::tinybird::{ErrorRow, ErrorTrackingRow, ModsEventRow, WebEventRow};
@@ -41,19 +39,11 @@ static PROJECT_CACHE: LazyLock<Cache<String, Arc<ProjectContext>>> = LazyLock::n
 
 pub type HandlerResponse = (StatusCode, Json<Value>);
 
-#[derive(Clone, Copy, Debug, Default)]
-pub enum ErrorStackProcessing {
-    #[default]
-    Raw,
-    JavaCollect,
-}
-
 pub struct ErrorEntryParams {
     pub identity_key: Option<String>,
     pub context: Option<String>,
     pub details: ErrorEntryDetails,
     pub tracking_ctx: Option<TrackingContext>,
-    pub stack_processing: ErrorStackProcessing,
 }
 
 #[derive(Clone, Default)]
@@ -668,16 +658,26 @@ fn build_error_rows(mut error: Error, errors: &mut Vec<ErrorRow>) -> String {
     let cause_hash = cause.as_deref().unwrap_or("");
     let message = error.message.unwrap_or_default();
     let stack = error.stack.unwrap_or_default();
-    let stack_json = serde_json::to_string(&stack).unwrap_or_default();
-    let hash = sha256_hex(&[
+    let stack_len = stack.len().to_string();
+    let mut hash_parts = Vec::with_capacity(8 + (stack.len() * 2));
+    hash_parts.extend([
         error.error.as_bytes(),
         b"\x1f",
         message.as_bytes(),
         b"\x1f",
-        stack_json.as_bytes(),
-        b"\x1f",
         cause_hash.as_bytes(),
+        b"\x1f",
+        stack_len.as_bytes(),
+        b"\x1f",
     ]);
+    let stack_line_lengths: Vec<String> = stack.iter().map(|line| line.len().to_string()).collect();
+    for (line, line_length) in stack.iter().zip(stack_line_lengths.iter()) {
+        hash_parts.push(line_length.as_bytes());
+        hash_parts.push(b"\x1e");
+        hash_parts.push(line.as_bytes());
+        hash_parts.push(b"\x1f");
+    }
+    let hash = sha256_hex(&hash_parts);
     errors.push(ErrorRow {
         hash: hash.clone(),
         name: error.error,
@@ -697,7 +697,8 @@ pub async fn insert_error_entries(
     params: ErrorEntryParams,
 ) -> Result<(), HandlerResponse> {
     let ErrorTracking {
-        hash,
+        group_hash,
+        hash: occurrence_hash,
         error,
         count,
         session_id,
@@ -705,21 +706,8 @@ pub async fn insert_error_entries(
         handled,
     } = data;
 
-    let (error_hash, error_rows, stack_placeholders) = match params.stack_processing {
-        ErrorStackProcessing::Raw => {
-            let mut error_rows = Vec::new();
-            let error_hash = build_error_rows(error, &mut error_rows);
-            (error_hash, error_rows, "{}".to_string())
-        }
-        ErrorStackProcessing::JavaCollect => {
-            let parameterized = build_parameterized_error_rows(error);
-            (
-                parameterized.error_hash,
-                parameterized.rows,
-                parameterized.stack_placeholders,
-            )
-        }
-    };
+    let mut error_rows = Vec::new();
+    let error_hash = build_error_rows(error, &mut error_rows);
 
     for error_row in error_rows {
         batch_queue
@@ -733,10 +721,15 @@ pub async fn insert_error_entries(
 
     let occurrence_count = count.unwrap_or(1).max(1) as u32;
     let created_at = chrono::Utc::now();
+    let occurrence_hash = occurrence_hash.unwrap_or_else(|| error_hash.clone());
+    let group_hash = group_hash
+        .or_else(|| Some(occurrence_hash.clone()))
+        .unwrap_or_else(|| error_hash.clone());
     let error_tracking = ErrorTrackingRow {
         id: Uuid::new_v4(),
         project_id,
-        hash,
+        group_hash: group_hash.clone(),
+        hash: occurrence_hash,
         error_hash,
         count: occurrence_count,
         data_entry_id,
@@ -760,7 +753,6 @@ pub async fn insert_error_entries(
         os_arch: params.details.os_arch,
         core_count: params.details.core_count,
         entry_data: params.details.entry_data,
-        stack_placeholders,
         context: params.context,
         handled,
         created_at,
@@ -888,7 +880,6 @@ async fn process_collect_request(
                     context: None,
                     details: error_entry_details.clone(),
                     tracking_ctx: Some(tracking_ctx.clone()),
-                    stack_processing: ErrorStackProcessing::JavaCollect,
                 },
             )
             .await
@@ -1049,7 +1040,6 @@ async fn process_web_request(
                     context: None,
                     details: error_entry_details.clone(),
                     tracking_ctx: Some(tracking_ctx.clone()),
-                    stack_processing: ErrorStackProcessing::Raw,
                 },
             )
             .await

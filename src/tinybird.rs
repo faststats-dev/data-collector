@@ -80,6 +80,7 @@ pub struct ErrorRow {
 pub struct ErrorTrackingRow {
     pub id: Uuid,
     pub project_id: Uuid,
+    pub group_hash: String,
     pub hash: String,
     pub error_hash: String,
     pub count: u32,
@@ -104,7 +105,6 @@ pub struct ErrorTrackingRow {
     pub os_arch: String,
     pub core_count: Option<u16>,
     pub entry_data: String,
-    pub stack_placeholders: String,
     pub context: Option<String>,
     pub handled: Option<bool>,
     #[serde(with = "chrono::serde::ts_milliseconds")]

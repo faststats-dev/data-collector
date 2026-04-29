@@ -37,7 +37,10 @@ pub struct Error {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ErrorTracking {
-    pub hash: String,
+    #[serde(default, rename = "groupHash", alias = "group_hash")]
+    pub group_hash: Option<String>,
+    #[serde(default)]
+    pub hash: Option<String>,
     #[serde(flatten)]
     pub error: Error,
     #[serde(default)]
@@ -135,5 +138,35 @@ mod tests {
         let result = serde_json::from_str::<ErrorTracking>(json);
         assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
         assert_eq!(result.unwrap().handled, Some(true));
+    }
+
+    #[test]
+    fn test_error_tracking_group_hash_parsing() {
+        let json = r#"{
+            "hash": "occurrence_hash",
+            "groupHash": "sdk_group_hash",
+            "error": "Error",
+            "message": "Grouped error"
+        }"#;
+
+        let result = serde_json::from_str::<ErrorTracking>(json);
+        assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+        let error = result.unwrap();
+        assert_eq!(error.hash.as_deref(), Some("occurrence_hash"));
+        assert_eq!(error.group_hash.as_deref(), Some("sdk_group_hash"));
+    }
+
+    #[test]
+    fn test_error_tracking_allows_missing_hashes() {
+        let json = r#"{
+            "error": "Error",
+            "message": "Collector fallback hash"
+        }"#;
+
+        let result = serde_json::from_str::<ErrorTracking>(json);
+        assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+        let error = result.unwrap();
+        assert_eq!(error.hash, None);
+        assert_eq!(error.group_hash, None);
     }
 }

@@ -1123,6 +1123,7 @@ mod tests {
                     row: Box::new(ErrorTrackingRow {
                         id: Uuid::new_v4(),
                         project_id: Uuid::new_v4(),
+                        group_hash: "group-hash".to_string(),
                         hash: "hash".to_string(),
                         error_hash: "error-hash".to_string(),
                         count: 3,
@@ -1147,7 +1148,6 @@ mod tests {
                         os_arch: String::new(),
                         core_count: None,
                         entry_data: "{}".to_string(),
-                        stack_placeholders: "{}".to_string(),
                         context: None,
                         handled: None,
                         created_at: Utc::now(),

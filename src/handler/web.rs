@@ -1,9 +1,8 @@
 use super::{
-    EncodingQuery, ErrorEntryParams, ErrorStackProcessing, WEB_EVENT_FIELDS,
-    build_web_error_entry_details, check_ip_allowed, decompress_body, error_response,
-    extract_known_fields, get_authorization, get_client_ip, get_country, get_request_origin,
-    insert_error_entries, insert_web_event, load_project_context, resolve_identity_key,
-    success_response, validate_hostname,
+    EncodingQuery, ErrorEntryParams, WEB_EVENT_FIELDS, build_web_error_entry_details,
+    check_ip_allowed, decompress_body, error_response, extract_known_fields, get_authorization,
+    get_client_ip, get_country, get_request_origin, insert_error_entries, insert_web_event,
+    load_project_context, resolve_identity_key, success_response, validate_hostname,
 };
 use crate::batch_queue::{FailedRequest, RequestType, TrackingContext};
 use crate::identity::resolve_person_for_distinct_id;
@@ -266,7 +265,6 @@ pub async fn web(
                     context: None,
                     details: error_entry_details.clone(),
                     tracking_ctx: Some(tracking_ctx.clone()),
-                    stack_processing: ErrorStackProcessing::Raw,
                 },
             )
             .await

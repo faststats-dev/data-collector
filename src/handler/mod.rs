@@ -48,6 +48,8 @@ pub struct ErrorEntryParams {
 
 #[derive(Clone, Default)]
 pub struct ErrorEntryDetails {
+    pub sdk_name: Option<String>,
+    pub sdk_version: Option<String>,
     pub plugin_version: String,
     pub source_kind: String,
     pub entry_session_id: String,
@@ -65,6 +67,31 @@ pub struct ErrorEntryDetails {
     pub os_arch: String,
     pub core_count: Option<u16>,
     pub entry_data: String,
+}
+
+pub fn parse_faststats_sdk_user_agent(user_agent: &str) -> (Option<String>, Option<String>) {
+    const PREFIX: &str = "FastStats Metrics ";
+
+    let Some(sdk) = user_agent.strip_prefix(PREFIX) else {
+        return (None, None);
+    };
+    let Some((name, version)) = sdk.split_once('/') else {
+        return (None, None);
+    };
+    let name = name.trim();
+    let version = version.trim();
+    if name.is_empty() || version.is_empty() {
+        return (None, None);
+    }
+    if name
+        .bytes()
+        .any(|byte| byte.is_ascii_whitespace() || byte == b'/')
+        || version.bytes().any(|byte| byte.is_ascii_whitespace())
+    {
+        return (None, None);
+    }
+
+    (Some(name.to_string()), Some(version.to_string()))
 }
 
 impl ErrorEntryDetails {
@@ -481,8 +508,12 @@ pub fn build_mods_error_entry_details(
     country: Option<&str>,
     known: &HashMap<String, Value>,
     custom: &HashMap<String, Value>,
+    sdk_name: Option<String>,
+    sdk_version: Option<String>,
 ) -> ErrorEntryDetails {
     ErrorEntryDetails {
+        sdk_name,
+        sdk_version,
         plugin_version: read_known_string(known, "plugin_version"),
         source_kind: "minecraft-plugin".to_string(),
         entry_session_id: server_id.to_string(),
@@ -736,6 +767,8 @@ pub async fn insert_error_entries(
         session_id,
         identity_key: params.identity_key,
         build_id,
+        sdk_name: params.details.sdk_name,
+        sdk_version: params.details.sdk_version,
         plugin_version: params.details.plugin_version,
         source_kind: params.details.source_kind,
         entry_session_id: params.details.entry_session_id,
@@ -839,6 +872,11 @@ async fn process_collect_request(
         organization_id: ctx.organization_id.as_deref().map(Into::into),
     };
 
+    let (sdk_name, sdk_version) = request
+        .user_agent
+        .as_deref()
+        .map(parse_faststats_sdk_user_agent)
+        .unwrap_or((None, None));
     let data_entry_id = insert_mods_event(
         batch_queue,
         ctx.project_id,
@@ -860,6 +898,8 @@ async fn process_collect_request(
             request.country.as_deref(),
             &known,
             &valid_custom,
+            sdk_name,
+            sdk_version,
         );
         let fallback_identity = server_id.to_string();
         for mut error in errors {
@@ -1209,6 +1249,31 @@ async fn process_replay_request(
 mod tests {
     use super::*;
     use axum::http::HeaderValue;
+
+    mod sdk_user_agent {
+        use super::*;
+
+        #[test]
+        fn parses_faststats_metrics_sdk_user_agent() {
+            assert_eq!(
+                parse_faststats_sdk_user_agent("FastStats Metrics paper/1.2.3"),
+                (Some("paper".to_string()), Some("1.2.3".to_string()))
+            );
+        }
+
+        #[test]
+        fn rejects_missing_sdk_version() {
+            assert_eq!(
+                parse_faststats_sdk_user_agent("FastStats Metrics paper"),
+                (None, None)
+            );
+        }
+
+        #[test]
+        fn rejects_other_user_agents() {
+            assert_eq!(parse_faststats_sdk_user_agent("curl/8.0"), (None, None));
+        }
+    }
 
     mod hostname_validation {
         use super::*;

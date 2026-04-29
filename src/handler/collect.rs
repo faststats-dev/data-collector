@@ -36,6 +36,10 @@ pub async fn collect(
                 .get("CF-IPCountry")
                 .and_then(|v| v.to_str().ok())
                 .map(String::from);
+            let user_agent = headers
+                .get("User-Agent")
+                .and_then(|v| v.to_str().ok())
+                .map(String::from);
 
             let failed = FailedRequest {
                 request_type: RequestType::Collect,
@@ -43,7 +47,7 @@ pub async fn collect(
                 body: body.to_vec(),
                 country,
                 client_ip: None,
-                user_agent: None,
+                user_agent,
                 origin: None,
             };
 
@@ -83,6 +87,11 @@ pub async fn collect(
     };
 
     let country = get_country(&headers);
+    let (sdk_name, sdk_version) = headers
+        .get("User-Agent")
+        .and_then(|value| value.to_str().ok())
+        .map(super::parse_faststats_sdk_user_agent)
+        .unwrap_or((None, None));
 
     // Extract known row fields before datasource validation
     let mut known = extract_known_fields(&mut data, MODS_EVENT_FIELDS);
@@ -118,8 +127,14 @@ pub async fn collect(
     if let Some(errors) = errors
         && !errors.is_empty()
     {
-        let error_entry_details =
-            build_mods_error_entry_details(server_id, country.as_deref(), &known, &valid_custom);
+        let error_entry_details = build_mods_error_entry_details(
+            server_id,
+            country.as_deref(),
+            &known,
+            &valid_custom,
+            sdk_name,
+            sdk_version,
+        );
         let fallback_identity = server_id.to_string();
         for mut error in errors {
             if error.session_id.is_none() {

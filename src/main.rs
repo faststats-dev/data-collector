@@ -253,6 +253,15 @@ async fn track_metrics(req: Request, next: Next) -> impl IntoResponse {
         req.uri().path().to_owned()
     };
     let method = req.method().clone();
+    let sdk = if path == "/v1/collect" {
+        req.headers()
+            .get("User-Agent")
+            .and_then(|value| value.to_str().ok())
+            .map(handler::parse_faststats_sdk_user_agent)
+            .unwrap_or((None, None))
+    } else {
+        (None, None)
+    };
 
     let response = next.run(req).await;
 
@@ -263,6 +272,11 @@ async fn track_metrics(req: Request, next: Next) -> impl IntoResponse {
         ("method", method.to_string()),
         ("path", path),
         ("status", status),
+        ("sdk_name", sdk.0.unwrap_or_else(|| "unknown".to_string())),
+        (
+            "sdk_version",
+            sdk.1.unwrap_or_else(|| "unknown".to_string()),
+        ),
     ];
 
     metrics::counter!("http_requests_total", &labels).increment(1);

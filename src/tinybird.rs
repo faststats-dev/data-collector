@@ -88,6 +88,8 @@ pub struct ErrorTrackingRow {
     pub session_id: Option<String>,
     pub identity_key: Option<String>,
     pub build_id: Option<String>,
+    pub sdk_name: Option<String>,
+    pub sdk_version: Option<String>,
     pub plugin_version: String,
     pub source_kind: String,
     pub entry_session_id: String,

@@ -1131,6 +1131,8 @@ mod tests {
                         session_id: None,
                         identity_key: None,
                         build_id: None,
+                        sdk_name: None,
+                        sdk_version: None,
                         plugin_version: String::new(),
                         source_kind: "error".to_string(),
                         entry_session_id: String::new(),

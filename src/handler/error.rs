@@ -23,6 +23,10 @@ pub(crate) struct ErrorRequest {
     #[serde(default)]
     build_id: Option<String>,
     #[serde(default)]
+    sdk_name: Option<String>,
+    #[serde(default)]
+    sdk_version: Option<String>,
+    #[serde(default)]
     context: Option<Value>,
 }
 
@@ -77,7 +81,11 @@ pub async fn error(
             ErrorEntryParams {
                 identity_key,
                 context: context.clone(),
-                details: ErrorEntryDetails::error_only(),
+                details: ErrorEntryDetails {
+                    sdk_name: payload.sdk_name.clone(),
+                    sdk_version: payload.sdk_version.clone(),
+                    ..ErrorEntryDetails::error_only()
+                },
                 tracking_ctx: Some(tracking_ctx.clone()),
             },
         )

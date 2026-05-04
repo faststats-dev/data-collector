@@ -1147,6 +1147,7 @@ async fn process_replay_request(
     let ReplayRequest {
         token,
         session_id,
+        batch_id,
         sequence,
         timestamp: _,
         url,
@@ -1175,16 +1176,25 @@ async fn process_replay_request(
         organization_id: ctx.organization_id.as_deref().map(Into::into),
     };
 
+    let valid_events: Vec<_> = events
+        .into_iter()
+        .filter(crate::handler::replay::is_valid_rrweb_event)
+        .collect();
+    if valid_events.is_empty() {
+        return Err("No valid events".to_string());
+    }
+
     replay_storage
         .store_replay_chunk(
             pool,
             crate::replay_storage::ReplayChunkInput {
                 project_id: ctx.project_id,
                 session_id: session_id.clone(),
+                batch_id,
                 sequence: i32::try_from(sequence).ok(),
                 identifier: Some(server_id.to_string()),
                 url: Some(url),
-                events,
+                events: valid_events,
             },
         )
         .await

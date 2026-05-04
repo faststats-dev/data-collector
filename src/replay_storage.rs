@@ -19,6 +19,7 @@ pub struct ReplayStorage {
 pub struct ReplayChunkInput {
     pub project_id: Uuid,
     pub session_id: String,
+    pub batch_id: Option<String>,
     pub sequence: Option<i32>,
     pub identifier: Option<String>,
     pub url: Option<String>,
@@ -134,6 +135,10 @@ impl ReplayStorage {
         pool: &sqlx::PgPool,
         input: ReplayChunkInput,
     ) -> Result<(), ReplayStorageError> {
+        if replay_chunk_exists(pool, &input).await? {
+            return Ok(());
+        }
+
         let snapshot_id = Uuid::new_v4();
         let serialized = serde_json::to_vec(&input.events)?;
         let uncompressed_bytes = i64::try_from(serialized.len()).unwrap_or(i64::MAX);
@@ -155,12 +160,13 @@ impl ReplayStorage {
         let result = async {
             let mut tx = pool.begin().await?;
 
-            sqlx::query(
+            let insert_result = sqlx::query(
                 r#"
                 INSERT INTO replay_snapshots (
                     id,
                     project_id,
                     session_id,
+                    batch_id,
                     sequence,
                     identifier,
                     s3_bucket,
@@ -175,13 +181,15 @@ impl ReplayStorage {
                     source_url,
                     normalized_route
                 ) VALUES (
-                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17
                 )
+                ON CONFLICT DO NOTHING
                 "#,
             )
             .bind(snapshot_id)
             .bind(input.project_id)
             .bind(&input.session_id)
+            .bind(&input.batch_id)
             .bind(input.sequence)
             .bind(&input.identifier)
             .bind(&self.bucket)
@@ -197,6 +205,11 @@ impl ReplayStorage {
             .bind(normalize_route(input.url.as_deref()))
             .execute(&mut *tx)
             .await?;
+
+            if insert_result.rows_affected() == 0 {
+                tx.commit().await?;
+                return Ok::<bool, sqlx::Error>(false);
+            }
 
             let latest_filter_metadata = sqlx::query_as::<_, ReplayFilterMetadata>(
                 r#"
@@ -324,18 +337,30 @@ impl ReplayStorage {
             .await?;
 
             tx.commit().await?;
-            Ok::<(), sqlx::Error>(())
+            Ok::<bool, sqlx::Error>(true)
         }
         .await;
 
-        if let Err(error) = result {
-            if let Err(delete_error) = self.delete_object(&object_key).await {
-                warn!(
-                    "Failed to delete orphaned replay object {} after database error: {}",
-                    object_key, delete_error
-                );
+        match result {
+            Ok(true) => {}
+            Ok(false) => {
+                if let Err(delete_error) = self.delete_object(&object_key).await {
+                    warn!(
+                        "Failed to delete duplicate replay object {} after duplicate insert: {}",
+                        object_key, delete_error
+                    );
+                }
+                return Ok(());
             }
-            return Err(ReplayStorageError::Database(error));
+            Err(error) => {
+                if let Err(delete_error) = self.delete_object(&object_key).await {
+                    warn!(
+                        "Failed to delete orphaned replay object {} after database error: {}",
+                        object_key, delete_error
+                    );
+                }
+                return Err(ReplayStorageError::Database(error));
+            }
         }
 
         Ok(())
@@ -521,6 +546,50 @@ fn replay_has_full_snapshot(events: &[Value]) -> bool {
     events
         .iter()
         .any(|event| event.get("type").and_then(Value::as_i64) == Some(2))
+}
+
+async fn replay_chunk_exists(
+    pool: &sqlx::PgPool,
+    input: &ReplayChunkInput,
+) -> Result<bool, sqlx::Error> {
+    if let Some(batch_id) = input.batch_id.as_deref() {
+        let exists: bool = sqlx::query_scalar(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM replay_snapshots
+                WHERE project_id = $1 AND session_id = $2 AND batch_id = $3
+            )
+            "#,
+        )
+        .bind(input.project_id)
+        .bind(&input.session_id)
+        .bind(batch_id)
+        .fetch_one(pool)
+        .await?;
+        if exists {
+            return Ok(true);
+        }
+    }
+
+    let Some(sequence) = input.sequence else {
+        return Ok(false);
+    };
+
+    sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM replay_snapshots
+            WHERE project_id = $1 AND session_id = $2 AND sequence = $3
+        )
+        "#,
+    )
+    .bind(input.project_id)
+    .bind(&input.session_id)
+    .bind(sequence)
+    .fetch_one(pool)
+    .await
 }
 
 fn normalize_route(url: Option<&str>) -> String {

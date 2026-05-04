@@ -603,20 +603,21 @@ fn replay_route_metadata(events: &[Value], fallback_url: Option<&str>) -> Replay
     for event in events {
         let timestamp = replay_timestamp_ms(event);
         if let Some(route) = replay_event_route(event)
-            && route != current_route {
-                if current_count > 0 {
-                    route_spans.push(ReplayRouteSpan {
-                        route: current_route,
-                        from: current_from,
-                        to: current_to,
-                        count: current_count,
-                    });
-                }
-                current_route = route;
-                current_from = timestamp;
-                current_to = timestamp;
-                current_count = 0;
+            && route != current_route
+        {
+            if current_count > 0 {
+                route_spans.push(ReplayRouteSpan {
+                    route: current_route,
+                    from: current_from,
+                    to: current_to,
+                    count: current_count,
+                });
             }
+            current_route = route;
+            current_from = timestamp;
+            current_to = timestamp;
+            current_count = 0;
+        }
 
         push_route_once(&mut routes, &mut seen_routes, &current_route);
         if timestamp.is_some() {

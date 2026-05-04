@@ -1,8 +1,9 @@
 use aws_sdk_s3::Client;
 use aws_sdk_s3::config::{Builder as S3ConfigBuilder, Credentials, Region};
 use aws_sdk_s3::primitives::ByteStream;
+use serde::Serialize;
 use serde_json::{Map, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tracing::warn;
 use uuid::Uuid;
 
@@ -89,6 +90,22 @@ struct ReplayFilterMetadata {
     os: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+struct ReplayRouteSpan {
+    route: String,
+    from: Option<i64>,
+    to: Option<i64>,
+    count: i32,
+}
+
+struct ReplayRouteMetadata {
+    primary_route: String,
+    routes: Vec<String>,
+    route_spans: Vec<ReplayRouteSpan>,
+    entry_route: Option<String>,
+    exit_route: Option<String>,
+}
+
 impl ReplayStorage {
     pub fn from_env() -> Result<Option<Self>, String> {
         let bucket = std::env::var("REPLAY_S3_BUCKET").ok();
@@ -156,6 +173,7 @@ impl ReplayStorage {
         );
 
         self.put_object(&object_key, compressed).await?;
+        let route_metadata = replay_route_metadata(&input.events, input.url.as_deref());
 
         let result = async {
             let mut tx = pool.begin().await?;
@@ -179,9 +197,12 @@ impl ReplayStorage {
                     last_event_timestamp_ms,
                     has_full_snapshot,
                     source_url,
-                    normalized_route
+                    normalized_route,
+                    routes,
+                    route_count,
+                    route_spans
                 ) VALUES (
-                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
                 )
                 ON CONFLICT DO NOTHING
                 "#,
@@ -202,7 +223,10 @@ impl ReplayStorage {
             .bind(last_event_timestamp_ms)
             .bind(has_full_snapshot)
             .bind(&input.url)
-            .bind(normalize_route(input.url.as_deref()))
+            .bind(&route_metadata.primary_route)
+            .bind(&route_metadata.routes)
+            .bind(i32::try_from(route_metadata.routes.len()).unwrap_or(i32::MAX))
+            .bind(sqlx::types::Json(&route_metadata.route_spans))
             .execute(&mut *tx)
             .await?;
 
@@ -249,13 +273,17 @@ impl ReplayStorage {
                     snapshot_count,
                     total_bytes,
                     has_full_snapshot,
+                    routes,
+                    route_count,
+                    entry_route,
+                    exit_route,
                     browser,
                     country,
                     os,
                     has_errors,
                     has_poor_vitals
                 ) VALUES (
-                    $1, $2, $3, $4, NOW(), NOW(), $5, $6, $7, $8, 1, $9, $10, $11, $12, $13, false, false
+                    $1, $2, $3, $4, NOW(), NOW(), $5, $6, $7, $8, 1, $9, $10, $11, $12, $13, $14, $15, $16, $17, false, false
                 )
                 ON CONFLICT (project_id, session_id) DO UPDATE
                 SET
@@ -314,6 +342,16 @@ impl ReplayStorage {
                     snapshot_count = replay_sessions.snapshot_count + EXCLUDED.snapshot_count,
                     total_bytes = replay_sessions.total_bytes + EXCLUDED.total_bytes,
                     has_full_snapshot = replay_sessions.has_full_snapshot OR EXCLUDED.has_full_snapshot,
+                    routes = ARRAY(
+                        SELECT DISTINCT replay_route.route
+                        FROM unnest(replay_sessions.routes || EXCLUDED.routes) AS replay_route(route)
+                    ),
+                    route_count = cardinality(ARRAY(
+                        SELECT DISTINCT replay_route.route
+                        FROM unnest(replay_sessions.routes || EXCLUDED.routes) AS replay_route(route)
+                    )),
+                    entry_route = COALESCE(replay_sessions.entry_route, EXCLUDED.entry_route),
+                    exit_route = COALESCE(EXCLUDED.exit_route, replay_sessions.exit_route),
                     browser = COALESCE(EXCLUDED.browser, replay_sessions.browser),
                     country = COALESCE(EXCLUDED.country, replay_sessions.country),
                     os = COALESCE(EXCLUDED.os, replay_sessions.os),
@@ -330,6 +368,10 @@ impl ReplayStorage {
             .bind(event_count)
             .bind(compressed_bytes)
             .bind(has_full_snapshot)
+            .bind(&route_metadata.routes)
+            .bind(i32::try_from(route_metadata.routes.len()).unwrap_or(i32::MAX))
+            .bind(route_metadata.entry_route.as_deref())
+            .bind(route_metadata.exit_route.as_deref())
             .bind(latest_filter_metadata.as_ref().and_then(|row| row.browser.as_deref()))
             .bind(latest_filter_metadata.as_ref().and_then(|row| row.country.as_deref()))
             .bind(latest_filter_metadata.as_ref().and_then(|row| row.os.as_deref()))
@@ -548,6 +590,82 @@ fn replay_has_full_snapshot(events: &[Value]) -> bool {
         .any(|event| event.get("type").and_then(Value::as_i64) == Some(2))
 }
 
+fn replay_route_metadata(events: &[Value], fallback_url: Option<&str>) -> ReplayRouteMetadata {
+    let fallback_route = normalize_route(fallback_url);
+    let mut seen_routes = HashSet::new();
+    let mut routes = Vec::new();
+    let mut route_spans = Vec::new();
+    let mut current_route = fallback_route.clone();
+    let mut current_from = events.first().and_then(replay_timestamp_ms);
+    let mut current_to = current_from;
+    let mut current_count = 0_i32;
+
+    for event in events {
+        let timestamp = replay_timestamp_ms(event);
+        if let Some(route) = replay_event_route(event)
+            && route != current_route {
+                if current_count > 0 {
+                    route_spans.push(ReplayRouteSpan {
+                        route: current_route,
+                        from: current_from,
+                        to: current_to,
+                        count: current_count,
+                    });
+                }
+                current_route = route;
+                current_from = timestamp;
+                current_to = timestamp;
+                current_count = 0;
+            }
+
+        push_route_once(&mut routes, &mut seen_routes, &current_route);
+        if timestamp.is_some() {
+            if current_from.is_none() {
+                current_from = timestamp;
+            }
+            current_to = timestamp;
+        }
+        current_count = current_count.saturating_add(1);
+    }
+
+    if current_count > 0 {
+        route_spans.push(ReplayRouteSpan {
+            route: current_route,
+            from: current_from,
+            to: current_to,
+            count: current_count,
+        });
+    }
+
+    let entry_route = route_spans.first().map(|span| span.route.clone());
+    let exit_route = route_spans.last().map(|span| span.route.clone());
+
+    ReplayRouteMetadata {
+        primary_route: routes
+            .first()
+            .cloned()
+            .unwrap_or_else(|| fallback_route.clone()),
+        routes,
+        route_spans,
+        entry_route,
+        exit_route,
+    }
+}
+
+fn push_route_once(routes: &mut Vec<String>, seen_routes: &mut HashSet<String>, route: &str) {
+    if seen_routes.insert(route.to_string()) {
+        routes.push(route.to_string());
+    }
+}
+
+fn replay_event_route(event: &Value) -> Option<String> {
+    let data = event.get("data")?;
+    data.get("href")
+        .or_else(|| data.get("url"))
+        .and_then(Value::as_str)
+        .map(|url| normalize_route(Some(url)))
+}
+
 async fn replay_chunk_exists(
     pool: &sqlx::PgPool,
     input: &ReplayChunkInput,
@@ -621,5 +739,63 @@ fn normalize_path(path: &str) -> String {
         "/".to_string()
     } else {
         trimmed.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn replay_route_metadata_uses_fallback_route() {
+        let events = vec![
+            json!({ "type": 4, "timestamp": 1000, "data": {} }),
+            json!({ "type": 3, "timestamp": 1100, "data": {} }),
+        ];
+
+        let metadata = replay_route_metadata(&events, Some("https://example.com/docs?page=1"));
+
+        assert_eq!(metadata.primary_route, "/docs");
+        assert_eq!(metadata.routes, vec!["/docs"]);
+        assert_eq!(metadata.entry_route.as_deref(), Some("/docs"));
+        assert_eq!(metadata.exit_route.as_deref(), Some("/docs"));
+        assert_eq!(metadata.route_spans.len(), 1);
+        assert_eq!(metadata.route_spans[0].from, Some(1000));
+        assert_eq!(metadata.route_spans[0].to, Some(1100));
+        assert_eq!(metadata.route_spans[0].count, 2);
+    }
+
+    #[test]
+    fn replay_route_metadata_splits_on_event_urls() {
+        let events = vec![
+            json!({
+                "type": 4,
+                "timestamp": 1000,
+                "data": { "href": "https://example.com/pricing?plan=pro" }
+            }),
+            json!({ "type": 3, "timestamp": 1200, "data": {} }),
+            json!({
+                "type": 4,
+                "timestamp": 2000,
+                "data": { "href": "https://example.com/checkout/" }
+            }),
+        ];
+
+        let metadata = replay_route_metadata(&events, Some("https://example.com/"));
+
+        assert_eq!(metadata.primary_route, "/pricing");
+        assert_eq!(metadata.routes, vec!["/pricing", "/checkout"]);
+        assert_eq!(metadata.entry_route.as_deref(), Some("/pricing"));
+        assert_eq!(metadata.exit_route.as_deref(), Some("/checkout"));
+        assert_eq!(metadata.route_spans.len(), 2);
+        assert_eq!(metadata.route_spans[0].route, "/pricing");
+        assert_eq!(metadata.route_spans[0].from, Some(1000));
+        assert_eq!(metadata.route_spans[0].to, Some(1200));
+        assert_eq!(metadata.route_spans[0].count, 2);
+        assert_eq!(metadata.route_spans[1].route, "/checkout");
+        assert_eq!(metadata.route_spans[1].from, Some(2000));
+        assert_eq!(metadata.route_spans[1].to, Some(2000));
+        assert_eq!(metadata.route_spans[1].count, 1);
     }
 }

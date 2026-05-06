@@ -2,6 +2,7 @@ use super::{
     check_ip_allowed, error_response, get_authorization, get_client_ip, get_request_origin,
     load_project_context, success_response, validate_hostname,
 };
+use crate::identity::{PersonProfile, upsert_person_and_alias};
 use crate::models::AppState;
 use axum::body::Bytes;
 use axum::extract::State;
@@ -105,6 +106,25 @@ pub async fn identify(
     let name = normalize_optional_text(name);
     let phone = normalize_optional_text(phone);
     let avatar_url = normalize_optional_text(avatar_url);
+
+    let person_profile = PersonProfile {
+        external_id: external_id.to_owned(),
+        email: Some(email.to_owned()),
+        name: name.clone(),
+        phone: phone.clone(),
+        avatar_url: avatar_url.clone(),
+        traits: traits_value.clone(),
+    };
+
+    if upsert_person_and_alias(&state.pool, ctx.project_id, &user_id, &person_profile)
+        .await
+        .is_err()
+    {
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to store identified user",
+        );
+    }
 
     let result = sqlx::query(
         r#"

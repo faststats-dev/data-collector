@@ -575,6 +575,12 @@ pub async fn insert_web_event(
         id: event_id,
         project_id,
         user_id: extract_optional_string(known, "user_id"),
+        person_id: extract_optional_string(known, "person_id"),
+        external_id: extract_optional_string(known, "external_id"),
+        is_identified: known
+            .remove("is_identified")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false),
         session_id,
         event: extract_optional_string(known, "event"),
         browser: extract_optional_string(known, "browser"),
@@ -918,6 +924,8 @@ async fn process_web_request(
         "user_id".into(),
         Value::String(resolved_user_id.to_string()),
     );
+    crate::handler::web::stamp_person_identity(pool, ctx.project_id, resolved_user_id, &mut known)
+        .await;
     let (valid_custom, _) = crate::validation::validate_and_filter_payload(data, &ctx.datasources);
 
     use crate::utils::debounce::should_debounce;

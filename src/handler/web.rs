@@ -6,6 +6,7 @@ use super::{
     success_response, validate_hostname,
 };
 use crate::batch_queue::{FailedRequest, RequestType, TrackingContext};
+use crate::identity::resolve_person_for_distinct_id;
 use crate::models::{AppState, ErrorTracking};
 use crate::utils::debounce::should_debounce;
 use crate::validation::validate_and_filter_payload;
@@ -151,6 +152,7 @@ pub async fn web(
         "user_id".into(),
         Value::String(resolved_user_id.to_string()),
     );
+    stamp_person_identity(&state.pool, ctx.project_id, resolved_user_id, &mut known).await;
 
     if !ua_info.browser.is_empty() {
         known.insert("browser".into(), Value::String(ua_info.browser));
@@ -284,4 +286,32 @@ pub async fn web(
     }
 
     success_response(warnings)
+}
+
+pub(crate) async fn stamp_person_identity(
+    pool: &sqlx::PgPool,
+    project_id: Uuid,
+    resolved_user_id: Uuid,
+    known: &mut HashMap<String, Value>,
+) {
+    let distinct_id = resolved_user_id.to_string();
+    match resolve_person_for_distinct_id(pool, project_id, &distinct_id).await {
+        Ok(Some(person)) => {
+            known.insert(
+                "person_id".into(),
+                Value::String(person.person_id.to_string()),
+            );
+            known.insert("external_id".into(), Value::String(person.external_id));
+            known.insert("is_identified".into(), Value::Bool(true));
+        }
+        Ok(None) => {
+            known.insert("person_id".into(), Value::String(distinct_id));
+            known.insert("is_identified".into(), Value::Bool(false));
+        }
+        Err(error) => {
+            warn!("Failed to resolve person identity: {}", error);
+            known.insert("person_id".into(), Value::String(distinct_id));
+            known.insert("is_identified".into(), Value::Bool(false));
+        }
+    }
 }

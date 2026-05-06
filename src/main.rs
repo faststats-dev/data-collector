@@ -22,6 +22,7 @@ use tower_http::decompression::RequestDecompressionLayer;
 use tracing::{info, warn};
 mod batch_queue;
 mod handler;
+mod identity;
 mod models;
 mod polar;
 mod replay_storage;

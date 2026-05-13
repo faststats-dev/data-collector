@@ -4,6 +4,7 @@ use aws_sdk_s3::primitives::ByteStream;
 use serde::Serialize;
 use serde_json::{Map, Value};
 use std::collections::{HashMap, HashSet};
+use std::io::Write;
 use tracing::warn;
 use uuid::Uuid;
 
@@ -157,10 +158,7 @@ impl ReplayStorage {
         }
 
         let snapshot_id = Uuid::new_v4();
-        let serialized = serde_json::to_vec(&input.events)?;
-        let uncompressed_bytes = i64::try_from(serialized.len()).unwrap_or(i64::MAX);
-        let compressed = zstd_bytes(&serialized)?;
-        drop(serialized);
+        let (compressed, uncompressed_bytes) = zstd_json_value_array(&input.events)?;
         let compressed_bytes = i64::try_from(compressed.len()).unwrap_or(i64::MAX);
         let first_event_timestamp_ms = replay_first_event_timestamp_ms(&input.events);
         let last_event_timestamp_ms = replay_last_event_timestamp_ms(&input.events);
@@ -557,8 +555,48 @@ impl ReplayStorage {
     }
 }
 
-fn zstd_bytes(bytes: &[u8]) -> Result<Vec<u8>, std::io::Error> {
-    zstd::bulk::compress(bytes, ZSTD_COMPRESSION_LEVEL)
+struct CountingWriter<W> {
+    inner: W,
+    bytes_written: usize,
+}
+
+impl<W> CountingWriter<W> {
+    fn new(inner: W) -> Self {
+        Self {
+            inner,
+            bytes_written: 0,
+        }
+    }
+
+    fn into_inner(self) -> W {
+        self.inner
+    }
+
+    fn bytes_written(&self) -> usize {
+        self.bytes_written
+    }
+}
+
+impl<W: Write> Write for CountingWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let written = self.inner.write(buf)?;
+        self.bytes_written = self.bytes_written.saturating_add(written);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+fn zstd_json_value_array(events: &[Value]) -> Result<(Vec<u8>, i64), ReplayStorageError> {
+    let writer = CountingWriter::new(Vec::new());
+    let mut encoder = zstd::stream::write::Encoder::new(writer, ZSTD_COMPRESSION_LEVEL)?;
+    serde_json::to_writer(&mut encoder, events)?;
+    let writer = encoder.finish()?;
+    let uncompressed_bytes = i64::try_from(writer.bytes_written()).unwrap_or(i64::MAX);
+
+    Ok((writer.into_inner(), uncompressed_bytes))
 }
 
 fn replay_timestamp_ms(event: &Value) -> Option<i64> {

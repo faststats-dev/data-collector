@@ -95,7 +95,7 @@ pub async fn replay(
         timestamp: _,
         url,
         identifier,
-        events,
+        mut events,
     } = parsed;
 
     let context = match load_project_context(&state.pool, &token).await {
@@ -153,9 +153,9 @@ pub async fn replay(
         crate::utils::hash_server_id(identifier, context.project_id)
     };
 
-    let valid_events: Vec<Value> = events.into_iter().filter(is_valid_rrweb_event).collect();
+    events.retain(is_valid_rrweb_event);
 
-    if valid_events.is_empty() {
+    if events.is_empty() {
         return error_response(StatusCode::BAD_REQUEST, "No valid events");
     }
 
@@ -182,7 +182,7 @@ pub async fn replay(
                 sequence: i32::try_from(sequence).ok(),
                 identifier: Some(server_id.to_string()),
                 url: Some(url),
-                events: valid_events,
+                events,
             },
         )
         .await

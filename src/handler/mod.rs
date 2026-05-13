@@ -1160,7 +1160,7 @@ async fn process_replay_request(
         timestamp: _,
         url,
         identifier,
-        events,
+        mut events,
     } = parsed;
 
     let ctx = load_project_context(pool, &token)
@@ -1184,11 +1184,8 @@ async fn process_replay_request(
         organization_id: ctx.organization_id.as_deref().map(Into::into),
     };
 
-    let valid_events: Vec<_> = events
-        .into_iter()
-        .filter(crate::handler::replay::is_valid_rrweb_event)
-        .collect();
-    if valid_events.is_empty() {
+    events.retain(crate::handler::replay::is_valid_rrweb_event);
+    if events.is_empty() {
         return Err("No valid events".to_string());
     }
 
@@ -1202,7 +1199,7 @@ async fn process_replay_request(
                 sequence: i32::try_from(sequence).ok(),
                 identifier: Some(server_id.to_string()),
                 url: Some(url),
-                events: valid_events,
+                events,
             },
         )
         .await

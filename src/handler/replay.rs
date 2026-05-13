@@ -87,7 +87,6 @@ pub async fn replay(
             return error_response(StatusCode::BAD_REQUEST, &format!("Invalid JSON: {}", e));
         }
     };
-    let request_body = body.into_owned();
     let ReplayRequest {
         token,
         session_id,
@@ -110,7 +109,7 @@ pub async fn replay(
             let failed = FailedRequest {
                 request_type: RequestType::Replay,
                 token: token.clone(),
-                body: request_body,
+                body: body.to_vec(),
                 country: None,
                 client_ip: if client_ip.is_empty() {
                     None
@@ -173,25 +172,6 @@ pub async fn replay(
         organization_id: context.organization_id.as_deref().map(Into::into),
     };
 
-    let client_ip = if client_ip.is_empty() {
-        None
-    } else {
-        Some(client_ip.to_string())
-    };
-    let user_agent = headers
-        .get("User-Agent")
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_string);
-    let failed_request = FailedRequest {
-        request_type: RequestType::Replay,
-        token: token.clone(),
-        body: request_body,
-        country: None,
-        client_ip,
-        user_agent,
-        origin: None,
-    };
-
     match replay_storage
         .store_replay_chunk(
             &state.pool,
@@ -214,6 +194,24 @@ pub async fn replay(
         }
         Err(error) => {
             error!("Failed to store replay: {}", error);
+            let client_ip = if client_ip.is_empty() {
+                None
+            } else {
+                Some(client_ip.to_string())
+            };
+            let user_agent = headers
+                .get("User-Agent")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string);
+            let failed_request = FailedRequest {
+                request_type: RequestType::Replay,
+                token: token.clone(),
+                body: body.into_owned(),
+                country: None,
+                client_ip,
+                user_agent,
+                origin: None,
+            };
             if let Err(backup_error) = state
                 .batch_queue
                 .backup_store

@@ -160,6 +160,7 @@ impl ReplayStorage {
         let serialized = serde_json::to_vec(&input.events)?;
         let uncompressed_bytes = i64::try_from(serialized.len()).unwrap_or(i64::MAX);
         let compressed = zstd_bytes(&serialized)?;
+        drop(serialized);
         let compressed_bytes = i64::try_from(compressed.len()).unwrap_or(i64::MAX);
         let first_event_timestamp_ms = replay_first_event_timestamp_ms(&input.events);
         let last_event_timestamp_ms = replay_last_event_timestamp_ms(&input.events);

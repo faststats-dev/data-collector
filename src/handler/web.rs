@@ -145,7 +145,7 @@ pub async fn web(
         let Some(uid) = user_id else {
             return error_response(StatusCode::BAD_REQUEST, "userId is required");
         };
-        uid
+        crate::utils::hash_server_id(uid, ctx.project_id)
     };
 
     known.insert(

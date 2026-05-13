@@ -350,7 +350,7 @@ mod tests {
         #[test]
         fn validates_float() {
             let ds = make_data_source("number");
-            let value = json!(3.14159);
+            let value = json!(1.25);
             assert!(validate_scalar(&value, &ds, None).is_ok());
         }
 
@@ -408,7 +408,7 @@ mod tests {
         fn allows_float_when_permitted() {
             let mut ds = make_data_source("number");
             ds.allow_float = Some(true);
-            let value = json!(3.14);
+            let value = json!(2.5);
             assert!(validate_scalar(&value, &ds, None).is_ok());
         }
 
@@ -416,7 +416,7 @@ mod tests {
         fn rejects_float_when_not_permitted() {
             let mut ds = make_data_source("number");
             ds.allow_float = Some(false);
-            let value = json!(3.14);
+            let value = json!(2.5);
             assert!(validate_scalar(&value, &ds, None).is_err());
         }
 
@@ -940,8 +940,8 @@ mod tests {
 
         #[test]
         fn extracts_float() {
-            let value = json!(3.14);
-            assert_eq!(extract_number(&value), Some(3.14));
+            let value = json!(2.5);
+            assert_eq!(extract_number(&value), Some(2.5));
         }
 
         #[test]

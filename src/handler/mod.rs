@@ -99,7 +99,7 @@ pub fn decompress_body<'a>(
     match encoding {
         Some("gzip") => {
             let mut decoder = flate2::read::GzDecoder::new(body);
-            let mut decompressed = Vec::new();
+            let mut decompressed = Vec::with_capacity(body.len());
             decoder
                 .read_to_end(&mut decompressed)
                 .map_err(|e| format!("Failed to decompress gzip: {}", e))?;
@@ -112,7 +112,7 @@ pub fn decompress_body<'a>(
         }
         Some("deflate") => {
             let mut decoder = flate2::read::DeflateDecoder::new(body);
-            let mut decompressed = Vec::new();
+            let mut decompressed = Vec::with_capacity(body.len());
             decoder
                 .read_to_end(&mut decompressed)
                 .map_err(|e| format!("Failed to decompress deflate: {}", e))?;

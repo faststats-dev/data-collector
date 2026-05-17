@@ -298,7 +298,10 @@ pub fn validate_hostname(allowed_hostnames: &[String], request_origin: Option<&s
         if p == "*" {
             true
         } else if let Some(suffix) = p.strip_prefix("*.") {
-            origin_lower == suffix || origin_lower.ends_with(&format!(".{suffix}"))
+            origin_lower == suffix
+                || origin_lower
+                    .strip_suffix(suffix)
+                    .is_some_and(|prefix| prefix.ends_with('.'))
         } else {
             p == origin_lower
         }
@@ -657,14 +660,14 @@ pub async fn insert_mods_event(
     Ok(event_id)
 }
 
-fn build_error_rows(error: &Error, errors: &mut Vec<ErrorRow>) -> String {
+fn build_error_rows(mut error: Error, errors: &mut Vec<ErrorRow>) -> String {
     let cause = error
         .cause
-        .as_ref()
-        .map(|cause| build_error_rows(cause, errors));
+        .take()
+        .map(|cause| build_error_rows(*cause, errors));
     let cause_hash = cause.as_deref().unwrap_or("");
-    let message = error.message.clone().unwrap_or_default();
-    let stack = error.stack.clone().unwrap_or_default();
+    let message = error.message.unwrap_or_default();
+    let stack = error.stack.unwrap_or_default();
     let stack_json = serde_json::to_string(&stack).unwrap_or_default();
     let hash = sha256_hex(&[
         error.error.as_bytes(),
@@ -677,7 +680,7 @@ fn build_error_rows(error: &Error, errors: &mut Vec<ErrorRow>) -> String {
     ]);
     errors.push(ErrorRow {
         hash: hash.clone(),
-        name: error.error.clone(),
+        name: error.error,
         message,
         stack,
         cause_hash: cause,
@@ -696,7 +699,7 @@ pub async fn insert_error_entries(
     let (error_hash, error_rows, stack_placeholders) = match params.stack_processing {
         ErrorStackProcessing::Raw => {
             let mut error_rows = Vec::new();
-            let error_hash = build_error_rows(&data.error, &mut error_rows);
+            let error_hash = build_error_rows(data.error, &mut error_rows);
             (error_hash, error_rows, "{}".to_string())
         }
         ErrorStackProcessing::JavaCollect => {

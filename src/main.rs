@@ -177,10 +177,10 @@ async fn main() {
         .parse()
         .expect("Failed to parse METRICS_PORT");
 
-    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port))
+    let listener = tokio::net::TcpListener::bind(("0.0.0.0", port))
         .await
         .unwrap();
-    let metrics_listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", metrics_port))
+    let metrics_listener = tokio::net::TcpListener::bind(("0.0.0.0", metrics_port))
         .await
         .unwrap();
 

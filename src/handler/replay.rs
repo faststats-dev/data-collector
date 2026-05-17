@@ -159,7 +159,7 @@ pub async fn replay(
         return error_response(StatusCode::BAD_REQUEST, "No valid events");
     }
 
-    let Some(replay_storage) = state.replay_storage.clone() else {
+    let Some(replay_storage) = state.replay_storage.as_deref() else {
         return error_response(
             StatusCode::SERVICE_UNAVAILABLE,
             "Replay storage is not configured",

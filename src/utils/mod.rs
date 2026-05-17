@@ -8,22 +8,23 @@ pub fn sha256_hex(parts: &[&[u8]]) -> String {
     for part in parts {
         hasher.update(part);
     }
-    hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{:02x}", b))
-        .collect()
+
+    hex_encode(&hasher.finalize())
 }
 
-pub fn hash_to_uuid(hash: &str) -> Uuid {
-    let bytes = hex_to_bytes(hash);
-    Uuid::from_slice(&bytes[..16]).unwrap()
+fn hash_parts_to_uuid(parts: &[&[u8]]) -> Uuid {
+    let mut hasher = Sha256::new();
+    for part in parts {
+        hasher.update(part);
+    }
+
+    let hash = hasher.finalize();
+    Uuid::from_slice(&hash[..16]).unwrap()
 }
 
 /// SHA256 hash the server_id with the project_id to produce a deterministic UUID.
 pub fn hash_server_id(server_id: Uuid, project_id: Uuid) -> Uuid {
-    let hash = sha256_hex(&[server_id.as_bytes(), project_id.as_bytes()]);
-    hash_to_uuid(&hash)
+    hash_parts_to_uuid(&[server_id.as_bytes(), project_id.as_bytes()])
 }
 
 /// GDPR-compliant daily-rotating hash for cookieless tracking.
@@ -32,23 +33,22 @@ pub fn hash_server_id(server_id: Uuid, project_id: Uuid) -> Uuid {
 /// and the original IP/UA cannot be recovered.
 pub fn cookieless_server_id(ip: &str, user_agent: &str, project_id: Uuid) -> Uuid {
     let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
-    let hash = sha256_hex(&[
+    hash_parts_to_uuid(&[
         ip.as_bytes(),
         user_agent.as_bytes(),
         project_id.as_bytes(),
         today.as_bytes(),
-    ]);
-    hash_to_uuid(&hash)
+    ])
 }
 
-fn hex_to_bytes(hash: &str) -> Vec<u8> {
-    hash.as_bytes()
-        .chunks(2)
-        .map(|chunk| {
-            let hex = std::str::from_utf8(chunk).unwrap();
-            u8::from_str_radix(hex, 16).unwrap()
-        })
-        .collect()
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
 }
 
 #[cfg(test)]

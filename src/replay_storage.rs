@@ -2,7 +2,7 @@ use aws_sdk_s3::Client;
 use aws_sdk_s3::config::{Builder as S3ConfigBuilder, Credentials, Region};
 use aws_sdk_s3::primitives::ByteStream;
 use serde::Serialize;
-use serde_json::{Map, Value};
+use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use tracing::warn;
@@ -412,14 +412,6 @@ impl ReplayStorage {
         pool: &sqlx::PgPool,
         input: ReplayFilterEventInput<'_>,
     ) -> Result<(), ReplayStorageError> {
-        let custom_json = Value::Object(
-            input
-                .custom
-                .iter()
-                .map(|(key, value)| (key.clone(), value.clone()))
-                .collect::<Map<String, Value>>(),
-        );
-
         let mut tx = pool.begin().await?;
 
         sqlx::query(
@@ -443,7 +435,7 @@ impl ReplayStorage {
         .bind(input.country)
         .bind(input.os)
         .bind(normalize_route(input.url))
-        .bind(sqlx::types::Json(custom_json))
+        .bind(sqlx::types::Json(input.custom))
         .execute(&mut *tx)
         .await?;
 

@@ -913,9 +913,10 @@ async fn process_web_request(
         let ua = request.user_agent.as_deref().unwrap_or("");
         crate::utils::cookieless_server_id(ip, ua, ctx.project_id)
     } else {
-        parsed
+        let user_id = parsed
             .user_id
-            .ok_or_else(|| "userId is required".to_string())?
+            .ok_or_else(|| "userId is required".to_string())?;
+        crate::utils::hash_server_id(user_id, ctx.project_id)
     };
 
     let mut data = parsed.data;
@@ -1077,10 +1078,10 @@ async fn process_vitals_request(
 
     let now = chrono::Utc::now();
     let metadata = req.metadata.as_ref();
-    let device = metadata.and_then(|m| m.device.clone());
-    let os = metadata.and_then(|m| m.os.clone());
-    let browser = metadata.and_then(|m| m.browser.clone());
-    let url = metadata.and_then(|m| m.url.clone()).unwrap_or_default();
+    let device = metadata.and_then(|m| m.device.as_deref());
+    let os = metadata.and_then(|m| m.os.as_deref());
+    let browser = metadata.and_then(|m| m.browser.as_deref());
+    let url = metadata.and_then(|m| m.url.as_deref()).unwrap_or("");
 
     let tracking_ctx = TrackingContext {
         owner_id: ctx.billing_customer_id.as_str().into(),
@@ -1088,35 +1089,27 @@ async fn process_vitals_request(
         organization_id: ctx.organization_id.as_deref().map(Into::into),
     };
 
-    let device: Option<Arc<str>> = device.map(Into::into);
-    let os: Option<Arc<str>> = os.map(Into::into);
-    let browser: Option<Arc<str>> = browser.map(Into::into);
-    let url: Arc<str> = url.into();
-    let country: Option<Arc<str>> = request.country.as_deref().map(Into::into);
-    let session_id: Option<Arc<str>> = req.session_id.as_deref().map(Into::into);
-
     for vital in &req.vitals {
-        let attributes_str: Arc<str> = vital
+        let attributes = vital
             .attributes
             .as_ref()
-            .and_then(|attrs| serde_json::to_string(attrs).ok())
-            .map(Into::into)
-            .unwrap_or_else(|| "{}".into());
+            .map(|attrs| serde_json::to_string(attrs).unwrap_or_else(|_| "{}".to_string()))
+            .unwrap_or_else(|| "{}".to_string());
 
         let row = crate::tinybird::WebVitalRow {
             id: Uuid::new_v4(),
             project_id: ctx.project_id,
             metric: vital.metric.clone(),
             value: vital.value,
-            device: device.as_ref().map(|s| s.to_string()),
-            country: country.as_ref().map(|s| s.to_string()),
-            os: os.as_ref().map(|s| s.to_string()),
+            device: device.map(str::to_owned),
+            country: request.country.clone(),
+            os: os.map(str::to_owned),
             os_version: None,
-            browser: browser.as_ref().map(|s| s.to_string()),
+            browser: browser.map(str::to_owned),
             browser_version: None,
-            url: url.to_string(),
-            attributes: attributes_str.to_string(),
-            session_id: session_id.as_ref().map(|s| s.to_string()),
+            url: url.to_owned(),
+            attributes,
+            session_id: req.session_id.clone(),
             created_at: now,
         };
 
@@ -1130,7 +1123,7 @@ async fn process_vitals_request(
 
         if let Some(session_id) = req.session_id.as_deref()
             && let Some(replay_storage) = replay_storage
-            && is_poor_web_vital(&vital.metric, vital.value)
+            && crate::handler::vitals::is_poor_web_vital(&vital.metric, vital.value)
             && let Err(error) = replay_storage
                 .mark_session_poor_vital(pool, ctx.project_id, session_id)
                 .await
@@ -1208,18 +1201,6 @@ async fn process_replay_request(
     batch_queue.track_replay_usage(&session_id, tracking_ctx);
 
     Ok(())
-}
-
-fn is_poor_web_vital(metric: &str, value: f64) -> bool {
-    match metric {
-        "LCP" => value >= 4000.0,
-        "FCP" => value >= 3000.0,
-        "INP" => value >= 500.0,
-        "CLS" => value >= 0.25,
-        "TTFB" => value >= 1800.0,
-        "FID" => value >= 300.0,
-        _ => false,
-    }
 }
 
 #[cfg(test)]

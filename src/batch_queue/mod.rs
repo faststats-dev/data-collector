@@ -708,23 +708,8 @@ impl BatchQueue {
             let failed_count = result.failure_count();
             let succeeded_count = event_ids.len() - failed_count;
 
-            if succeeded_count > 0 {
-                // Remove only the IDs for events that succeeded (first N events)
-                let succeeded_ids = &event_ids[..succeeded_count];
-                if let Err(e) = self
-                    .backup_store
-                    .remove_backed_up_events(succeeded_ids)
-                    .await
-                {
-                    error!(
-                        "Failed to remove {} succeeded events: {}",
-                        succeeded_count, e
-                    );
-                }
-            }
-
             warn!(
-                "Replay partially failed: {} succeeded, {} failed (kept in backup)",
+                "Replay partially failed: {} succeeded, {} failed (kept all events in backup)",
                 succeeded_count, failed_count
             );
         }

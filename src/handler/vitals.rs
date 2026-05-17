@@ -13,7 +13,6 @@ use axum::response::IntoResponse;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use std::sync::Arc;
 use tracing::{error, warn};
 use uuid::Uuid;
 
@@ -109,10 +108,10 @@ pub async fn vitals(
         organization_id: ctx.organization_id.as_deref().map(Into::into),
     };
 
-    let country: Option<Arc<str>> = headers
+    let country = headers
         .get("CF-IPCountry")
         .and_then(|v| v.to_str().ok())
-        .map(Into::into);
+        .map(str::to_owned);
 
     let user_agent = headers
         .get("User-Agent")
@@ -124,57 +123,49 @@ pub async fn vitals(
     };
 
     let metadata = req.metadata.as_ref();
-    let device: Arc<str> = metadata
+    let device = metadata
         .and_then(|m| m.device.as_deref())
-        .map(Into::into)
-        .unwrap_or_else(|| ua_info.device.into());
-    let os: Arc<str> = metadata
+        .unwrap_or(ua_info.device);
+    let os = metadata
         .and_then(|m| m.os.as_deref())
-        .map(Into::into)
-        .unwrap_or_else(|| ua_info.os.into());
-    let browser: Arc<str> = metadata
+        .unwrap_or(ua_info.os.as_str());
+    let browser = metadata
         .and_then(|m| m.browser.as_deref())
-        .map(Into::into)
-        .unwrap_or_else(|| ua_info.browser.into());
-    let browser_version: Arc<str> = ua_info.browser_version.into();
-    let os_version: Arc<str> = ua_info.os_version.into();
-    let url: Arc<str> = metadata
-        .and_then(|m| m.url.as_deref())
-        .map(Into::into)
-        .unwrap_or_else(|| "".into());
-    let session_id: Option<Arc<str>> = req.session_id.as_deref().map(Into::into);
+        .unwrap_or(ua_info.browser.as_str());
+    let browser_version = ua_info.browser_version.as_str();
+    let os_version = ua_info.os_version.as_str();
+    let url = metadata.and_then(|m| m.url.as_deref()).unwrap_or("");
     let now = chrono::Utc::now();
 
     for vital in &req.vitals {
-        let attributes: Arc<str> = vital
+        let attributes = vital
             .attributes
             .as_ref()
-            .and_then(|a| serde_json::to_string(a).ok())
-            .map(Into::into)
-            .unwrap_or_else(|| "{}".into());
+            .map(|attrs| serde_json::to_string(attrs).unwrap_or_else(|_| "{}".to_string()))
+            .unwrap_or_else(|| "{}".to_string());
 
         let row = WebVitalRow {
             id: Uuid::new_v4(),
             project_id: ctx.project_id,
             metric: vital.metric.clone(),
             value: vital.value,
-            device: Some(device.to_string()),
-            country: country.as_ref().map(|c| c.to_string()),
-            os: Some(os.to_string()),
+            device: Some(device.to_owned()),
+            country: country.clone(),
+            os: Some(os.to_owned()),
             os_version: if os_version.is_empty() {
                 None
             } else {
-                Some(os_version.to_string())
+                Some(os_version.to_owned())
             },
-            browser: Some(browser.to_string()),
+            browser: Some(browser.to_owned()),
             browser_version: if browser_version.is_empty() {
                 None
             } else {
-                Some(browser_version.to_string())
+                Some(browser_version.to_owned())
             },
-            url: url.to_string(),
-            attributes: attributes.to_string(),
-            session_id: session_id.as_ref().map(|s| s.to_string()),
+            url: url.to_owned(),
+            attributes,
+            session_id: req.session_id.clone(),
             created_at: now,
         };
 
@@ -207,7 +198,7 @@ pub async fn vitals(
     (StatusCode::OK, Json(json!({ "status": "success" })))
 }
 
-fn is_poor_web_vital(metric: &str, value: f64) -> bool {
+pub(crate) fn is_poor_web_vital(metric: &str, value: f64) -> bool {
     match metric {
         "LCP" => value >= 4000.0,
         "FCP" => value >= 3000.0,

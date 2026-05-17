@@ -15,7 +15,7 @@ const MAX_EVENTS_PER_REQUEST: usize = 500;
 #[derive(Clone)]
 pub struct PolarClient {
     client: Client,
-    token: String,
+    bearer_token: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -84,13 +84,17 @@ pub struct UsageCounts {
 
 impl PolarClient {
     pub fn new(token: String) -> Self {
+        let mut bearer_token = String::with_capacity("Bearer ".len() + token.len());
+        bearer_token.push_str("Bearer ");
+        bearer_token.push_str(&token);
+
         Self {
             client: Client::builder()
                 .pool_idle_timeout(std::time::Duration::from_secs(15))
                 .pool_max_idle_per_host(1)
                 .build()
                 .unwrap_or_else(|_| Client::new()),
-            token,
+            bearer_token,
         }
     }
 
@@ -174,7 +178,7 @@ impl PolarClient {
         let response = self
             .client
             .post(format!("{}/v1/events/ingest", POLAR_API_URL))
-            .header("Authorization", format!("Bearer {}", self.token))
+            .header("Authorization", &self.bearer_token)
             .json(&body)
             .send()
             .await?;

@@ -10,10 +10,10 @@ static REGEX_CACHE: LazyLock<Cache<Arc<str>, Arc<Regex>>> =
     LazyLock::new(|| Cache::builder().max_capacity(100).build());
 
 fn get_cached_regex(pattern: &str) -> Option<Arc<Regex>> {
-    let key: Arc<str> = pattern.into();
-    if let Some(re) = REGEX_CACHE.get(&key) {
+    if let Some(re) = REGEX_CACHE.get(pattern) {
         return Some(re);
     }
+    let key: Arc<str> = pattern.into();
     match Regex::new(pattern) {
         Ok(re) => {
             let arc_re = Arc::new(re);

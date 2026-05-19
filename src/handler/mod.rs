@@ -696,14 +696,23 @@ pub async fn insert_error_entries(
     data: ErrorTracking,
     params: ErrorEntryParams,
 ) -> Result<(), HandlerResponse> {
+    let ErrorTracking {
+        hash,
+        error,
+        count,
+        session_id,
+        build_id,
+        handled,
+    } = data;
+
     let (error_hash, error_rows, stack_placeholders) = match params.stack_processing {
         ErrorStackProcessing::Raw => {
             let mut error_rows = Vec::new();
-            let error_hash = build_error_rows(data.error, &mut error_rows);
+            let error_hash = build_error_rows(error, &mut error_rows);
             (error_hash, error_rows, "{}".to_string())
         }
         ErrorStackProcessing::JavaCollect => {
-            let parameterized = build_parameterized_error_rows(&data.error);
+            let parameterized = build_parameterized_error_rows(error);
             (
                 parameterized.error_hash,
                 parameterized.rows,
@@ -722,18 +731,18 @@ pub async fn insert_error_entries(
             })?;
     }
 
-    let occurrence_count = data.count.unwrap_or(1).max(1) as u32;
+    let occurrence_count = count.unwrap_or(1).max(1) as u32;
     let created_at = chrono::Utc::now();
     let error_tracking = ErrorTrackingRow {
         id: Uuid::new_v4(),
         project_id,
-        hash: data.hash.clone(),
+        hash,
         error_hash,
         count: occurrence_count,
         data_entry_id,
-        session_id: data.session_id.clone(),
+        session_id,
         identity_key: params.identity_key,
-        build_id: data.build_id.clone(),
+        build_id,
         plugin_version: params.details.plugin_version,
         source_kind: params.details.source_kind,
         entry_session_id: params.details.entry_session_id,
@@ -753,7 +762,7 @@ pub async fn insert_error_entries(
         entry_data: params.details.entry_data,
         stack_placeholders,
         context: params.context,
-        handled: data.handled,
+        handled,
         created_at,
     };
 

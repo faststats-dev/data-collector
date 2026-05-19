@@ -37,21 +37,22 @@ impl StackPlaceholderState {
         placeholder
     }
 
-    fn parameterize_stack_line(&mut self, line: &str) -> String {
+    fn parameterize_stack_line(&mut self, line: String) -> String {
         if !line.contains(".jar") {
-            return line.to_string();
+            return line;
         }
 
         STACKTRACE_JAR_PATTERN
-            .replace_all(line, |captures: &Captures| {
+            .replace_all(&line, |captures: &Captures| {
                 self.placeholder_for_jar(&captures[0])
             })
             .into_owned()
     }
 
-    fn parameterize_stack(&mut self, stack: &[String]) -> Vec<String> {
+    fn parameterize_stack(&mut self, stack: Option<Vec<String>>) -> Vec<String> {
         stack
-            .iter()
+            .unwrap_or_default()
+            .into_iter()
             .map(|line| self.parameterize_stack_line(line))
             .collect()
     }
@@ -62,17 +63,17 @@ impl StackPlaceholderState {
 }
 
 fn build_error_rows(
-    error: &Error,
+    mut error: Error,
     errors: &mut Vec<ErrorRow>,
     placeholders: &mut StackPlaceholderState,
 ) -> String {
     let cause = error
         .cause
-        .as_ref()
-        .map(|cause| build_error_rows(cause, errors, placeholders));
+        .take()
+        .map(|cause| build_error_rows(*cause, errors, placeholders));
     let cause_hash = cause.as_deref().unwrap_or("");
-    let message = error.message.clone().unwrap_or_default();
-    let stack = placeholders.parameterize_stack(&error.stack.clone().unwrap_or_default());
+    let message = error.message.unwrap_or_default();
+    let stack = placeholders.parameterize_stack(error.stack);
     let stack_json = serde_json::to_string(&stack).unwrap_or_default();
     let hash = sha256_hex(&[
         error.error.as_bytes(),
@@ -85,7 +86,7 @@ fn build_error_rows(
     ]);
     errors.push(ErrorRow {
         hash: hash.clone(),
-        name: error.error.clone(),
+        name: error.error,
         message,
         stack,
         cause_hash: cause,
@@ -94,7 +95,7 @@ fn build_error_rows(
     hash
 }
 
-pub fn build_parameterized_error_rows(error: &Error) -> ParameterizedErrorRows {
+pub fn build_parameterized_error_rows(error: Error) -> ParameterizedErrorRows {
     let mut placeholders = StackPlaceholderState::default();
     let mut rows = Vec::new();
     let error_hash = build_error_rows(error, &mut rows, &mut placeholders);
@@ -122,7 +123,7 @@ mod tests {
 
     #[test]
     fn parameterizes_jar_names_without_changing_non_jar_frames() {
-        let result = build_parameterized_error_rows(&build_test_error(
+        let result = build_parameterized_error_rows(build_test_error(
             &[
                 "java.lang.RuntimeException: boom",
                 "\tat plugin-1.2.3.jar//com.example.Plugin.handle(Plugin.java:42)",
@@ -148,7 +149,7 @@ mod tests {
 
     #[test]
     fn reuses_placeholders_for_repeated_jar_names() {
-        let result = build_parameterized_error_rows(&build_test_error(
+        let result = build_parameterized_error_rows(build_test_error(
             &[
                 "\tat plugin-1.2.3.jar//com.example.Plugin.handle(Plugin.java:42)",
                 "\t... 9 more ~[plugin-1.2.3.jar:?]",
@@ -171,11 +172,11 @@ mod tests {
 
     #[test]
     fn canonical_error_hash_matches_when_only_jar_names_change() {
-        let first = build_parameterized_error_rows(&build_test_error(
+        let first = build_parameterized_error_rows(build_test_error(
             &["\tat plugin-1.2.3.jar//com.example.Plugin.handle(Plugin.java:42)"],
             None,
         ));
-        let second = build_parameterized_error_rows(&build_test_error(
+        let second = build_parameterized_error_rows(build_test_error(
             &["\tat plugin-9.9.9.jar//com.example.Plugin.handle(Plugin.java:42)"],
             None,
         ));
@@ -195,7 +196,7 @@ mod tests {
             Some(cause),
         );
 
-        let result = build_parameterized_error_rows(&root);
+        let result = build_parameterized_error_rows(root);
 
         assert_eq!(result.rows.len(), 2);
         assert_eq!(

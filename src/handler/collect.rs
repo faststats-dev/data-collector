@@ -96,14 +96,11 @@ pub async fn collect(
         organization_id: ctx.organization_id.as_deref().map(Into::into),
     };
 
-    let error_entry_details =
-        build_mods_error_entry_details(server_id, country.as_deref(), &known, &valid_custom);
-
     let data_entry_id = match insert_mods_event(
         &state.batch_queue,
         ctx.project_id,
         server_id,
-        country,
+        country.as_deref(),
         &mut known,
         &valid_custom,
         Some(tracking_ctx.clone()),
@@ -118,7 +115,11 @@ pub async fn collect(
         return success_response(warnings);
     }
 
-    if let Some(errors) = errors {
+    if let Some(errors) = errors
+        && !errors.is_empty()
+    {
+        let error_entry_details =
+            build_mods_error_entry_details(server_id, country.as_deref(), &known, &valid_custom);
         let fallback_identity = server_id.to_string();
         for mut error in errors {
             if error.session_id.is_none() {

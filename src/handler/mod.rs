@@ -554,7 +554,7 @@ pub fn extract_known_fields(
     data: &mut HashMap<String, Value>,
     fields: &[&str],
 ) -> HashMap<String, Value> {
-    let mut extracted = HashMap::with_capacity(fields.len());
+    let mut extracted = HashMap::with_capacity(fields.len().min(data.len()));
     for &key in fields {
         if let Some(val) = data.remove(key) {
             extracted.insert(key.to_string(), val);
@@ -623,7 +623,7 @@ pub async fn insert_mods_event(
     batch_queue: &BatchQueue,
     project_id: Uuid,
     server_id: Uuid,
-    country: Option<String>,
+    country: Option<&str>,
     known: &mut HashMap<String, Value>,
     custom: &HashMap<String, Value>,
     tracking: Option<TrackingContext>,
@@ -645,7 +645,7 @@ pub async fn insert_mods_event(
         os_arch: extract_optional_string(known, "os_arch"),
         os_version: extract_optional_string(known, "os_version"),
         core_count: extract_optional_u16(known, "core_count"),
-        country,
+        country: country.map(str::to_owned),
         custom: to_custom_json(custom),
         created_at: chrono::Utc::now(),
     };
@@ -847,18 +847,11 @@ async fn process_collect_request(
         organization_id: ctx.organization_id.as_deref().map(Into::into),
     };
 
-    let error_entry_details = build_mods_error_entry_details(
-        server_id,
-        request.country.as_deref(),
-        &known,
-        &valid_custom,
-    );
-
     let data_entry_id = insert_mods_event(
         batch_queue,
         ctx.project_id,
         server_id,
-        request.country.clone(),
+        request.country.as_deref(),
         &mut known,
         &valid_custom,
         Some(tracking_ctx.clone()),
@@ -868,7 +861,14 @@ async fn process_collect_request(
 
     if ctx.error_tracking_enabled
         && let Some(errors) = errors
+        && !errors.is_empty()
     {
+        let error_entry_details = build_mods_error_entry_details(
+            server_id,
+            request.country.as_deref(),
+            &known,
+            &valid_custom,
+        );
         let fallback_identity = server_id.to_string();
         for mut error in errors {
             if error.session_id.is_none() {

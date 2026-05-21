@@ -1152,6 +1152,10 @@ async fn process_replay_request(
     let ReplayRequest {
         token,
         session_id,
+        window_id,
+        view_id,
+        session_start,
+        is_final,
         batch_id,
         sequence,
         timestamp: _,
@@ -1159,6 +1163,9 @@ async fn process_replay_request(
         identifier,
         mut events,
     } = parsed;
+    let window_id = window_id
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| session_id.clone());
 
     let ctx = load_project_context(pool, &token)
         .await
@@ -1192,6 +1199,10 @@ async fn process_replay_request(
             crate::replay_storage::ReplayChunkInput {
                 project_id: ctx.project_id,
                 session_id: session_id.clone(),
+                window_id,
+                view_id,
+                session_start_ms: session_start.and_then(|value| i64::try_from(value).ok()),
+                is_final,
                 batch_id,
                 sequence: i32::try_from(sequence).ok(),
                 identifier: Some(server_id.to_string()),

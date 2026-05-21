@@ -55,6 +55,14 @@ pub(crate) struct ReplayRequest {
     pub(crate) token: String,
     pub(crate) session_id: String,
     #[serde(default)]
+    pub(crate) window_id: Option<String>,
+    #[serde(default, alias = "pageId")]
+    pub(crate) view_id: Option<String>,
+    #[serde(default)]
+    pub(crate) session_start: Option<u64>,
+    #[serde(default)]
+    pub(crate) is_final: bool,
+    #[serde(default)]
     pub(crate) batch_id: Option<String>,
     pub(crate) sequence: u32,
     #[allow(dead_code)]
@@ -90,6 +98,10 @@ pub async fn replay(
     let ReplayRequest {
         token,
         session_id,
+        window_id,
+        view_id,
+        session_start,
+        is_final,
         batch_id,
         sequence,
         timestamp: _,
@@ -97,6 +109,9 @@ pub async fn replay(
         identifier,
         mut events,
     } = parsed;
+    let window_id = window_id
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| session_id.clone());
 
     let context = match load_project_context(&state.pool, &token).await {
         Ok(ctx) => ctx,
@@ -178,6 +193,10 @@ pub async fn replay(
             crate::replay_storage::ReplayChunkInput {
                 project_id: context.project_id,
                 session_id: session_id.clone(),
+                window_id,
+                view_id,
+                session_start_ms: session_start.and_then(|value| i64::try_from(value).ok()),
+                is_final,
                 batch_id,
                 sequence: i32::try_from(sequence).ok(),
                 identifier: Some(server_id.to_string()),

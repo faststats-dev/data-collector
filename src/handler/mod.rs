@@ -422,14 +422,24 @@ fn to_custom_json(data: &HashMap<String, Value>) -> String {
 fn build_web_entry_data(
     session_id: Option<&str>,
     country: Option<&str>,
-    known: &HashMap<String, Value>,
+    row: &WebEventRow,
     custom: &HashMap<String, Value>,
 ) -> String {
-    let mut data = serde_json::Map::with_capacity(known.len() + custom.len() + 2);
-
-    for (key, value) in known {
-        data.insert(key.clone(), value.clone());
+    let mut data = match serde_json::to_value(row) {
+        Ok(Value::Object(data)) => data,
+        _ => serde_json::Map::new(),
+    };
+    for key in [
+        "id",
+        "project_id",
+        "session_id",
+        "country",
+        "custom",
+        "created_at",
+    ] {
+        data.remove(key);
     }
+    data.retain(|_, value| !value.is_null());
 
     data.insert(
         "session_id".to_string(),
@@ -447,66 +457,45 @@ fn build_web_entry_data(
     serde_json::to_string(&data).unwrap_or_else(|_| "{}".to_string())
 }
 
-fn read_known_string(known: &HashMap<String, Value>, key: &str) -> String {
-    known
-        .get(key)
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .unwrap_or_default()
-}
-
-fn read_known_f64(known: &HashMap<String, Value>, key: &str) -> Option<f64> {
-    known.get(key).and_then(Value::as_f64)
-}
-
-fn read_known_u16(known: &HashMap<String, Value>, key: &str) -> Option<u16> {
-    known.get(key).and_then(value_as_u16)
-}
-
-fn read_known_bool(known: &HashMap<String, Value>, key: &str) -> Option<bool> {
-    known.get(key).and_then(Value::as_bool)
-}
-
 pub fn build_web_error_entry_details(
     session_id: Option<&str>,
     country: Option<&str>,
-    known: &HashMap<String, Value>,
+    row: &WebEventRow,
     custom: &HashMap<String, Value>,
 ) -> ErrorEntryDetails {
     ErrorEntryDetails {
         source_kind: "web-analytics".to_string(),
         entry_session_id: session_id.unwrap_or_default().to_string(),
         entry_country: country.unwrap_or_default().to_string(),
-        entry_browser: read_known_string(known, "browser"),
-        entry_device: read_known_string(known, "device"),
-        entry_os: read_known_string(known, "os"),
-        os_version: read_known_string(known, "os_version"),
-        entry_data: build_web_entry_data(session_id, country, known, custom),
+        entry_browser: row.browser.clone().unwrap_or_default(),
+        entry_device: row.device.clone().unwrap_or_default(),
+        entry_os: row.os.clone().unwrap_or_default(),
+        os_version: row.os_version.clone().unwrap_or_default(),
+        entry_data: build_web_entry_data(session_id, country, row, custom),
         ..ErrorEntryDetails::default()
     }
 }
 
 pub fn build_mods_error_entry_details(
-    server_id: Uuid,
     country: Option<&str>,
-    known: &HashMap<String, Value>,
+    row: &ModsEventRow,
     custom: &HashMap<String, Value>,
 ) -> ErrorEntryDetails {
     ErrorEntryDetails {
-        plugin_version: read_known_string(known, "plugin_version"),
+        plugin_version: row.plugin_version.clone().unwrap_or_default(),
         source_kind: "minecraft-plugin".to_string(),
-        entry_session_id: server_id.to_string(),
+        entry_session_id: row.server_id.to_string(),
         entry_country: country.unwrap_or_default().to_string(),
-        entry_os: read_known_string(known, "os_name"),
-        player_count: read_known_f64(known, "player_count"),
-        online_mode: read_known_bool(known, "online_mode"),
-        minecraft_version: read_known_string(known, "minecraft_version"),
-        server_type: read_known_string(known, "server_type"),
-        java_version: read_known_string(known, "java_version"),
-        java_vendor: read_known_string(known, "java_vendor"),
-        os_version: read_known_string(known, "os_version"),
-        os_arch: read_known_string(known, "os_arch"),
-        core_count: read_known_u16(known, "core_count"),
+        entry_os: row.os_name.clone().unwrap_or_default(),
+        player_count: row.player_count,
+        online_mode: row.online_mode,
+        minecraft_version: row.minecraft_version.clone().unwrap_or_default(),
+        server_type: row.server_type.clone().unwrap_or_default(),
+        java_version: row.java_version.clone().unwrap_or_default(),
+        java_vendor: row.java_vendor.clone().unwrap_or_default(),
+        os_version: row.os_version.clone().unwrap_or_default(),
+        os_arch: row.os_arch.clone().unwrap_or_default(),
+        core_count: row.core_count,
         entry_data: to_custom_json(custom),
         ..ErrorEntryDetails::default()
     }
@@ -563,19 +552,15 @@ pub fn extract_known_fields(
     extracted
 }
 
-pub async fn insert_web_event(
-    batch_queue: &BatchQueue,
+pub fn build_web_event_row(
     project_id: Uuid,
+    known: &mut HashMap<String, Value>,
     session_id: Option<String>,
     country: Option<String>,
-    known: &mut HashMap<String, Value>,
     custom: &HashMap<String, Value>,
-    tracking: Option<TrackingContext>,
-) -> Result<Uuid, HandlerResponse> {
-    let event_id = Uuid::new_v4();
-
-    let row = WebEventRow {
-        id: event_id,
+) -> WebEventRow {
+    WebEventRow {
+        id: Uuid::new_v4(),
         project_id,
         user_id: extract_optional_string(known, "user_id"),
         person_id: extract_optional_string(known, "person_id"),
@@ -604,8 +589,15 @@ pub async fn insert_web_event(
         country,
         custom: to_custom_json(custom),
         created_at: chrono::Utc::now(),
-    };
+    }
+}
 
+pub async fn insert_web_event(
+    batch_queue: &BatchQueue,
+    row: WebEventRow,
+    tracking: Option<TrackingContext>,
+) -> Result<Uuid, HandlerResponse> {
+    let event_id = row.id;
     batch_queue
         .queue_event(QueuedEvent::WebEvent {
             row: Box::new(row),
@@ -619,19 +611,15 @@ pub async fn insert_web_event(
     Ok(event_id)
 }
 
-pub async fn insert_mods_event(
-    batch_queue: &BatchQueue,
+pub fn build_mods_event_row(
     project_id: Uuid,
     server_id: Uuid,
     country: Option<&str>,
     known: &mut HashMap<String, Value>,
     custom: &HashMap<String, Value>,
-    tracking: Option<TrackingContext>,
-) -> Result<Uuid, HandlerResponse> {
-    let event_id = Uuid::new_v4();
-
-    let row = ModsEventRow {
-        id: event_id,
+) -> ModsEventRow {
+    ModsEventRow {
+        id: Uuid::new_v4(),
         project_id,
         server_id,
         player_count: extract_optional_f64(known, "player_count"),
@@ -648,8 +636,15 @@ pub async fn insert_mods_event(
         country: country.map(str::to_owned),
         custom: to_custom_json(custom),
         created_at: chrono::Utc::now(),
-    };
+    }
+}
 
+pub async fn insert_mods_event(
+    batch_queue: &BatchQueue,
+    row: ModsEventRow,
+    tracking: Option<TrackingContext>,
+) -> Result<Uuid, HandlerResponse> {
+    let event_id = row.id;
     batch_queue
         .queue_event(QueuedEvent::ModsEvent { row, tracking })
         .await
@@ -847,28 +842,25 @@ async fn process_collect_request(
         organization_id: ctx.organization_id.as_deref().map(Into::into),
     };
 
-    let data_entry_id = insert_mods_event(
-        batch_queue,
+    let event_row = build_mods_event_row(
         ctx.project_id,
         server_id,
         request.country.as_deref(),
         &mut known,
         &valid_custom,
-        Some(tracking_ctx.clone()),
-    )
-    .await
-    .map_err(|_| "Failed to queue event".to_string())?;
+    );
+
+    let data_entry_id =
+        insert_mods_event(batch_queue, event_row.clone(), Some(tracking_ctx.clone()))
+            .await
+            .map_err(|_| "Failed to queue event".to_string())?;
 
     if ctx.error_tracking_enabled
         && let Some(errors) = errors
         && !errors.is_empty()
     {
-        let error_entry_details = build_mods_error_entry_details(
-            server_id,
-            request.country.as_deref(),
-            &known,
-            &valid_custom,
-        );
+        let error_entry_details =
+            build_mods_error_entry_details(request.country.as_deref(), &event_row, &valid_custom);
         let fallback_identity = server_id.to_string();
         for mut error in errors {
             if error.session_id.is_none() {
@@ -985,24 +977,24 @@ async fn process_web_request(
         organization_id: ctx.organization_id.as_deref().map(Into::into),
     };
     let fallback_identity = resolved_user_id.to_string();
+    let event_row = build_web_event_row(
+        ctx.project_id,
+        &mut known,
+        parsed.session_id.clone(),
+        request.country.clone(),
+        &valid_custom,
+    );
     let error_entry_details = build_web_error_entry_details(
         parsed.session_id.as_deref(),
         request.country.as_deref(),
-        &known,
+        &event_row,
         &valid_custom,
     );
 
-    let data_entry_id = insert_web_event(
-        batch_queue,
-        ctx.project_id,
-        parsed.session_id.clone(),
-        request.country.clone(),
-        &mut known,
-        &valid_custom,
-        Some(tracking_ctx.clone()),
-    )
-    .await
-    .map_err(|_| "Failed to queue event".to_string())?;
+    let data_entry_id =
+        insert_web_event(batch_queue, event_row.clone(), Some(tracking_ctx.clone()))
+            .await
+            .map_err(|_| "Failed to queue event".to_string())?;
 
     if let Some(session_id) = parsed.session_id.as_deref()
         && let Some(replay_storage) = replay_storage
@@ -1013,10 +1005,10 @@ async fn process_web_request(
                     project_id: ctx.project_id,
                     session_id,
                     identifier: Some(fallback_identity.as_str()),
-                    browser: known.get("browser").and_then(Value::as_str),
-                    os: known.get("os").and_then(Value::as_str),
+                    browser: event_row.browser.as_deref(),
+                    os: event_row.os.as_deref(),
                     country: request.country.as_deref(),
-                    url: known.get("url").and_then(Value::as_str),
+                    url: event_row.url.as_deref(),
                     custom: &valid_custom,
                 },
             )

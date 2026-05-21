@@ -183,24 +183,19 @@ pub async fn web(
         organization_id: ctx.organization_id.as_deref().map(Into::into),
     };
     let fallback_identity = resolved_user_id.to_string();
+    let event_row = super::build_web_event_row(
+        ctx.project_id,
+        &mut known,
+        session_id.clone(),
+        country.clone(),
+        &valid_custom,
+    );
     let error_entry_details = build_web_error_entry_details(
         session_id.as_deref(),
         country.as_deref(),
-        &known,
+        &event_row,
         &valid_custom,
     );
-    let replay_browser = known
-        .get("browser")
-        .and_then(|value| value.as_str())
-        .map(str::to_string);
-    let replay_os = known
-        .get("os")
-        .and_then(|value| value.as_str())
-        .map(str::to_string);
-    let replay_url = known
-        .get("url")
-        .and_then(|value| value.as_str())
-        .map(str::to_string);
 
     if let Some(session_id) = session_id.as_deref()
         && let Some(replay_storage) = state.replay_storage.as_deref()
@@ -211,10 +206,10 @@ pub async fn web(
                     project_id: ctx.project_id,
                     session_id,
                     identifier: Some(fallback_identity.as_str()),
-                    browser: replay_browser.as_deref(),
-                    os: replay_os.as_deref(),
+                    browser: event_row.browser.as_deref(),
+                    os: event_row.os.as_deref(),
                     country: country.as_deref(),
-                    url: replay_url.as_deref(),
+                    url: event_row.url.as_deref(),
                     custom: &valid_custom,
                 },
             )
@@ -226,17 +221,7 @@ pub async fn web(
     let data_entry_id = if is_debounced {
         None
     } else {
-        match insert_web_event(
-            &state.batch_queue,
-            ctx.project_id,
-            session_id.clone(),
-            country,
-            &mut known,
-            &valid_custom,
-            Some(tracking_ctx.clone()),
-        )
-        .await
-        {
+        match insert_web_event(&state.batch_queue, event_row, Some(tracking_ctx.clone())).await {
             Ok(id) => Some(id),
             Err(e) => return e,
         }

@@ -1,9 +1,11 @@
 mod backup_store;
 pub use backup_store::BackupStore;
 
+use crate::error_tracking::sourcemaps::SourcemapResolver;
 use crate::polar::{PolarClient, UsageCounts};
 use crate::tinybird::{
-    ErrorRow, ErrorTrackingRow, ModsEventRow, ReplayRow, TinybirdClient, WebEventRow, WebVitalRow,
+    ErrorOccurrenceV3Row, ErrorRow, ErrorTrackingRow, ModsEventRow, ReplayRow, TinybirdClient,
+    WebEventRow, WebVitalRow,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -82,6 +84,11 @@ pub enum QueuedEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         tracking: Option<TrackingContext>,
     },
+    ErrorOccurrenceV3 {
+        row: Box<ErrorOccurrenceV3Row>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tracking: Option<TrackingContext>,
+    },
     WebVital {
         row: WebVitalRow,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -101,6 +108,7 @@ impl QueuedEvent {
             QueuedEvent::ModsEvent { .. } => "mods_events",
             QueuedEvent::Error(_) => "errors",
             QueuedEvent::ErrorTracking { .. } => "error_occurences_v2",
+            QueuedEvent::ErrorOccurrenceV3 { .. } => "error_tracking_v3",
             QueuedEvent::WebVital { .. } => "web_vitals",
             QueuedEvent::Replay { .. } => "session_replays",
         }
@@ -115,6 +123,7 @@ struct InMemoryBatch {
     mods_events: Vec<(ModsEventRow, Option<TrackingContext>)>,
     errors: Vec<ErrorRow>,
     error_trackings: Vec<(ErrorTrackingRow, Option<TrackingContext>)>,
+    error_occurrences_v3: Vec<(ErrorOccurrenceV3Row, Option<TrackingContext>)>,
     web_vitals: Vec<(WebVitalRow, Option<TrackingContext>)>,
     replays: Vec<(ReplayRow, Option<TrackingContext>)>,
 }
@@ -126,6 +135,7 @@ impl Default for InMemoryBatch {
             mods_events: Vec::with_capacity(INITIAL_BATCH_CAPACITY),
             errors: Vec::new(),
             error_trackings: Vec::new(),
+            error_occurrences_v3: Vec::new(),
             web_vitals: Vec::with_capacity(INITIAL_BATCH_CAPACITY / 4),
             replays: Vec::new(),
         }
@@ -138,6 +148,7 @@ impl InMemoryBatch {
             && self.mods_events.is_empty()
             && self.errors.is_empty()
             && self.error_trackings.is_empty()
+            && self.error_occurrences_v3.is_empty()
             && self.web_vitals.is_empty()
             && self.replays.is_empty()
     }
@@ -147,6 +158,7 @@ impl InMemoryBatch {
             + self.mods_events.len()
             + self.errors.len()
             + self.error_trackings.len()
+            + self.error_occurrences_v3.len()
             + self.web_vitals.len()
             + self.replays.len()
     }
@@ -158,6 +170,9 @@ impl InMemoryBatch {
             QueuedEvent::Error(e) => self.errors.push(e),
             QueuedEvent::ErrorTracking { row, tracking } => {
                 self.error_trackings.push((*row, tracking))
+            }
+            QueuedEvent::ErrorOccurrenceV3 { row, tracking } => {
+                self.error_occurrences_v3.push((*row, tracking))
             }
             QueuedEvent::WebVital { row, tracking } => self.web_vitals.push((row, tracking)),
             QueuedEvent::Replay { row, tracking } => self.replays.push((row, tracking)),
@@ -187,6 +202,14 @@ impl InMemoryBatch {
             }
         }));
         result.extend(
+            self.error_occurrences_v3
+                .into_iter()
+                .map(|(row, tracking)| QueuedEvent::ErrorOccurrenceV3 {
+                    row: Box::new(row),
+                    tracking,
+                }),
+        );
+        result.extend(
             self.web_vitals
                 .into_iter()
                 .map(|(row, tracking)| QueuedEvent::WebVital { row, tracking }),
@@ -203,6 +226,7 @@ impl InMemoryBatch {
         let estimated_owners = (self.web_events.len()
             + self.mods_events.len()
             + self.error_trackings.len()
+            + self.error_occurrences_v3.len()
             + self.web_vitals.len()
             + self.replays.len())
         .min(100);
@@ -230,6 +254,7 @@ impl InMemoryBatch {
         count_usage!(&self.web_events, events);
         count_usage!(&self.mods_events, events);
         count_usage!(&self.error_trackings, error_tracking);
+        count_usage!(&self.error_occurrences_v3, error_tracking);
         count_usage!(&self.web_vitals, web_vitals);
         for (row, ctx) in &self.replays {
             if let Some(ctx) = ctx {
@@ -258,9 +283,11 @@ struct BatchSendResult {
     failed_mods_events: Vec<(ModsEventRow, Option<TrackingContext>)>,
     failed_errors: Vec<ErrorRow>,
     failed_error_trackings: Vec<(ErrorTrackingRow, Option<TrackingContext>)>,
+    failed_error_occurrences_v3: Vec<(ErrorOccurrenceV3Row, Option<TrackingContext>)>,
     failed_web_vitals: Vec<(WebVitalRow, Option<TrackingContext>)>,
     failed_replays: Vec<(ReplayRow, Option<TrackingContext>)>,
     had_permanent_failure: bool,
+    errors: Vec<String>,
 }
 
 impl BatchSendResult {
@@ -269,6 +296,7 @@ impl BatchSendResult {
             || !self.failed_mods_events.is_empty()
             || !self.failed_errors.is_empty()
             || !self.failed_error_trackings.is_empty()
+            || !self.failed_error_occurrences_v3.is_empty()
             || !self.failed_web_vitals.is_empty()
             || !self.failed_replays.is_empty()
     }
@@ -279,6 +307,7 @@ impl BatchSendResult {
             mods_events: self.failed_mods_events,
             errors: self.failed_errors,
             error_trackings: self.failed_error_trackings,
+            error_occurrences_v3: self.failed_error_occurrences_v3,
             web_vitals: self.failed_web_vitals,
             replays: self.failed_replays,
         }
@@ -289,14 +318,40 @@ impl BatchSendResult {
             + self.failed_mods_events.len()
             + self.failed_errors.len()
             + self.failed_error_trackings.len()
+            + self.failed_error_occurrences_v3.len()
             + self.failed_web_vitals.len()
             + self.failed_replays.len()
     }
+
+    fn error_summary(&self) -> String {
+        if self.errors.is_empty() {
+            "unknown error".to_string()
+        } else {
+            self.errors.join("; ")
+        }
+    }
+}
+
+fn record_batch_error(
+    result: &mut BatchSendResult,
+    datasource: &'static str,
+    rows: usize,
+    error: &crate::tinybird::TinybirdError,
+) {
+    let permanence = if error.is_transient() {
+        "transient"
+    } else {
+        "permanent"
+    };
+    result
+        .errors
+        .push(format!("{datasource} rows={rows} {permanence}: {error}"));
 }
 
 pub struct BatchQueue {
     tinybird: Arc<TinybirdClient>,
     polar: Option<Arc<PolarClient>>,
+    sourcemaps: Option<Arc<SourcemapResolver>>,
     pub(crate) backup_store: Arc<BackupStore>,
     sender: mpsc::Sender<QueuedEvent>,
     in_memory_batch: Arc<Mutex<InMemoryBatch>>,
@@ -315,6 +370,7 @@ impl BatchQueue {
         polar: Option<Arc<PolarClient>>,
         backup_path: &Path,
         backup_enabled: bool,
+        sourcemaps: Option<Arc<SourcemapResolver>>,
     ) -> Arc<Self> {
         let backup_store = Arc::new(if backup_enabled {
             BackupStore::new(backup_path)
@@ -328,6 +384,7 @@ impl BatchQueue {
         let queue = Arc::new(Self {
             tinybird,
             polar,
+            sourcemaps,
             backup_store,
             sender,
             in_memory_batch,
@@ -489,10 +546,12 @@ impl BatchQueue {
 
             if result.had_permanent_failure {
                 error!(
+                    errors = %result.error_summary(),
                     "Permanent failure, backing up {} events",
-                    result.failure_count()
+                    result.failure_count(),
                 );
-                self.backup_events(result.into_in_memory_batch(), "Permanent API error")
+                let backup_reason = format!("Permanent API error: {}", result.error_summary());
+                self.backup_events(result.into_in_memory_batch(), &backup_reason)
                     .await;
                 return;
             }
@@ -501,19 +560,23 @@ impl BatchQueue {
 
             if retry_count >= MAX_RETRIES {
                 error!(
+                    errors = %result.error_summary(),
                     "Batch failed after {} retries, backing up {} events",
                     retry_count,
                     result.failure_count()
                 );
-                self.backup_events(result.into_in_memory_batch(), "Max retries exceeded")
+                let backup_reason = format!("Max retries exceeded: {}", result.error_summary());
+                self.backup_events(result.into_in_memory_batch(), &backup_reason)
                     .await;
                 return;
             }
 
+            let error_summary = result.error_summary();
             current_batch = result.into_in_memory_batch();
 
             let delay = Self::calculate_retry_delay(retry_count);
             warn!(
+                errors = %error_summary,
                 "Batch send failed (attempt {}), retrying {} events in {:?}",
                 retry_count,
                 current_batch.total_count(),
@@ -532,6 +595,7 @@ impl BatchQueue {
             mods_events,
             errors,
             error_trackings,
+            error_occurrences_v3,
             web_vitals,
             replays,
         } = batch;
@@ -539,6 +603,9 @@ impl BatchQueue {
         let web_event_rows: Vec<_> = web_events.iter().map(|(e, _)| e).collect();
         let mods_event_rows: Vec<_> = mods_events.iter().map(|(e, _)| e).collect();
         let error_tracking_rows: Vec<_> = error_trackings.iter().map(|(e, _)| e).collect();
+        let error_occurrences_v3 = self.enrich_error_occurrences_v3(error_occurrences_v3).await;
+        let error_occurrence_v3_rows: Vec<_> =
+            error_occurrences_v3.iter().map(|(e, _)| e).collect();
         let web_vital_rows: Vec<_> = web_vitals.iter().map(|(e, _)| e).collect();
         let replay_rows: Vec<_> = replays.iter().map(|(e, _)| e).collect();
 
@@ -547,6 +614,7 @@ impl BatchQueue {
             mods_events_res,
             errors_res,
             error_trackings_res,
+            error_occurrences_v3_res,
             web_vitals_res,
             replays_res,
         ) = tokio::join!(
@@ -581,6 +649,15 @@ impl BatchQueue {
                 }
             },
             async {
+                if error_occurrence_v3_rows.is_empty() {
+                    Ok(())
+                } else {
+                    self.tinybird
+                        .insert_error_occurrences_v3(&error_occurrence_v3_rows)
+                        .await
+                }
+            },
+            async {
                 if web_vital_rows.is_empty() {
                     Ok(())
                 } else {
@@ -597,6 +674,7 @@ impl BatchQueue {
         );
 
         if let Err(e) = web_events_res {
+            record_batch_error(&mut result, "web_events", web_events.len(), &e);
             if !e.is_transient() {
                 result.had_permanent_failure = true;
             }
@@ -604,6 +682,7 @@ impl BatchQueue {
         }
 
         if let Err(e) = mods_events_res {
+            record_batch_error(&mut result, "mods_events", mods_events.len(), &e);
             if !e.is_transient() {
                 result.had_permanent_failure = true;
             }
@@ -611,6 +690,7 @@ impl BatchQueue {
         }
 
         if let Err(e) = errors_res {
+            record_batch_error(&mut result, "errors", errors.len(), &e);
             if !e.is_transient() {
                 result.had_permanent_failure = true;
             }
@@ -618,13 +698,33 @@ impl BatchQueue {
         }
 
         if let Err(e) = error_trackings_res {
+            record_batch_error(
+                &mut result,
+                "error_occurences_v2",
+                error_trackings.len(),
+                &e,
+            );
             if !e.is_transient() {
                 result.had_permanent_failure = true;
             }
             result.failed_error_trackings = error_trackings;
         }
 
+        if let Err(e) = error_occurrences_v3_res {
+            record_batch_error(
+                &mut result,
+                "error_tracking_v3",
+                error_occurrences_v3.len(),
+                &e,
+            );
+            if !e.is_transient() {
+                result.had_permanent_failure = true;
+            }
+            result.failed_error_occurrences_v3 = error_occurrences_v3;
+        }
+
         if let Err(e) = web_vitals_res {
+            record_batch_error(&mut result, "web_vitals", web_vitals.len(), &e);
             if !e.is_transient() {
                 result.had_permanent_failure = true;
             }
@@ -632,6 +732,7 @@ impl BatchQueue {
         }
 
         if let Err(e) = replays_res {
+            record_batch_error(&mut result, "session_replays", replays.len(), &e);
             if !e.is_transient() {
                 result.had_permanent_failure = true;
             }
@@ -639,6 +740,25 @@ impl BatchQueue {
         }
 
         result
+    }
+
+    async fn enrich_error_occurrences_v3(
+        &self,
+        rows: Vec<(ErrorOccurrenceV3Row, Option<TrackingContext>)>,
+    ) -> Vec<(ErrorOccurrenceV3Row, Option<TrackingContext>)> {
+        if rows.is_empty() || self.sourcemaps.is_none() {
+            return rows;
+        }
+
+        let resolver = self.sourcemaps.as_deref();
+        let mut enriched = Vec::with_capacity(rows.len());
+        for (row, tracking) in rows {
+            enriched.push((
+                crate::error_tracking::v3::enrich_with_sourcemap(resolver, row).await,
+                tracking,
+            ));
+        }
+        enriched
     }
 
     async fn backup_events(&self, batch: InMemoryBatch, error_msg: &str) {

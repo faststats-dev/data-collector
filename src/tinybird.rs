@@ -112,6 +112,33 @@ pub struct ErrorTrackingRow {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ErrorOccurrenceV3Row {
+    #[serde(with = "chrono::serde::ts_milliseconds")]
+    pub timestamp: DateTime<Utc>,
+    pub project_id: Uuid,
+    pub environment: String,
+    pub release: String,
+    pub group_hash: String,
+    pub exact_hash: String,
+    pub error_type: String,
+    pub error_message: String,
+    pub handled: bool,
+    pub stacktrace: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mapped_stacktrace: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mapping_used: Option<String>,
+    pub user_id: String,
+    pub session_id: String,
+    pub window_id: String,
+    pub platform: String,
+    pub runtime: String,
+    pub sdk_name: String,
+    pub sdk_version: String,
+    pub context: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebVitalRow {
     pub id: Uuid,
     pub project_id: Uuid,
@@ -269,6 +296,13 @@ impl TinybirdClient {
         rows: &[&ErrorTrackingRow],
     ) -> Result<(), TinybirdError> {
         self.send_batch("error_occurences_v2", rows).await
+    }
+
+    pub async fn insert_error_occurrences_v3(
+        &self,
+        rows: &[&ErrorOccurrenceV3Row],
+    ) -> Result<(), TinybirdError> {
+        self.send_batch("error_tracking_v3", rows).await
     }
 
     pub async fn insert_web_vitals(&self, rows: &[&WebVitalRow]) -> Result<(), TinybirdError> {

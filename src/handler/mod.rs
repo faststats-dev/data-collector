@@ -16,7 +16,9 @@ pub use web::web;
 use self::java_stack_parameterization::build_parameterized_error_rows;
 use crate::batch_queue::{BatchQueue, FailedRequest, QueuedEvent, RequestType, TrackingContext};
 use crate::models::{DataSource, Error, ErrorTracking};
-use crate::tinybird::{ErrorRow, ErrorTrackingRow, ModsEventRow, WebEventRow};
+use crate::tinybird::{
+    ErrorOccurrenceV3Row, ErrorRow, ErrorTrackingRow, ModsEventRow, WebEventRow,
+};
 use crate::utils::sha256_hex;
 use axum::Json;
 use axum::http::{HeaderMap, StatusCode};
@@ -415,63 +417,6 @@ fn to_custom_json(data: &HashMap<String, Value>) -> String {
     }
 }
 
-fn build_web_entry_data(
-    session_id: Option<&str>,
-    country: Option<&str>,
-    row: &WebEventRow,
-    custom: &HashMap<String, Value>,
-) -> String {
-    let mut data = match serde_json::to_value(row) {
-        Ok(Value::Object(data)) => data,
-        _ => serde_json::Map::new(),
-    };
-    for key in [
-        "id",
-        "project_id",
-        "session_id",
-        "country",
-        "custom",
-        "created_at",
-    ] {
-        data.remove(key);
-    }
-    data.retain(|_, value| !value.is_null());
-
-    data.insert(
-        "session_id".to_string(),
-        Value::String(session_id.unwrap_or_default().to_string()),
-    );
-    data.insert(
-        "country".to_string(),
-        Value::String(country.unwrap_or_default().to_string()),
-    );
-
-    for (key, value) in custom {
-        data.insert(key.clone(), value.clone());
-    }
-
-    serde_json::to_string(&data).unwrap_or_else(|_| "{}".to_string())
-}
-
-pub fn build_web_error_entry_details(
-    session_id: Option<&str>,
-    country: Option<&str>,
-    row: &WebEventRow,
-    custom: &HashMap<String, Value>,
-) -> ErrorEntryDetails {
-    ErrorEntryDetails {
-        source_kind: "web-analytics".to_string(),
-        entry_session_id: session_id.unwrap_or_default().to_string(),
-        entry_country: country.unwrap_or_default().to_string(),
-        entry_browser: row.browser.clone().unwrap_or_default(),
-        entry_device: row.device.clone().unwrap_or_default(),
-        entry_os: row.os.clone().unwrap_or_default(),
-        os_version: row.os_version.clone().unwrap_or_default(),
-        entry_data: build_web_entry_data(session_id, country, row, custom),
-        ..ErrorEntryDetails::default()
-    }
-}
-
 pub fn build_mods_error_entry_details(
     country: Option<&str>,
     row: &ModsEventRow,
@@ -773,6 +718,27 @@ pub async fn insert_error_entries(
     Ok(())
 }
 
+pub async fn insert_error_occurrence_v3(
+    batch_queue: &BatchQueue,
+    row: ErrorOccurrenceV3Row,
+    tracking: Option<TrackingContext>,
+) -> Result<(), HandlerResponse> {
+    batch_queue
+        .queue_event(QueuedEvent::ErrorOccurrenceV3 {
+            row: Box::new(row),
+            tracking,
+        })
+        .await
+        .map_err(|e| {
+            error!("Failed to queue error occurrence v3: {}", e);
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to queue error occurrence",
+            )
+        })?;
+    Ok(())
+}
+
 pub fn resolve_identity_key(
     session_id: Option<&str>,
     fallback_identifier: Option<&str>,
@@ -980,17 +946,14 @@ async fn process_web_request(
         request.country.clone(),
         &valid_custom,
     );
-    let error_entry_details = build_web_error_entry_details(
-        parsed.session_id.as_deref(),
-        request.country.as_deref(),
-        &event_row,
-        &valid_custom,
-    );
-
-    let data_entry_id =
-        insert_web_event(batch_queue, event_row.clone(), Some(tracking_ctx.clone()))
-            .await
-            .map_err(|_| "Failed to queue event".to_string())?;
+    let should_process_errors = ctx.error_tracking_enabled && has_errors;
+    let error_v3_context = should_process_errors.then(|| {
+        parsed
+            .context
+            .as_ref()
+            .map(|value| serde_json::to_string(value).unwrap_or_else(|_| "{}".to_string()))
+            .unwrap_or_else(|| crate::error_tracking::v3::web_context(&event_row, &valid_custom))
+    });
 
     if let Some(session_id) = parsed.session_id.as_deref()
         && let Some(replay_storage) = replay_storage
@@ -1013,35 +976,34 @@ async fn process_web_request(
         warn!("Failed to persist replay filter metadata: {}", error);
     }
 
-    if ctx.error_tracking_enabled
-        && let Some(errors) = parsed.errors
-    {
+    insert_web_event(batch_queue, event_row, Some(tracking_ctx.clone()))
+        .await
+        .map_err(|_| "Failed to queue event".to_string())?;
+
+    if should_process_errors && let Some(errors) = parsed.errors {
+        let error_v3_context = error_v3_context.as_deref().unwrap_or("{}");
+        // The browser SDK sends this as `buildId`; the Tinybird v3 schema stores it as `release`.
+        let release = parsed.build_id.as_deref();
         for mut error in errors {
             if error.session_id.is_none() {
                 error.session_id = parsed.session_id.clone();
             }
-            if error.build_id.is_none() {
-                error.build_id = parsed.build_id.clone();
-            }
-            let identity_key = resolve_identity_key(
-                error.session_id.as_deref(),
-                Some(fallback_identity.as_str()),
-            );
-            insert_error_entries(
-                batch_queue,
-                ctx.project_id,
-                Some(data_entry_id),
-                error,
-                ErrorEntryParams {
-                    identity_key,
-                    context: None,
-                    details: error_entry_details.clone(),
-                    tracking_ctx: Some(tracking_ctx.clone()),
-                    stack_processing: ErrorStackProcessing::Raw,
+            let occurrence = crate::error_tracking::v3::build_web_occurrence(
+                &crate::error_tracking::v3::WebOccurrenceInput {
+                    project_id: ctx.project_id,
+                    release,
+                    user_id: Some(fallback_identity.as_str()),
+                    session_id: error.session_id.as_deref(),
+                    window_id: parsed.window_id.as_deref(),
+                    sdk_name: parsed.sdk_name.as_deref(),
+                    sdk_version: parsed.sdk_version.as_deref(),
+                    context: error_v3_context,
                 },
-            )
-            .await
-            .map_err(|_| "Failed to queue error".to_string())?;
+                &error,
+            );
+            insert_error_occurrence_v3(batch_queue, occurrence, Some(tracking_ctx.clone()))
+                .await
+                .map_err(|_| "Failed to queue error occurrence".to_string())?;
         }
 
         if let Some(session_id) = parsed.session_id.as_deref()

@@ -1,11 +1,11 @@
 use super::{
-    EncodingQuery, ErrorEntryParams, ErrorStackProcessing, WEB_EVENT_FIELDS,
-    build_web_error_entry_details, check_ip_allowed, decompress_body, error_response,
+    EncodingQuery, WEB_EVENT_FIELDS, check_ip_allowed, decompress_body, error_response,
     extract_known_fields, get_authorization, get_client_ip, get_country, get_request_origin,
-    insert_error_entries, insert_web_event, load_project_context, resolve_identity_key,
-    success_response, validate_hostname,
+    insert_error_occurrence_v3, insert_web_event, load_project_context, success_response,
+    validate_hostname,
 };
 use crate::batch_queue::{FailedRequest, RequestType, TrackingContext};
+use crate::error_tracking::v3::{WebOccurrenceInput, build_web_occurrence, web_context};
 use crate::identity::resolve_person_for_distinct_id;
 use crate::models::{AppState, ErrorTracking};
 use crate::utils::debounce::should_debounce;
@@ -31,6 +31,14 @@ pub(crate) struct WebRequest {
     pub(crate) session_id: Option<String>,
     #[serde(default)]
     pub(crate) build_id: Option<String>,
+    #[serde(default)]
+    pub(crate) window_id: Option<String>,
+    #[serde(default)]
+    pub(crate) sdk_name: Option<String>,
+    #[serde(default)]
+    pub(crate) sdk_version: Option<String>,
+    #[serde(default)]
+    pub(crate) context: Option<Value>,
 }
 
 pub async fn web(
@@ -53,6 +61,10 @@ pub async fn web(
         errors,
         session_id: parsed_session_id,
         build_id,
+        window_id,
+        sdk_name,
+        sdk_version,
+        context,
     } = match serde_json::from_slice(&body) {
         Ok(req) => req,
         Err(_) => return error_response(StatusCode::BAD_REQUEST, "Invalid JSON"),
@@ -190,12 +202,13 @@ pub async fn web(
         country.clone(),
         &valid_custom,
     );
-    let error_entry_details = build_web_error_entry_details(
-        session_id.as_deref(),
-        country.as_deref(),
-        &event_row,
-        &valid_custom,
-    );
+    let should_process_errors = ctx.error_tracking_enabled && HAS_ERRORS(&errors);
+    let error_v3_context = should_process_errors.then(|| {
+        context
+            .as_ref()
+            .map(|value| serde_json::to_string(value).unwrap_or_else(|_| "{}".to_string()))
+            .unwrap_or_else(|| web_context(&event_row, &valid_custom))
+    });
 
     if let Some(session_id) = session_id.as_deref()
         && let Some(replay_storage) = state.replay_storage.as_deref()
@@ -218,41 +231,38 @@ pub async fn web(
         warn!("Failed to persist replay filter metadata: {}", error);
     }
 
-    let data_entry_id = if is_debounced {
-        None
-    } else {
+    if !is_debounced {
         match insert_web_event(&state.batch_queue, event_row, Some(tracking_ctx.clone())).await {
-            Ok(id) => Some(id),
+            Ok(_) => {}
             Err(e) => return e,
         }
-    };
+    }
 
-    if ctx.error_tracking_enabled
-        && let Some(error_list) = errors
-    {
+    if should_process_errors && let Some(error_list) = errors {
+        let error_v3_context = error_v3_context.as_deref().unwrap_or("{}");
+        // The browser SDK sends this as `buildId`; the Tinybird v3 schema stores it as `release`.
+        let release = build_id.as_deref();
         for mut error in error_list {
             if error.session_id.is_none() {
                 error.session_id = session_id.clone();
             }
-            if error.build_id.is_none() {
-                error.build_id = build_id.clone();
-            }
-            let identity_key = resolve_identity_key(
-                error.session_id.as_deref(),
-                Some(fallback_identity.as_str()),
-            );
-            if let Err(e) = insert_error_entries(
-                &state.batch_queue,
-                ctx.project_id,
-                data_entry_id,
-                error,
-                ErrorEntryParams {
-                    identity_key,
-                    context: None,
-                    details: error_entry_details.clone(),
-                    tracking_ctx: Some(tracking_ctx.clone()),
-                    stack_processing: ErrorStackProcessing::Raw,
+            let occurrence = build_web_occurrence(
+                &WebOccurrenceInput {
+                    project_id: ctx.project_id,
+                    release,
+                    user_id: Some(fallback_identity.as_str()),
+                    session_id: error.session_id.as_deref(),
+                    window_id: window_id.as_deref(),
+                    sdk_name: sdk_name.as_deref(),
+                    sdk_version: sdk_version.as_deref(),
+                    context: error_v3_context,
                 },
+                &error,
+            );
+            if let Err(e) = insert_error_occurrence_v3(
+                &state.batch_queue,
+                occurrence,
+                Some(tracking_ctx.clone()),
             )
             .await
             {

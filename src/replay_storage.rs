@@ -178,20 +178,6 @@ impl ReplayStorage {
         self.put_object(&object_key, compressed).await?;
         let route_metadata = replay_route_metadata(&input.events, input.url.as_deref());
 
-        let latest_filter_metadata = sqlx::query_as::<_, ReplayFilterMetadata>(
-            r#"
-            SELECT browser, country, os
-            FROM replay_filter_events
-            WHERE project_id = $1 AND session_id = $2
-            ORDER BY created_at DESC
-            LIMIT 1
-            "#,
-        )
-        .bind(input.project_id)
-        .bind(&input.session_id)
-        .fetch_optional(pool)
-        .await?;
-
         let result = async {
             let mut tx = pool.begin().await?;
 
@@ -259,6 +245,20 @@ impl ReplayStorage {
                 tx.commit().await?;
                 return Ok::<bool, sqlx::Error>(false);
             }
+
+            let latest_filter_metadata = sqlx::query_as::<_, ReplayFilterMetadata>(
+                r#"
+                SELECT browser, country, os
+                FROM replay_filter_events
+                WHERE project_id = $1 AND session_id = $2
+                ORDER BY created_at DESC
+                LIMIT 1
+                "#,
+            )
+            .bind(input.project_id)
+            .bind(&input.session_id)
+            .fetch_optional(&mut *tx)
+            .await?;
 
             let initial_actual_duration_ms = match (first_event_timestamp_ms, last_event_timestamp_ms)
             {
@@ -731,8 +731,10 @@ async fn replay_chunk_exists(
             SELECT EXISTS (
                 SELECT 1
                 FROM replay_snapshots
-            WHERE project_id = $1 AND session_id = $2 AND batch_id = $3
-              AND window_id = $4
+                WHERE project_id = $1
+                  AND session_id = $2
+                  AND batch_id = $3
+                  AND window_id = $4
             )
             "#,
         )

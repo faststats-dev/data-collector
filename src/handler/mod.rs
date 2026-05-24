@@ -1163,9 +1163,7 @@ async fn process_replay_request(
         identifier,
         mut events,
     } = parsed;
-    let window_id = window_id
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| session_id.clone());
+    let window_id = crate::handler::replay::normalize_window_id(window_id, &session_id);
 
     let ctx = load_project_context(pool, &token)
         .await

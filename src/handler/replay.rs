@@ -49,11 +49,26 @@ pub(crate) fn is_valid_rrweb_event(event: &Value) -> bool {
     matches!(rrweb_event_type(event), Some(t) if t <= 32)
 }
 
+pub(crate) fn normalize_window_id(window_id: Option<String>, session_id: &str) -> String {
+    window_id
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| session_id.to_owned())
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ReplayRequest {
     pub(crate) token: String,
     pub(crate) session_id: String,
+    #[serde(default)]
+    pub(crate) window_id: Option<String>,
+    #[serde(default, alias = "pageId")]
+    pub(crate) view_id: Option<String>,
+    #[serde(default)]
+    pub(crate) session_start: Option<u64>,
+    #[serde(default)]
+    pub(crate) is_final: bool,
     #[serde(default)]
     pub(crate) batch_id: Option<String>,
     pub(crate) sequence: u32,
@@ -90,6 +105,10 @@ pub async fn replay(
     let ReplayRequest {
         token,
         session_id,
+        window_id,
+        view_id,
+        session_start,
+        is_final,
         batch_id,
         sequence,
         timestamp: _,
@@ -97,6 +116,7 @@ pub async fn replay(
         identifier,
         mut events,
     } = parsed;
+    let window_id = normalize_window_id(window_id, &session_id);
 
     let context = match load_project_context(&state.pool, &token).await {
         Ok(ctx) => ctx,
@@ -178,6 +198,10 @@ pub async fn replay(
             crate::replay_storage::ReplayChunkInput {
                 project_id: context.project_id,
                 session_id: session_id.clone(),
+                window_id,
+                view_id,
+                session_start_ms: session_start.and_then(|value| i64::try_from(value).ok()),
+                is_final,
                 batch_id,
                 sequence: i32::try_from(sequence).ok(),
                 identifier: Some(server_id.to_string()),
@@ -231,4 +255,22 @@ pub async fn replay(
     }
 
     success_response(HashMap::new())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_window_id;
+
+    #[test]
+    fn normalize_window_id_trims_and_falls_back_to_session_id() {
+        assert_eq!(
+            normalize_window_id(Some(" window-1 ".to_string()), "session-1"),
+            "window-1"
+        );
+        assert_eq!(
+            normalize_window_id(Some("   ".to_string()), "session-1"),
+            "session-1"
+        );
+        assert_eq!(normalize_window_id(None, "session-1"), "session-1");
+    }
 }

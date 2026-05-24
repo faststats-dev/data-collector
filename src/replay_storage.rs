@@ -21,6 +21,10 @@ pub struct ReplayStorage {
 pub struct ReplayChunkInput {
     pub project_id: Uuid,
     pub session_id: String,
+    pub window_id: String,
+    pub view_id: Option<String>,
+    pub session_start_ms: Option<i64>,
+    pub is_final: bool,
     pub batch_id: Option<String>,
     pub sequence: Option<i32>,
     pub identifier: Option<String>,
@@ -183,6 +187,10 @@ impl ReplayStorage {
                     id,
                     project_id,
                     session_id,
+                    window_id,
+                    view_id,
+                    session_start_ms,
+                    is_final,
                     batch_id,
                     sequence,
                     identifier,
@@ -201,7 +209,7 @@ impl ReplayStorage {
                     route_count,
                     route_spans
                 ) VALUES (
-                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24
                 )
                 ON CONFLICT DO NOTHING
                 "#,
@@ -209,6 +217,10 @@ impl ReplayStorage {
             .bind(snapshot_id)
             .bind(input.project_id)
             .bind(&input.session_id)
+            .bind(&input.window_id)
+            .bind(&input.view_id)
+            .bind(input.session_start_ms)
+            .bind(input.is_final)
             .bind(&input.batch_id)
             .bind(input.sequence)
             .bind(&input.identifier)
@@ -262,9 +274,11 @@ impl ReplayStorage {
                     id,
                     project_id,
                     session_id,
+                    window_id,
                     identifier,
                     started_at,
                     ended_at,
+                    session_start_ms,
                     actual_started_at_ms,
                     actual_ended_at_ms,
                     actual_duration_ms,
@@ -282,12 +296,17 @@ impl ReplayStorage {
                     has_errors,
                     has_poor_vitals
                 ) VALUES (
-                    $1, $2, $3, $4, NOW(), NOW(), $5, $6, $7, $8, 1, $9, $10, $11, $12, $13, $14, $15, $16, $17, false, false
+                    $1, $2, $3, $4, $5, NOW(), NOW(), $6, $7, $8, $9, $10, 1, $11, $12, $13, $14, $15, $16, $17, $18, $19, false, false
                 )
-                ON CONFLICT (project_id, session_id) DO UPDATE
+                ON CONFLICT (project_id, session_id, window_id) DO UPDATE
                 SET
                     identifier = COALESCE(EXCLUDED.identifier, replay_sessions.identifier),
                     ended_at = GREATEST(replay_sessions.ended_at, EXCLUDED.ended_at),
+                    session_start_ms = COALESCE(
+                        LEAST(replay_sessions.session_start_ms, EXCLUDED.session_start_ms),
+                        replay_sessions.session_start_ms,
+                        EXCLUDED.session_start_ms
+                    ),
                     actual_started_at_ms = COALESCE(
                         LEAST(
                             replay_sessions.actual_started_at_ms,
@@ -360,7 +379,9 @@ impl ReplayStorage {
             .bind(Uuid::new_v4())
             .bind(input.project_id)
             .bind(&input.session_id)
+            .bind(&input.window_id)
             .bind(&input.identifier)
+            .bind(input.session_start_ms)
             .bind(first_event_timestamp_ms)
             .bind(last_event_timestamp_ms)
             .bind(initial_actual_duration_ms)
@@ -692,7 +713,9 @@ fn push_route_once(routes: &mut Vec<String>, seen_routes: &mut HashSet<String>, 
 
 fn replay_event_route(event: &Value) -> Option<String> {
     let data = event.get("data")?;
-    data.get("href")
+    data.get("payload")
+        .and_then(|payload| payload.get("href").or_else(|| payload.get("url")))
+        .or_else(|| data.get("href"))
         .or_else(|| data.get("url"))
         .and_then(Value::as_str)
         .map(|url| normalize_route(Some(url)))
@@ -708,13 +731,17 @@ async fn replay_chunk_exists(
             SELECT EXISTS (
                 SELECT 1
                 FROM replay_snapshots
-                WHERE project_id = $1 AND session_id = $2 AND batch_id = $3
+                WHERE project_id = $1
+                  AND session_id = $2
+                  AND batch_id = $3
+                  AND window_id = $4
             )
             "#,
         )
         .bind(input.project_id)
         .bind(&input.session_id)
         .bind(batch_id)
+        .bind(&input.window_id)
         .fetch_one(pool)
         .await?;
         if exists {
@@ -731,12 +758,13 @@ async fn replay_chunk_exists(
         SELECT EXISTS (
             SELECT 1
             FROM replay_snapshots
-            WHERE project_id = $1 AND session_id = $2 AND sequence = $3
+            WHERE project_id = $1 AND session_id = $2 AND window_id = $3 AND sequence = $4
         )
         "#,
     )
     .bind(input.project_id)
     .bind(&input.session_id)
+    .bind(&input.window_id)
     .bind(sequence)
     .fetch_one(pool)
     .await

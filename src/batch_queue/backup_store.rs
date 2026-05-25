@@ -9,6 +9,7 @@ use tracing::info;
 
 pub struct BackupStore {
     path: PathBuf,
+    enabled: bool,
     pool: OnceCell<SqlitePool>,
 }
 
@@ -16,8 +17,21 @@ impl BackupStore {
     pub fn new(path: &Path) -> Self {
         Self {
             path: path.to_path_buf(),
+            enabled: true,
             pool: OnceCell::new(),
         }
+    }
+
+    pub fn disabled(path: &Path) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            enabled: false,
+            pool: OnceCell::new(),
+        }
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
     }
 
     async fn get_pool(&self) -> Result<&SqlitePool, sqlx::Error> {
@@ -109,7 +123,7 @@ impl BackupStore {
         events: &[QueuedEvent],
         error_msg: Option<&str>,
     ) -> Result<(), sqlx::Error> {
-        if events.is_empty() {
+        if events.is_empty() || !self.enabled {
             return Ok(());
         }
 
@@ -141,6 +155,10 @@ impl BackupStore {
         &self,
         limit: i64,
     ) -> Result<Vec<(i64, QueuedEvent)>, sqlx::Error> {
+        if !self.enabled {
+            return Ok(Vec::new());
+        }
+
         let pool = self.get_pool().await?;
         let rows: Vec<(i64, String)> = sqlx::query_as(
             "SELECT id, event_data FROM backed_up_events ORDER BY created_at ASC LIMIT ?",
@@ -158,7 +176,7 @@ impl BackupStore {
     }
 
     pub async fn remove_backed_up_events(&self, ids: &[i64]) -> Result<(), sqlx::Error> {
-        if ids.is_empty() {
+        if ids.is_empty() || !self.enabled {
             return Ok(());
         }
 
@@ -188,7 +206,7 @@ impl BackupStore {
     }
 
     pub async fn cleanup_stale_backups(&self) -> Result<u64, sqlx::Error> {
-        if !self.is_connected() {
+        if !self.enabled || !self.is_connected() {
             return Ok(0);
         }
 
@@ -205,7 +223,7 @@ impl BackupStore {
     }
 
     pub async fn count_backed_up(&self) -> Result<i64, sqlx::Error> {
-        if !self.is_connected() {
+        if !self.enabled || !self.is_connected() {
             return Ok(0);
         }
 
@@ -217,6 +235,10 @@ impl BackupStore {
     }
 
     pub async fn backup_request(&self, request: &FailedRequest) -> Result<(), sqlx::Error> {
+        if !self.enabled {
+            return Ok(());
+        }
+
         let pool = self.get_pool().await?;
         let data = serde_json::to_string(request).expect("Failed to serialize request");
         let now = Utc::now().to_rfc3339();
@@ -234,6 +256,10 @@ impl BackupStore {
         &self,
         limit: i64,
     ) -> Result<Vec<(i64, FailedRequest)>, sqlx::Error> {
+        if !self.enabled {
+            return Ok(Vec::new());
+        }
+
         let pool = self.get_pool().await?;
         let rows: Vec<(i64, String)> = sqlx::query_as(
             "SELECT id, request_data FROM failed_requests ORDER BY created_at ASC LIMIT ?",
@@ -253,6 +279,10 @@ impl BackupStore {
     }
 
     pub async fn remove_failed_request(&self, id: i64) -> Result<(), sqlx::Error> {
+        if !self.enabled {
+            return Ok(());
+        }
+
         let pool = self.get_pool().await?;
         sqlx::query("DELETE FROM failed_requests WHERE id = ?")
             .bind(id)
@@ -262,7 +292,7 @@ impl BackupStore {
     }
 
     pub async fn cleanup_stale_requests(&self) -> Result<u64, sqlx::Error> {
-        if !self.is_connected() {
+        if !self.enabled || !self.is_connected() {
             return Ok(0);
         }
 
@@ -279,7 +309,7 @@ impl BackupStore {
     }
 
     pub async fn count_failed_requests(&self) -> Result<i64, sqlx::Error> {
-        if !self.is_connected() {
+        if !self.enabled || !self.is_connected() {
             return Ok(0);
         }
 

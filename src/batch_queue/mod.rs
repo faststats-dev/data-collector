@@ -314,8 +314,13 @@ impl BatchQueue {
         tinybird: Arc<TinybirdClient>,
         polar: Option<Arc<PolarClient>>,
         backup_path: &Path,
+        backup_enabled: bool,
     ) -> Arc<Self> {
-        let backup_store = Arc::new(BackupStore::new(backup_path));
+        let backup_store = Arc::new(if backup_enabled {
+            BackupStore::new(backup_path)
+        } else {
+            BackupStore::disabled(backup_path)
+        });
         let (sender, receiver) = mpsc::channel(CHANNEL_CAPACITY);
         let in_memory_batch = Arc::new(Mutex::new(InMemoryBatch::default()));
         let flush_lock = Arc::new(Mutex::new(()));
@@ -329,14 +334,18 @@ impl BatchQueue {
             flush_lock,
         });
 
-        let startup_queue = Arc::clone(&queue);
-        tokio::spawn(async move {
-            startup_queue.replay_backed_up_events().await;
-        });
+        if queue.backup_store.is_enabled() {
+            let startup_queue = Arc::clone(&queue);
+            tokio::spawn(async move {
+                startup_queue.replay_backed_up_events().await;
+            });
+        }
 
         queue.start_batch_processor(receiver);
         queue.start_batch_flusher();
-        queue.start_backup_replayer();
+        if queue.backup_store.is_enabled() {
+            queue.start_backup_replayer();
+        }
 
         queue
     }

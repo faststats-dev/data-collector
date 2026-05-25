@@ -98,9 +98,19 @@ async fn main() {
     let backup_path = std::env::var("BACKUP_DB_PATH")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("/data/backup.db"));
+    let backup_store_enabled = std::env::var("DISABLE_BACKUP_STORE").unwrap_or_default() != "1";
+    if backup_store_enabled {
+        info!("Backup store enabled at {}", backup_path.display());
+    } else {
+        warn!("Backup store disabled by DISABLE_BACKUP_STORE");
+    }
 
-    let batch_queue =
-        batch_queue::BatchQueue::new(Arc::clone(&tinybird_client), polar_client, &backup_path);
+    let batch_queue = batch_queue::BatchQueue::new(
+        Arc::clone(&tinybird_client),
+        polar_client,
+        &backup_path,
+        backup_store_enabled,
+    );
     let replay_storage = match replay_storage::ReplayStorage::from_env() {
         Ok(Some(storage)) => {
             info!("Replay object storage enabled");

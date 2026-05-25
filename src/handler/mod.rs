@@ -189,7 +189,7 @@ pub async fn load_project_context(
                o.id AS organization_id,
                m.user_id AS org_owner_user_id,
                d.reference_id, d.name, d.data_type::text, d.regex, d.allow_negative,
-               d.allow_float, d.min_value, d.max_value, d.is_array
+               d.allow_float, d.min_value, d.max_value, d.metric_shape::text
         FROM project p
         LEFT JOIN data_sources d ON d.project_id = p.id
         LEFT JOIN organization o ON o.id = p.owner_id
@@ -226,11 +226,7 @@ pub async fn load_project_context(
                     allow_float: row.try_get("allow_float").ok(),
                     min_value: row.try_get("min_value").ok(),
                     max_value: row.try_get("max_value").ok(),
-                    is_array: row
-                        .try_get::<Option<bool>, _>("is_array")
-                        .ok()
-                        .flatten()
-                        .unwrap_or(false),
+                    metric_shape: row.try_get("metric_shape").ok(),
                 },
             );
         }

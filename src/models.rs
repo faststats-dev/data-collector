@@ -23,7 +23,7 @@ pub struct DataSource {
     pub allow_float: Option<bool>,
     pub min_value: Option<f64>,
     pub max_value: Option<f64>,
-    pub is_array: bool,
+    pub metric_shape: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

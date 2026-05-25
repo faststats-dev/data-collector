@@ -41,8 +41,9 @@ pub fn validate_and_filter_payload(
         };
 
         let re = ds.regex.as_deref().and_then(get_cached_regex);
+        let shape = metric_shape(ds);
 
-        if ds.is_array {
+        if shape == "array" {
             if let Some(arr) = value.as_array_mut() {
                 let mut has_invalid = false;
                 let mut first_invalid_idx = None;
@@ -82,14 +83,51 @@ pub fn validate_and_filter_payload(
                 debug!("key='{}' VALID=false reason='expected array'", ref_id);
                 false
             }
+        } else if shape == "map" {
+            if let Some(obj) = value.as_object_mut() {
+                let mut has_invalid = false;
+                let mut first_invalid_key: Option<String> = None;
+                obj.retain(|key, elem| {
+                    let is_valid = validate_scalar(elem, ds, re.as_deref()).is_ok();
+                    if !is_valid {
+                        if !has_invalid {
+                            first_invalid_key = Some(key.clone());
+                            has_invalid = true;
+                        }
+                        debug!("key='{}' map['{}'] VALID=false", ref_id, key);
+                    }
+                    is_valid
+                });
+
+                if has_invalid {
+                    warnings.insert(
+                        ref_id.clone(),
+                        format!(
+                            "map key '{}' failed validation",
+                            first_invalid_key.unwrap_or_default()
+                        ),
+                    );
+                }
+
+                debug!(
+                    "key='{}' VALID=true ({} map entries remain)",
+                    ref_id,
+                    obj.len()
+                );
+                true
+            } else {
+                warnings.insert(ref_id.clone(), "expected object".into());
+                debug!("key='{}' VALID=false reason='expected object'", ref_id);
+                false
+            }
         } else {
-            if value.is_array() {
+            if value.is_array() || value.is_object() {
                 warnings.insert(
                     ref_id.clone(),
-                    "unexpected array (expected single value)".into(),
+                    "unexpected collection (expected single value)".into(),
                 );
                 debug!(
-                    "key='{}' VALID=false reason='unexpected array (expected single value)'",
+                    "key='{}' VALID=false reason='unexpected collection (expected single value)'",
                     ref_id
                 );
                 return false;
@@ -110,6 +148,14 @@ pub fn validate_and_filter_payload(
     });
 
     (data, warnings)
+}
+
+fn metric_shape(ds: &DataSource) -> &str {
+    match ds.metric_shape.as_deref() {
+        Some("array") => "array",
+        Some("map") => "map",
+        _ => "scalar",
+    }
 }
 
 fn validate_scalar(v: &Value, ds: &DataSource, re: Option<&Regex>) -> Result<(), &'static str> {
@@ -185,7 +231,7 @@ mod tests {
             allow_float: None,
             min_value: None,
             max_value: None,
-            is_array: false,
+            metric_shape: None,
         }
     }
 
@@ -651,7 +697,7 @@ mod tests {
                 allow_float: None,
                 min_value: None,
                 max_value: None,
-                is_array: true,
+                metric_shape: Some("array".to_string()),
             }
         }
 
@@ -763,7 +809,7 @@ mod tests {
 
             assert!(!valid.contains_key("name"));
             assert!(warnings.contains_key("name"));
-            assert!(warnings["name"].contains("unexpected array"));
+            assert!(warnings["name"].contains("unexpected collection"));
         }
 
         #[test]
@@ -881,7 +927,7 @@ mod tests {
             let mut ds_map = HashMap::new();
             let scalar_ds = make_data_source("string");
             let mut array_ds = make_data_source("number");
-            array_ds.is_array = true;
+            array_ds.metric_shape = Some("array".to_string());
             ds_map.insert("title".to_string(), scalar_ds);
             ds_map.insert("scores".to_string(), array_ds);
 
@@ -1074,7 +1120,7 @@ mod tests {
         #[test]
         fn handles_null_in_array() {
             let mut ds = make_data_source("string");
-            ds.is_array = true;
+            ds.metric_shape = Some("array".to_string());
             let mut ds_map = HashMap::new();
             ds_map.insert("items".to_string(), ds);
 
@@ -1091,7 +1137,7 @@ mod tests {
         #[test]
         fn handles_object_in_array() {
             let mut ds = make_data_source("string");
-            ds.is_array = true;
+            ds.metric_shape = Some("array".to_string());
             let mut ds_map = HashMap::new();
             ds_map.insert("items".to_string(), ds);
 
@@ -1136,6 +1182,94 @@ mod tests {
 
             assert!(valid.contains_key("フィールド"));
             assert!(warnings.is_empty());
+        }
+    }
+
+    // ==================== MAP VALIDATION TESTS ====================
+
+    mod map_validation {
+        use super::*;
+
+        fn make_map_data_source(data_type: &str) -> DataSource {
+            let mut ds = make_data_source(data_type);
+            ds.reference_id = "test_map".to_string();
+            ds.name = "Test Map Field".to_string();
+            ds.metric_shape = Some("map".to_string());
+            ds
+        }
+
+        #[test]
+        fn validates_string_map() {
+            let ds = make_map_data_source("string");
+            let mut ds_map = HashMap::new();
+            ds_map.insert("versions".to_string(), ds);
+
+            let mut data = HashMap::new();
+            data.insert(
+                "versions".to_string(),
+                json!({ "1.20": "stable", "1.21": "beta" }),
+            );
+
+            let (valid, warnings) = validate_and_filter_payload(data, &ds_map);
+
+            assert!(valid.contains_key("versions"));
+            assert_eq!(valid["versions"].as_object().unwrap().len(), 2);
+            assert!(!warnings.contains_key("versions"));
+        }
+
+        #[test]
+        fn validates_number_map() {
+            let ds = make_map_data_source("number");
+            let mut ds_map = HashMap::new();
+            ds_map.insert("downloads".to_string(), ds);
+
+            let mut data = HashMap::new();
+            data.insert(
+                "downloads".to_string(),
+                json!({ "modrinth": 10, "hangar": "4" }),
+            );
+
+            let (valid, warnings) = validate_and_filter_payload(data, &ds_map);
+
+            assert!(valid.contains_key("downloads"));
+            assert_eq!(valid["downloads"].as_object().unwrap().len(), 2);
+            assert!(!warnings.contains_key("downloads"));
+        }
+
+        #[test]
+        fn filters_invalid_map_values() {
+            let ds = make_map_data_source("number");
+            let mut ds_map = HashMap::new();
+            ds_map.insert("scores".to_string(), ds);
+
+            let mut data = HashMap::new();
+            data.insert(
+                "scores".to_string(),
+                json!({ "good": 5, "bad": "nope", "nested": { "x": 1 } }),
+            );
+
+            let (valid, warnings) = validate_and_filter_payload(data, &ds_map);
+
+            assert!(valid.contains_key("scores"));
+            let obj = valid["scores"].as_object().unwrap();
+            assert_eq!(obj.len(), 1);
+            assert!(obj.contains_key("good"));
+            assert!(warnings["scores"].contains("map key"));
+        }
+
+        #[test]
+        fn rejects_non_object_when_map_expected() {
+            let ds = make_map_data_source("string");
+            let mut ds_map = HashMap::new();
+            ds_map.insert("labels".to_string(), ds);
+
+            let mut data = HashMap::new();
+            data.insert("labels".to_string(), json!(["not", "a", "map"]));
+
+            let (valid, warnings) = validate_and_filter_payload(data, &ds_map);
+
+            assert!(!valid.contains_key("labels"));
+            assert!(warnings["labels"].contains("expected object"));
         }
     }
 }

@@ -4,8 +4,7 @@ pub use backup_store::BackupStore;
 use crate::error_tracking::sourcemaps::SourcemapResolver;
 use crate::polar::{PolarClient, UsageCounts};
 use crate::tinybird::{
-    ErrorOccurrenceV3Row, ErrorRow, ErrorTrackingRow, ModsEventRow, ReplayRow, TinybirdClient,
-    WebEventRow, WebVitalRow,
+    ErrorOccurrenceV3Row, ModsEventRow, ReplayRow, TinybirdClient, WebEventRow, WebVitalRow,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -78,12 +77,6 @@ pub enum QueuedEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         tracking: Option<TrackingContext>,
     },
-    Error(ErrorRow),
-    ErrorTracking {
-        row: Box<ErrorTrackingRow>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        tracking: Option<TrackingContext>,
-    },
     ErrorOccurrenceV3 {
         row: Box<ErrorOccurrenceV3Row>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -106,8 +99,6 @@ impl QueuedEvent {
         match self {
             QueuedEvent::WebEvent { .. } => "web_events",
             QueuedEvent::ModsEvent { .. } => "mods_events",
-            QueuedEvent::Error(_) => "errors",
-            QueuedEvent::ErrorTracking { .. } => "error_occurences_v2",
             QueuedEvent::ErrorOccurrenceV3 { .. } => "error_tracking_v3",
             QueuedEvent::WebVital { .. } => "web_vitals",
             QueuedEvent::Replay { .. } => "session_replays",
@@ -121,8 +112,6 @@ const INITIAL_BATCH_CAPACITY: usize = 64;
 struct InMemoryBatch {
     web_events: Vec<(WebEventRow, Option<TrackingContext>)>,
     mods_events: Vec<(ModsEventRow, Option<TrackingContext>)>,
-    errors: Vec<ErrorRow>,
-    error_trackings: Vec<(ErrorTrackingRow, Option<TrackingContext>)>,
     error_occurrences_v3: Vec<(ErrorOccurrenceV3Row, Option<TrackingContext>)>,
     web_vitals: Vec<(WebVitalRow, Option<TrackingContext>)>,
     replays: Vec<(ReplayRow, Option<TrackingContext>)>,
@@ -133,8 +122,6 @@ impl Default for InMemoryBatch {
         Self {
             web_events: Vec::with_capacity(INITIAL_BATCH_CAPACITY),
             mods_events: Vec::with_capacity(INITIAL_BATCH_CAPACITY),
-            errors: Vec::new(),
-            error_trackings: Vec::new(),
             error_occurrences_v3: Vec::new(),
             web_vitals: Vec::with_capacity(INITIAL_BATCH_CAPACITY / 4),
             replays: Vec::new(),
@@ -146,8 +133,6 @@ impl InMemoryBatch {
     fn is_empty(&self) -> bool {
         self.web_events.is_empty()
             && self.mods_events.is_empty()
-            && self.errors.is_empty()
-            && self.error_trackings.is_empty()
             && self.error_occurrences_v3.is_empty()
             && self.web_vitals.is_empty()
             && self.replays.is_empty()
@@ -156,8 +141,6 @@ impl InMemoryBatch {
     fn total_count(&self) -> usize {
         self.web_events.len()
             + self.mods_events.len()
-            + self.errors.len()
-            + self.error_trackings.len()
             + self.error_occurrences_v3.len()
             + self.web_vitals.len()
             + self.replays.len()
@@ -167,10 +150,6 @@ impl InMemoryBatch {
         match event {
             QueuedEvent::WebEvent { row, tracking } => self.web_events.push((*row, tracking)),
             QueuedEvent::ModsEvent { row, tracking } => self.mods_events.push((row, tracking)),
-            QueuedEvent::Error(e) => self.errors.push(e),
-            QueuedEvent::ErrorTracking { row, tracking } => {
-                self.error_trackings.push((*row, tracking))
-            }
             QueuedEvent::ErrorOccurrenceV3 { row, tracking } => {
                 self.error_occurrences_v3.push((*row, tracking))
             }
@@ -194,13 +173,6 @@ impl InMemoryBatch {
                 .into_iter()
                 .map(|(row, tracking)| QueuedEvent::ModsEvent { row, tracking }),
         );
-        result.extend(self.errors.into_iter().map(QueuedEvent::Error));
-        result.extend(self.error_trackings.into_iter().map(|(row, tracking)| {
-            QueuedEvent::ErrorTracking {
-                row: Box::new(row),
-                tracking,
-            }
-        }));
         result.extend(
             self.error_occurrences_v3
                 .into_iter()
@@ -225,7 +197,6 @@ impl InMemoryBatch {
     fn aggregate_usage(&self) -> AggregatedUsage {
         let estimated_owners = (self.web_events.len()
             + self.mods_events.len()
-            + self.error_trackings.len()
             + self.error_occurrences_v3.len()
             + self.web_vitals.len()
             + self.replays.len())
@@ -253,7 +224,6 @@ impl InMemoryBatch {
 
         count_usage!(&self.web_events, events);
         count_usage!(&self.mods_events, events);
-        count_usage!(&self.error_trackings, error_tracking);
         count_usage!(&self.error_occurrences_v3, error_tracking);
         count_usage!(&self.web_vitals, web_vitals);
         for (row, ctx) in &self.replays {
@@ -281,8 +251,6 @@ impl InMemoryBatch {
 struct BatchSendResult {
     failed_web_events: Vec<(WebEventRow, Option<TrackingContext>)>,
     failed_mods_events: Vec<(ModsEventRow, Option<TrackingContext>)>,
-    failed_errors: Vec<ErrorRow>,
-    failed_error_trackings: Vec<(ErrorTrackingRow, Option<TrackingContext>)>,
     failed_error_occurrences_v3: Vec<(ErrorOccurrenceV3Row, Option<TrackingContext>)>,
     failed_web_vitals: Vec<(WebVitalRow, Option<TrackingContext>)>,
     failed_replays: Vec<(ReplayRow, Option<TrackingContext>)>,
@@ -294,8 +262,6 @@ impl BatchSendResult {
     fn has_failures(&self) -> bool {
         !self.failed_web_events.is_empty()
             || !self.failed_mods_events.is_empty()
-            || !self.failed_errors.is_empty()
-            || !self.failed_error_trackings.is_empty()
             || !self.failed_error_occurrences_v3.is_empty()
             || !self.failed_web_vitals.is_empty()
             || !self.failed_replays.is_empty()
@@ -305,8 +271,6 @@ impl BatchSendResult {
         InMemoryBatch {
             web_events: self.failed_web_events,
             mods_events: self.failed_mods_events,
-            errors: self.failed_errors,
-            error_trackings: self.failed_error_trackings,
             error_occurrences_v3: self.failed_error_occurrences_v3,
             web_vitals: self.failed_web_vitals,
             replays: self.failed_replays,
@@ -316,8 +280,6 @@ impl BatchSendResult {
     fn failure_count(&self) -> usize {
         self.failed_web_events.len()
             + self.failed_mods_events.len()
-            + self.failed_errors.len()
-            + self.failed_error_trackings.len()
             + self.failed_error_occurrences_v3.len()
             + self.failed_web_vitals.len()
             + self.failed_replays.len()
@@ -593,8 +555,6 @@ impl BatchQueue {
         let InMemoryBatch {
             web_events,
             mods_events,
-            errors,
-            error_trackings,
             error_occurrences_v3,
             web_vitals,
             replays,
@@ -602,7 +562,6 @@ impl BatchQueue {
 
         let web_event_rows: Vec<_> = web_events.iter().map(|(e, _)| e).collect();
         let mods_event_rows: Vec<_> = mods_events.iter().map(|(e, _)| e).collect();
-        let error_tracking_rows: Vec<_> = error_trackings.iter().map(|(e, _)| e).collect();
         let error_occurrences_v3 = self.enrich_error_occurrences_v3(error_occurrences_v3).await;
         let error_occurrence_v3_rows: Vec<_> =
             error_occurrences_v3.iter().map(|(e, _)| e).collect();
@@ -612,8 +571,6 @@ impl BatchQueue {
         let (
             web_events_res,
             mods_events_res,
-            errors_res,
-            error_trackings_res,
             error_occurrences_v3_res,
             web_vitals_res,
             replays_res,
@@ -630,22 +587,6 @@ impl BatchQueue {
                     Ok(())
                 } else {
                     self.tinybird.insert_mods_events(&mods_event_rows).await
-                }
-            },
-            async {
-                if errors.is_empty() {
-                    Ok(())
-                } else {
-                    self.tinybird.insert_errors(&errors).await
-                }
-            },
-            async {
-                if error_tracking_rows.is_empty() {
-                    Ok(())
-                } else {
-                    self.tinybird
-                        .insert_error_trackings(&error_tracking_rows)
-                        .await
                 }
             },
             async {
@@ -687,27 +628,6 @@ impl BatchQueue {
                 result.had_permanent_failure = true;
             }
             result.failed_mods_events = mods_events;
-        }
-
-        if let Err(e) = errors_res {
-            record_batch_error(&mut result, "errors", errors.len(), &e);
-            if !e.is_transient() {
-                result.had_permanent_failure = true;
-            }
-            result.failed_errors = errors;
-        }
-
-        if let Err(e) = error_trackings_res {
-            record_batch_error(
-                &mut result,
-                "error_occurences_v2",
-                error_trackings.len(),
-                &e,
-            );
-            if !e.is_transient() {
-                result.had_permanent_failure = true;
-            }
-            result.failed_error_trackings = error_trackings;
         }
 
         if let Err(e) = error_occurrences_v3_res {
@@ -946,6 +866,34 @@ mod tests {
         }
     }
 
+    fn create_test_error_occurrence() -> QueuedEvent {
+        QueuedEvent::ErrorOccurrenceV3 {
+            row: Box::new(ErrorOccurrenceV3Row {
+                timestamp: Utc::now(),
+                project_id: Uuid::new_v4(),
+                environment: "prod".to_string(),
+                release: String::new(),
+                group_hash: "group".to_string(),
+                exact_hash: "exact".to_string(),
+                error_type: "TestError".to_string(),
+                error_message: "Test message".to_string(),
+                handled: false,
+                stacktrace: "line1".to_string(),
+                mapped_stacktrace: None,
+                mapping_used: None,
+                user_id: String::new(),
+                session_id: String::new(),
+                window_id: String::new(),
+                platform: "web".to_string(),
+                runtime: "browser".to_string(),
+                sdk_name: String::new(),
+                sdk_version: String::new(),
+                context: "{}".to_string(),
+            }),
+            tracking: None,
+        }
+    }
+
     mod backup_store_tests {
         use super::*;
 
@@ -1010,13 +958,7 @@ mod tests {
             let event = create_test_queued_event();
             store.backup_events(&[event], None).await.unwrap();
 
-            let error = QueuedEvent::Error(ErrorRow {
-                hash: "error-hash".to_string(),
-                name: "TestError".to_string(),
-                message: "Test message".to_string(),
-                stack: vec!["line1".to_string()],
-                cause_hash: None,
-            });
+            let error = create_test_error_occurrence();
             store.backup_events(&[error], None).await.unwrap();
 
             let vital = QueuedEvent::WebVital {
@@ -1046,7 +988,7 @@ mod tests {
             assert_eq!(events.len(), 3);
 
             assert!(matches!(events[0].1, QueuedEvent::ModsEvent { .. }));
-            assert!(matches!(events[1].1, QueuedEvent::Error(_)));
+            assert!(matches!(events[1].1, QueuedEvent::ErrorOccurrenceV3 { .. }));
             assert!(matches!(events[2].1, QueuedEvent::WebVital { .. }));
         }
 
@@ -1133,13 +1075,7 @@ mod tests {
 
             batch.push(create_test_queued_event());
             batch.push(create_test_queued_event());
-            batch.push(QueuedEvent::Error(ErrorRow {
-                hash: "error-hash".to_string(),
-                name: "E".to_string(),
-                message: "M".to_string(),
-                stack: vec![],
-                cause_hash: None,
-            }));
+            batch.push(create_test_error_occurrence());
 
             assert_eq!(batch.total_count(), 3);
         }
@@ -1149,13 +1085,7 @@ mod tests {
             let mut batch = InMemoryBatch::default();
 
             batch.push(create_test_queued_event());
-            batch.push(QueuedEvent::Error(ErrorRow {
-                hash: "error-hash".to_string(),
-                name: "E".to_string(),
-                message: "M".to_string(),
-                stack: vec![],
-                cause_hash: None,
-            }));
+            batch.push(create_test_error_occurrence());
             batch.push(QueuedEvent::WebVital {
                 row: WebVitalRow {
                     id: Uuid::new_v4(),
@@ -1177,10 +1107,9 @@ mod tests {
             });
 
             assert_eq!(batch.mods_events.len(), 1);
-            assert_eq!(batch.errors.len(), 1);
+            assert_eq!(batch.error_occurrences_v3.len(), 1);
             assert_eq!(batch.web_vitals.len(), 1);
             assert!(batch.web_events.is_empty());
-            assert!(batch.error_trackings.is_empty());
             assert!(batch.replays.is_empty());
         }
 
@@ -1188,18 +1117,12 @@ mod tests {
         fn test_into_queued_events() {
             let mut batch = InMemoryBatch::default();
             batch.push(create_test_queued_event());
-            batch.push(QueuedEvent::Error(ErrorRow {
-                hash: "error-hash".to_string(),
-                name: "E".to_string(),
-                message: "M".to_string(),
-                stack: vec![],
-                cause_hash: None,
-            }));
+            batch.push(create_test_error_occurrence());
 
             let queued = batch.into_queued_events();
             assert_eq!(queued.len(), 2);
             assert!(matches!(queued[0], QueuedEvent::ModsEvent { .. }));
-            assert!(matches!(queued[1], QueuedEvent::Error(_)));
+            assert!(matches!(queued[1], QueuedEvent::ErrorOccurrenceV3 { .. }));
         }
     }
 
@@ -1237,54 +1160,8 @@ mod tests {
         fn test_datasource_names() {
             assert_eq!(create_test_queued_event().datasource(), "mods_events");
             assert_eq!(
-                QueuedEvent::Error(ErrorRow {
-                    hash: "error-hash".to_string(),
-                    name: "E".to_string(),
-                    message: "M".to_string(),
-                    stack: vec![],
-                    cause_hash: None,
-                })
-                .datasource(),
-                "errors"
-            );
-            assert_eq!(
-                QueuedEvent::ErrorTracking {
-                    row: Box::new(ErrorTrackingRow {
-                        id: Uuid::new_v4(),
-                        project_id: Uuid::new_v4(),
-                        hash: "hash".to_string(),
-                        error_hash: "error-hash".to_string(),
-                        count: 3,
-                        data_entry_id: Some(Uuid::new_v4()),
-                        session_id: None,
-                        identity_key: None,
-                        build_id: None,
-                        plugin_version: String::new(),
-                        source_kind: "error".to_string(),
-                        entry_session_id: String::new(),
-                        entry_country: String::new(),
-                        entry_browser: String::new(),
-                        entry_device: String::new(),
-                        entry_os: String::new(),
-                        player_count: None,
-                        online_mode: None,
-                        minecraft_version: String::new(),
-                        server_type: String::new(),
-                        java_version: String::new(),
-                        java_vendor: String::new(),
-                        os_version: String::new(),
-                        os_arch: String::new(),
-                        core_count: None,
-                        entry_data: "{}".to_string(),
-                        stack_placeholders: "{}".to_string(),
-                        context: None,
-                        handled: None,
-                        created_at: Utc::now(),
-                    }),
-                    tracking: None,
-                }
-                .datasource(),
-                "error_occurences_v2"
+                create_test_error_occurrence().datasource(),
+                "error_tracking_v3"
             );
             assert_eq!(
                 QueuedEvent::WebVital {

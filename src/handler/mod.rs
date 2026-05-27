@@ -1,7 +1,6 @@
 mod collect;
 mod error;
 mod identify;
-mod java_stack_parameterization;
 mod replay;
 mod vitals;
 mod web;
@@ -13,13 +12,9 @@ pub use replay::replay;
 pub use vitals::vitals;
 pub use web::web;
 
-use self::java_stack_parameterization::build_parameterized_error_rows;
 use crate::batch_queue::{BatchQueue, FailedRequest, QueuedEvent, RequestType, TrackingContext};
-use crate::models::{DataSource, Error, ErrorTracking};
-use crate::tinybird::{
-    ErrorOccurrenceV3Row, ErrorRow, ErrorTrackingRow, ModsEventRow, WebEventRow,
-};
-use crate::utils::sha256_hex;
+use crate::models::DataSource;
+use crate::tinybird::{ErrorOccurrenceV3Row, ModsEventRow, WebEventRow};
 use axum::Json;
 use axum::http::{HeaderMap, StatusCode};
 use moka::future::Cache;
@@ -42,52 +37,6 @@ static PROJECT_CACHE: LazyLock<Cache<String, Arc<ProjectContext>>> = LazyLock::n
 });
 
 pub type HandlerResponse = (StatusCode, Json<Value>);
-
-#[derive(Clone, Copy, Debug, Default)]
-pub enum ErrorStackProcessing {
-    #[default]
-    Raw,
-    JavaCollect,
-}
-
-pub struct ErrorEntryParams {
-    pub identity_key: Option<String>,
-    pub context: Option<String>,
-    pub details: ErrorEntryDetails,
-    pub tracking_ctx: Option<TrackingContext>,
-    pub stack_processing: ErrorStackProcessing,
-}
-
-#[derive(Clone, Default)]
-pub struct ErrorEntryDetails {
-    pub plugin_version: String,
-    pub source_kind: String,
-    pub entry_session_id: String,
-    pub entry_country: String,
-    pub entry_browser: String,
-    pub entry_device: String,
-    pub entry_os: String,
-    pub player_count: Option<f64>,
-    pub online_mode: Option<bool>,
-    pub minecraft_version: String,
-    pub server_type: String,
-    pub java_version: String,
-    pub java_vendor: String,
-    pub os_version: String,
-    pub os_arch: String,
-    pub core_count: Option<u16>,
-    pub entry_data: String,
-}
-
-impl ErrorEntryDetails {
-    pub fn error_only() -> Self {
-        Self {
-            source_kind: "error".to_string(),
-            entry_data: "{}".to_string(),
-            ..Self::default()
-        }
-    }
-}
 
 #[derive(Debug, Deserialize, Default)]
 pub struct EncodingQuery {
@@ -417,31 +366,6 @@ fn to_custom_json(data: &HashMap<String, Value>) -> String {
     }
 }
 
-pub fn build_mods_error_entry_details(
-    country: Option<&str>,
-    row: &ModsEventRow,
-    custom: &HashMap<String, Value>,
-) -> ErrorEntryDetails {
-    ErrorEntryDetails {
-        plugin_version: row.plugin_version.clone().unwrap_or_default(),
-        source_kind: "minecraft-plugin".to_string(),
-        entry_session_id: row.server_id.to_string(),
-        entry_country: country.unwrap_or_default().to_string(),
-        entry_os: row.os_name.clone().unwrap_or_default(),
-        player_count: row.player_count,
-        online_mode: row.online_mode,
-        minecraft_version: row.minecraft_version.clone().unwrap_or_default(),
-        server_type: row.server_type.clone().unwrap_or_default(),
-        java_version: row.java_version.clone().unwrap_or_default(),
-        java_vendor: row.java_vendor.clone().unwrap_or_default(),
-        os_version: row.os_version.clone().unwrap_or_default(),
-        os_arch: row.os_arch.clone().unwrap_or_default(),
-        core_count: row.core_count,
-        entry_data: to_custom_json(custom),
-        ..ErrorEntryDetails::default()
-    }
-}
-
 /// Known internal fields for web_events row. These are extracted before
 /// datasource validation so they always reach the Tinybird row.
 const WEB_EVENT_FIELDS: &[&str] = &[
@@ -596,128 +520,6 @@ pub async fn insert_mods_event(
     Ok(event_id)
 }
 
-fn build_error_rows(mut error: Error, errors: &mut Vec<ErrorRow>) -> String {
-    let cause = error
-        .cause
-        .take()
-        .map(|cause| build_error_rows(*cause, errors));
-    let cause_hash = cause.as_deref().unwrap_or("");
-    let message = error.message.unwrap_or_default();
-    let stack = error.stack.unwrap_or_default();
-    let stack_json = serde_json::to_string(&stack).unwrap_or_default();
-    let hash = sha256_hex(&[
-        error.error.as_bytes(),
-        b"\x1f",
-        message.as_bytes(),
-        b"\x1f",
-        stack_json.as_bytes(),
-        b"\x1f",
-        cause_hash.as_bytes(),
-    ]);
-    errors.push(ErrorRow {
-        hash: hash.clone(),
-        name: error.error,
-        message,
-        stack,
-        cause_hash: cause,
-    });
-
-    hash
-}
-
-pub async fn insert_error_entries(
-    batch_queue: &BatchQueue,
-    project_id: Uuid,
-    data_entry_id: Option<Uuid>,
-    data: ErrorTracking,
-    params: ErrorEntryParams,
-) -> Result<(), HandlerResponse> {
-    let ErrorTracking {
-        hash,
-        error,
-        count,
-        session_id,
-        build_id,
-        handled,
-    } = data;
-
-    let (error_hash, error_rows, stack_placeholders) = match params.stack_processing {
-        ErrorStackProcessing::Raw => {
-            let mut error_rows = Vec::new();
-            let error_hash = build_error_rows(error, &mut error_rows);
-            (error_hash, error_rows, "{}".to_string())
-        }
-        ErrorStackProcessing::JavaCollect => {
-            let parameterized = build_parameterized_error_rows(error);
-            (
-                parameterized.error_hash,
-                parameterized.rows,
-                parameterized.stack_placeholders,
-            )
-        }
-    };
-
-    for error_row in error_rows {
-        batch_queue
-            .queue_event(QueuedEvent::Error(error_row))
-            .await
-            .map_err(|e| {
-                error!("Failed to queue error: {}", e);
-                error_response(StatusCode::INTERNAL_SERVER_ERROR, "Failed to queue error")
-            })?;
-    }
-
-    let occurrence_count = count.unwrap_or(1).max(1) as u32;
-    let created_at = chrono::Utc::now();
-    let error_tracking = ErrorTrackingRow {
-        id: Uuid::new_v4(),
-        project_id,
-        hash,
-        error_hash,
-        count: occurrence_count,
-        data_entry_id,
-        session_id,
-        identity_key: params.identity_key,
-        build_id,
-        plugin_version: params.details.plugin_version,
-        source_kind: params.details.source_kind,
-        entry_session_id: params.details.entry_session_id,
-        entry_country: params.details.entry_country,
-        entry_browser: params.details.entry_browser,
-        entry_device: params.details.entry_device,
-        entry_os: params.details.entry_os,
-        player_count: params.details.player_count,
-        online_mode: params.details.online_mode,
-        minecraft_version: params.details.minecraft_version,
-        server_type: params.details.server_type,
-        java_version: params.details.java_version,
-        java_vendor: params.details.java_vendor,
-        os_version: params.details.os_version,
-        os_arch: params.details.os_arch,
-        core_count: params.details.core_count,
-        entry_data: params.details.entry_data,
-        stack_placeholders,
-        context: params.context,
-        handled,
-        created_at,
-    };
-
-    batch_queue
-        .queue_event(QueuedEvent::ErrorTracking {
-            row: Box::new(error_tracking),
-            tracking: params.tracking_ctx,
-        })
-        .await
-        .map_err(|e| {
-            error!("Failed to queue error tracking: {}", e);
-            error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to queue error tracking",
-            )
-        })?;
-    Ok(())
-}
-
 pub async fn insert_error_occurrence_v3(
     batch_queue: &BatchQueue,
     row: ErrorOccurrenceV3Row,
@@ -737,20 +539,6 @@ pub async fn insert_error_occurrence_v3(
             )
         })?;
     Ok(())
-}
-
-pub fn resolve_identity_key(
-    session_id: Option<&str>,
-    fallback_identifier: Option<&str>,
-) -> Option<String> {
-    session_id
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .or_else(|| {
-            fallback_identifier
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
-        })
 }
 
 pub async fn process_failed_request(
@@ -812,41 +600,39 @@ async fn process_collect_request(
         &valid_custom,
     );
 
-    let data_entry_id =
-        insert_mods_event(batch_queue, event_row.clone(), Some(tracking_ctx.clone()))
-            .await
-            .map_err(|_| "Failed to queue event".to_string())?;
+    let error_v3_context = ctx
+        .error_tracking_enabled
+        .then(|| crate::error_tracking::v3::mods_context(&event_row, &valid_custom));
+
+    insert_mods_event(batch_queue, event_row.clone(), Some(tracking_ctx.clone()))
+        .await
+        .map_err(|_| "Failed to queue event".to_string())?;
 
     if ctx.error_tracking_enabled
         && let Some(errors) = errors
         && !errors.is_empty()
     {
-        let error_entry_details =
-            build_mods_error_entry_details(request.country.as_deref(), &event_row, &valid_custom);
         let fallback_identity = server_id.to_string();
+        let sdk_version = event_row.plugin_version.as_deref();
+        let error_v3_context = error_v3_context.as_deref().unwrap_or("{}");
         for mut error in errors {
             if error.session_id.is_none() {
                 error.session_id = session_id.clone();
             }
-            let identity_key = resolve_identity_key(
-                error.session_id.as_deref(),
-                Some(fallback_identity.as_str()),
-            );
-            insert_error_entries(
-                batch_queue,
-                ctx.project_id,
-                Some(data_entry_id),
-                error,
-                ErrorEntryParams {
-                    identity_key,
-                    context: None,
-                    details: error_entry_details.clone(),
-                    tracking_ctx: Some(tracking_ctx.clone()),
-                    stack_processing: ErrorStackProcessing::JavaCollect,
+            let occurrence = crate::error_tracking::v3::build_mods_occurrence(
+                &crate::error_tracking::v3::ModsOccurrenceInput {
+                    project_id: ctx.project_id,
+                    release: error.build_id.as_deref(),
+                    server_id: fallback_identity.as_str(),
+                    session_id: error.session_id.as_deref(),
+                    sdk_version,
+                    context: error_v3_context,
                 },
-            )
-            .await
-            .map_err(|_| "Failed to queue error".to_string())?;
+                &error,
+            );
+            insert_error_occurrence_v3(batch_queue, occurrence, Some(tracking_ctx.clone()))
+                .await
+                .map_err(|_| "Failed to queue error".to_string())?;
         }
     }
 
@@ -1437,31 +1223,6 @@ mod tests {
                 get_request_origin(&headers),
                 Some("example.com".to_string())
             );
-        }
-    }
-
-    mod identity_resolution {
-        use super::*;
-
-        #[test]
-        fn prefers_session_id_when_present() {
-            assert_eq!(
-                resolve_identity_key(Some("session-1"), Some("fallback-1")),
-                Some("session-1".to_string())
-            );
-        }
-
-        #[test]
-        fn falls_back_when_session_missing() {
-            assert_eq!(
-                resolve_identity_key(None, Some("fallback-1")),
-                Some("fallback-1".to_string())
-            );
-        }
-
-        #[test]
-        fn ignores_empty_values() {
-            assert_eq!(resolve_identity_key(Some(""), Some("")), None);
         }
     }
 }

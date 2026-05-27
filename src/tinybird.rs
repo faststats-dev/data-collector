@@ -68,50 +68,6 @@ pub struct ModsEventRow {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ErrorRow {
-    pub hash: String,
-    pub name: String,
-    pub message: String,
-    pub stack: Vec<String>,
-    pub cause_hash: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ErrorTrackingRow {
-    pub id: Uuid,
-    pub project_id: Uuid,
-    pub hash: String,
-    pub error_hash: String,
-    pub count: u32,
-    pub data_entry_id: Option<Uuid>,
-    pub session_id: Option<String>,
-    pub identity_key: Option<String>,
-    pub build_id: Option<String>,
-    pub plugin_version: String,
-    pub source_kind: String,
-    pub entry_session_id: String,
-    pub entry_country: String,
-    pub entry_browser: String,
-    pub entry_device: String,
-    pub entry_os: String,
-    pub player_count: Option<f64>,
-    pub online_mode: Option<bool>,
-    pub minecraft_version: String,
-    pub server_type: String,
-    pub java_version: String,
-    pub java_vendor: String,
-    pub os_version: String,
-    pub os_arch: String,
-    pub core_count: Option<u16>,
-    pub entry_data: String,
-    pub stack_placeholders: String,
-    pub context: Option<String>,
-    pub handled: Option<bool>,
-    #[serde(with = "chrono::serde::ts_milliseconds")]
-    pub created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorOccurrenceV3Row {
     #[serde(with = "chrono::serde::ts_milliseconds")]
     pub timestamp: DateTime<Utc>,
@@ -285,17 +241,6 @@ impl TinybirdClient {
 
     pub async fn insert_mods_events(&self, events: &[&ModsEventRow]) -> Result<(), TinybirdError> {
         self.send_batch("mods_events", events).await
-    }
-
-    pub async fn insert_errors(&self, errors: &[ErrorRow]) -> Result<(), TinybirdError> {
-        self.send_batch("errors", errors).await
-    }
-
-    pub async fn insert_error_trackings(
-        &self,
-        rows: &[&ErrorTrackingRow],
-    ) -> Result<(), TinybirdError> {
-        self.send_batch("error_occurences_v2", rows).await
     }
 
     pub async fn insert_error_occurrences_v3(

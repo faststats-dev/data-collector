@@ -1,9 +1,9 @@
 use super::{
-    ErrorEntryDetails, ErrorEntryParams, ErrorStackProcessing, check_ip_allowed, error_response,
-    get_authorization, get_client_ip, insert_error_entries, load_project_context,
-    resolve_identity_key, success_response,
+    check_ip_allowed, error_response, get_authorization, get_client_ip, insert_error_occurrence_v3,
+    load_project_context, success_response,
 };
 use crate::batch_queue::TrackingContext;
+use crate::error_tracking::v3::{ErrorOnlyOccurrenceInput, build_error_only_occurrence};
 use crate::models::{AppState, ErrorTracking};
 use axum::Json;
 use axum::extract::State;
@@ -24,6 +24,10 @@ pub(crate) struct ErrorRequest {
     build_id: Option<String>,
     #[serde(default)]
     context: Option<Value>,
+    #[serde(default, alias = "sdk_name")]
+    sdk_name: Option<String>,
+    #[serde(default, alias = "sdk_version")]
+    sdk_version: Option<String>,
 }
 
 pub async fn error(
@@ -68,21 +72,20 @@ pub async fn error(
             error.build_id = payload.build_id.clone();
         }
         let replay_session_id = error.session_id.clone();
-        let identity_key = resolve_identity_key(error.session_id.as_deref(), None);
-        if let Err(e) = insert_error_entries(
-            &state.batch_queue,
-            ctx.project_id,
-            None,
-            error,
-            ErrorEntryParams {
-                identity_key,
-                context: context.clone(),
-                details: ErrorEntryDetails::error_only(),
-                tracking_ctx: Some(tracking_ctx.clone()),
-                stack_processing: ErrorStackProcessing::Raw,
+        let occurrence = build_error_only_occurrence(
+            &ErrorOnlyOccurrenceInput {
+                project_id: ctx.project_id,
+                release: error.build_id.as_deref(),
+                session_id: error.session_id.as_deref(),
+                sdk_name: payload.sdk_name.as_deref(),
+                sdk_version: payload.sdk_version.as_deref(),
+                context: context.as_deref().unwrap_or("{}"),
             },
-        )
-        .await
+            &error,
+        );
+        if let Err(e) =
+            insert_error_occurrence_v3(&state.batch_queue, occurrence, Some(tracking_ctx.clone()))
+                .await
         {
             return e;
         }

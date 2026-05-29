@@ -158,10 +158,6 @@ pub async fn enrich_with_sourcemap(
     resolver: Option<&SourcemapResolver>,
     mut row: ErrorOccurrenceV3Row,
 ) -> ErrorOccurrenceV3Row {
-    if row.platform != "web" || row.runtime != "browser" {
-        return row;
-    }
-
     let Some(resolver) = resolver else {
         return row;
     };
@@ -170,12 +166,29 @@ pub async fn enrich_with_sourcemap(
         return row;
     }
 
-    if let Some(mapped) = resolver
-        .apply_javascript(row.project_id, build_id, &row.stacktrace)
-        .await
-    {
-        row.group_hash =
-            fingerprint::group_hash(&row.error_type, &row.error_message, &mapped.stacktrace);
+    let mapped = if row.platform == "web" && row.runtime == "browser" {
+        resolver
+            .apply_javascript(row.project_id, build_id, &row.stacktrace)
+            .await
+    } else if row.runtime == "java" {
+        resolver
+            .apply_r8(row.project_id, build_id, &row.stacktrace)
+            .await
+    } else {
+        None
+    };
+
+    if let Some(mapped) = mapped {
+        if row.runtime == "java" {
+            row.group_hash = java_fingerprint::group_hash(
+                &row.error_type,
+                &row.error_message,
+                &mapped.stacktrace,
+            );
+        } else {
+            row.group_hash =
+                fingerprint::group_hash(&row.error_type, &row.error_message, &mapped.stacktrace);
+        }
         row.exact_hash =
             fingerprint::exact_hash(&row.error_type, &row.error_message, &mapped.stacktrace);
         row.mapped_stacktrace = Some(mapped.stacktrace);

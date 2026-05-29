@@ -1,7 +1,9 @@
+use crate::error_tracking::proguard::ProguardMapping;
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
 use aws_sdk_s3::Client;
 use moka::future::Cache;
 use sourcemap::SourceMap;
+use sqlx::PgPool;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::warn;
@@ -11,13 +13,17 @@ const NONCE_LEN: usize = 12;
 const TAG_LEN: usize = 16;
 const MAP_CACHE_CAPACITY: u64 = 512;
 const MAP_CACHE_TTL: Duration = Duration::from_secs(600);
+const BUILD_CACHE_CAPACITY: u64 = 2048;
 
 #[derive(Clone)]
 pub struct SourcemapResolver {
     client: Client,
+    db: PgPool,
     bucket: Arc<str>,
     crypto: Arc<SourcemapCrypto>,
     maps: Cache<String, Option<Arc<SourceMap>>>,
+    proguard_maps: Cache<String, Option<Arc<ProguardMapping>>>,
+    known_builds: Cache<String, bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -47,7 +53,7 @@ struct SourcemapCrypto {
 }
 
 impl SourcemapResolver {
-    pub fn from_env() -> Option<Self> {
+    pub fn from_env(db: PgPool) -> Option<Self> {
         let bucket = std::env::var("SOURCEMAPS_S3_BUCKET").ok()?;
         let endpoint = std::env::var("SOURCEMAPS_S3_ENDPOINT").ok()?;
         let access_key_id = std::env::var("SOURCEMAPS_S3_ACCESS_KEY_ID").ok()?;
@@ -83,10 +89,19 @@ impl SourcemapResolver {
 
         Some(Self {
             client,
+            db,
             bucket: bucket.into(),
             crypto,
             maps: Cache::builder()
                 .max_capacity(MAP_CACHE_CAPACITY)
+                .time_to_idle(MAP_CACHE_TTL)
+                .build(),
+            proguard_maps: Cache::builder()
+                .max_capacity(MAP_CACHE_CAPACITY)
+                .time_to_idle(MAP_CACHE_TTL)
+                .build(),
+            known_builds: Cache::builder()
+                .max_capacity(BUILD_CACHE_CAPACITY)
                 .time_to_idle(MAP_CACHE_TTL)
                 .build(),
         })
@@ -99,6 +114,9 @@ impl SourcemapResolver {
         stacktrace: &str,
     ) -> Option<MappedStacktrace> {
         if build_id.is_empty() || stacktrace.is_empty() {
+            return None;
+        }
+        if !self.build_exists(project_id, build_id).await {
             return None;
         }
 
@@ -128,6 +146,56 @@ impl SourcemapResolver {
             stacktrace: mapped_stacktrace,
             mapping_used: format!("javascript:{build_id}"),
         })
+    }
+
+    pub async fn apply_r8(
+        &self,
+        project_id: Uuid,
+        build_id: &str,
+        stacktrace: &str,
+    ) -> Option<MappedStacktrace> {
+        if build_id.is_empty() || stacktrace.is_empty() {
+            return None;
+        }
+        if !self.build_exists(project_id, build_id).await {
+            return None;
+        }
+
+        let mapping = self.load_proguard_mapping(project_id, build_id).await?;
+        let mapped_stacktrace = mapping.retrace(stacktrace);
+        if mapped_stacktrace == stacktrace {
+            return None;
+        }
+
+        Some(MappedStacktrace {
+            stacktrace: mapped_stacktrace,
+            mapping_used: format!("r8:{build_id}"),
+        })
+    }
+
+    async fn build_exists(&self, project_id: Uuid, build_id: &str) -> bool {
+        let key = build_cache_key(project_id, build_id);
+        self.known_builds
+            .get_with(key, async move {
+                sqlx::query_scalar::<_, bool>(
+                    r#"
+                    SELECT EXISTS(
+                        SELECT 1
+                        FROM project_build_ids
+                        WHERE project_id = $1 AND build_id = $2
+                    )
+                    "#,
+                )
+                .bind(project_id)
+                .bind(build_id)
+                .fetch_one(&self.db)
+                .await
+                .map_err(|error| {
+                    warn!(%project_id, build_id, %error, "Failed to check sourcemap build id");
+                })
+                .unwrap_or(false)
+            })
+            .await
     }
 
     async fn apply_frame(
@@ -219,6 +287,111 @@ impl SourcemapResolver {
             })
             .ok()?;
         Some(Arc::new(map))
+    }
+
+    async fn load_proguard_mapping(
+        &self,
+        project_id: Uuid,
+        build_id: &str,
+    ) -> Option<Arc<ProguardMapping>> {
+        let prefix = crate::error_tracking::proguard::s3_prefix(project_id, build_id);
+        self.proguard_maps
+            .get_with(prefix.clone(), async move {
+                self.fetch_proguard_mapping(&prefix).await
+            })
+            .await
+    }
+
+    async fn fetch_proguard_mapping(&self, prefix: &str) -> Option<Arc<ProguardMapping>> {
+        let mut keys = self
+            .list_keys(prefix)
+            .await
+            .map_err(|error| {
+                warn!(prefix, %error, "Failed to list proguard mappings");
+            })
+            .ok()?;
+        keys.sort_unstable();
+        if keys.is_empty() {
+            return None;
+        }
+
+        let mut contents = Vec::with_capacity(keys.len());
+        for key in keys {
+            contents.push(self.fetch_bytes(&key).await?);
+        }
+
+        ProguardMapping::parse_many_bytes(&contents)
+            .map(Arc::new)
+            .map_err(|()| {
+                warn!(prefix, "Failed to parse proguard mappings");
+            })
+            .ok()
+    }
+
+    async fn list_keys(&self, prefix: &str) -> Result<Vec<String>, aws_sdk_s3::Error> {
+        let mut keys = Vec::new();
+        let mut continuation_token: Option<String> = None;
+
+        loop {
+            let mut req = self
+                .client
+                .list_objects_v2()
+                .bucket(self.bucket.as_ref())
+                .prefix(prefix);
+
+            if let Some(token) = &continuation_token {
+                req = req.continuation_token(token);
+            }
+
+            let resp = req.send().await?;
+            for object in resp.contents() {
+                if let Some(key) = object.key() {
+                    keys.push(key.to_string());
+                }
+            }
+
+            if resp.is_truncated() != Some(true) {
+                break;
+            }
+            continuation_token = resp.next_continuation_token().map(Into::into);
+        }
+
+        Ok(keys)
+    }
+
+    async fn fetch_bytes(&self, key: &str) -> Option<Vec<u8>> {
+        let response = self
+            .client
+            .get_object()
+            .bucket(self.bucket.as_ref())
+            .key(key)
+            .send()
+            .await
+            .map_err(|error| {
+                warn!(key, %error, "Failed to fetch mapping object");
+            })
+            .ok()?;
+        let encrypted = response
+            .body
+            .collect()
+            .await
+            .map_err(|error| {
+                warn!(key, %error, "Failed to read mapping object");
+            })
+            .ok()?
+            .to_vec();
+        let compressed = self
+            .crypto
+            .decrypt(&encrypted)
+            .map_err(|()| {
+                warn!(key, "Failed to decrypt mapping object");
+            })
+            .ok()?;
+        zstd::stream::decode_all(compressed.as_slice())
+            .map_err(|error| {
+                warn!(key, %error, "Failed to decompress mapping object");
+            })
+            .ok()
     }
 }
 
@@ -367,6 +540,15 @@ fn s3_key(project_id: Uuid, build_id: &str, file_name: &str) -> String {
     key.push('/');
     key.push_str(file_name);
     key.push_str(map_suffix);
+    key
+}
+
+fn build_cache_key(project_id: Uuid, build_id: &str) -> String {
+    let mut key = String::with_capacity(36 + 1 + build_id.len());
+    use std::fmt::Write;
+    let _ = write!(key, "{project_id}");
+    key.push('/');
+    key.push_str(build_id);
     key
 }
 

@@ -136,7 +136,7 @@ fn build_occurrence(input: OccurrenceInput<'_>, error: &ErrorTracking) -> ErrorO
         stacktrace,
         mapped_stacktrace: None,
         mapping_used: None,
-        user_id: input.user_id.unwrap_or_default().to_string(),
+        identifier: input.user_id.unwrap_or_default().to_string(),
         session_id: input.session_id.unwrap_or_default().to_string(),
         window_id: input.window_id.unwrap_or_default().to_string(),
         sdk_name: input.sdk_name.unwrap_or_default().to_string(),

@@ -84,7 +84,7 @@ pub struct ErrorOccurrenceV3Row {
     pub mapped_stacktrace: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mapping_used: Option<String>,
-    pub user_id: String,
+    pub identifier: String,
     pub session_id: String,
     pub window_id: String,
     pub sdk_name: String,

@@ -881,7 +881,7 @@ mod tests {
                 stacktrace: "line1".to_string(),
                 mapped_stacktrace: None,
                 mapping_used: None,
-                user_id: String::new(),
+                identifier: String::new(),
                 session_id: String::new(),
                 window_id: String::new(),
                 sdk_name: String::new(),

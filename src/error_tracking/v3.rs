@@ -204,11 +204,8 @@ pub fn web_context(row: &WebEventRow, custom: &HashMap<String, Value>) -> Value 
         _ => serde_json::Map::new(),
     };
 
-    if !custom.is_empty() {
-        context.insert(
-            "custom".to_string(),
-            Value::Object(custom.iter().map(|(k, v)| (k.clone(), v.clone())).collect()),
-        );
+    for (key, value) in custom {
+        context.insert(key.clone(), value.clone());
     }
 
     Value::Object(context)
@@ -220,11 +217,8 @@ pub fn mods_context(row: &ModsEventRow, custom: &HashMap<String, Value>) -> Valu
         _ => serde_json::Map::new(),
     };
 
-    if !custom.is_empty() {
-        context.insert(
-            "custom".to_string(),
-            Value::Object(custom.iter().map(|(k, v)| (k.clone(), v.clone())).collect()),
-        );
+    for (key, value) in custom {
+        context.insert(key.clone(), value.clone());
     }
 
     Value::Object(context)

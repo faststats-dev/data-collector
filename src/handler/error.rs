@@ -7,7 +7,7 @@ use crate::error_tracking::v3::{
     ErrorOnlyOccurrenceInput, build_error_only_occurrence, empty_context, request_context,
 };
 use crate::models::{AppState, ErrorTracking};
-use axum::Json;
+use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
@@ -35,11 +35,16 @@ pub(crate) struct ErrorRequest {
 pub async fn error(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(payload): Json<ErrorRequest>,
+    body: Bytes,
 ) -> impl IntoResponse {
     let token = match get_authorization(&headers) {
         Some(t) => t,
         None => return error_response(StatusCode::UNAUTHORIZED, "Unauthorized"),
+    };
+
+    let payload: ErrorRequest = match serde_json::from_slice(&body) {
+        Ok(payload) => payload,
+        Err(_) => return error_response(StatusCode::BAD_REQUEST, "Invalid JSON"),
     };
 
     let ctx = match load_project_context(&state.pool, &token).await {

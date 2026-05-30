@@ -30,6 +30,7 @@ pub struct ModsOccurrenceInput<'a> {
 pub struct ErrorOnlyOccurrenceInput<'a> {
     pub project_id: Uuid,
     pub release: Option<&'a str>,
+    pub identifier: Option<&'a str>,
     pub session_id: Option<&'a str>,
     pub sdk_name: Option<&'a str>,
     pub sdk_version: Option<&'a str>,
@@ -47,8 +48,6 @@ pub fn build_web_occurrence(
             user_id: input.user_id,
             session_id: input.session_id,
             window_id: input.window_id,
-            platform: "web",
-            runtime: "browser",
             sdk_name: input.sdk_name,
             sdk_version: input.sdk_version,
             context: input.context,
@@ -69,8 +68,6 @@ pub fn build_mods_occurrence(
             user_id: Some(input.server_id),
             session_id: input.session_id,
             window_id: None,
-            platform: "minecraft-plugin",
-            runtime: "java",
             sdk_name: Some("minecraft-plugin"),
             sdk_version: input.sdk_version,
             context: input.context,
@@ -88,11 +85,9 @@ pub fn build_error_only_occurrence(
         OccurrenceInput {
             project_id: input.project_id,
             release: input.release,
-            user_id: None,
+            user_id: input.identifier,
             session_id: input.session_id,
             window_id: None,
-            platform: "web",
-            runtime: "browser",
             sdk_name: input.sdk_name,
             sdk_version: input.sdk_version,
             context: input.context,
@@ -108,8 +103,6 @@ struct OccurrenceInput<'a> {
     user_id: Option<&'a str>,
     session_id: Option<&'a str>,
     window_id: Option<&'a str>,
-    platform: &'a str,
-    runtime: &'a str,
     sdk_name: Option<&'a str>,
     sdk_version: Option<&'a str>,
     context: &'a Value,
@@ -146,8 +139,6 @@ fn build_occurrence(input: OccurrenceInput<'_>, error: &ErrorTracking) -> ErrorO
         user_id: input.user_id.unwrap_or_default().to_string(),
         session_id: input.session_id.unwrap_or_default().to_string(),
         window_id: input.window_id.unwrap_or_default().to_string(),
-        platform: input.platform.to_string(),
-        runtime: input.runtime.to_string(),
         sdk_name: input.sdk_name.unwrap_or_default().to_string(),
         sdk_version: input.sdk_version.unwrap_or_default().to_string(),
         context: occurrence_context(input.context, error.context.as_ref()),
@@ -166,20 +157,19 @@ pub async fn enrich_with_sourcemap(
         return row;
     }
 
-    let mapped = if row.platform == "web" && row.runtime == "browser" {
-        resolver
-            .apply_javascript(row.project_id, build_id, &row.stacktrace)
-            .await
-    } else if row.runtime == "java" {
+    let is_java = row.sdk_name == "minecraft-plugin";
+    let mapped = if is_java {
         resolver
             .apply_r8(row.project_id, build_id, &row.stacktrace)
             .await
     } else {
-        None
+        resolver
+            .apply_javascript(row.project_id, build_id, &row.stacktrace)
+            .await
     };
 
     if let Some(mapped) = mapped {
-        if row.runtime == "java" {
+        if is_java {
             row.group_hash = java_fingerprint::group_hash(
                 &row.error_type,
                 &row.error_message,

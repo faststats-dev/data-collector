@@ -884,8 +884,6 @@ mod tests {
                 user_id: String::new(),
                 session_id: String::new(),
                 window_id: String::new(),
-                platform: "web".to_string(),
-                runtime: "browser".to_string(),
                 sdk_name: String::new(),
                 sdk_version: String::new(),
                 context: "{}".to_string(),

@@ -21,6 +21,8 @@ use tracing::warn;
 pub(crate) struct ErrorRequest {
     errors: Vec<ErrorTracking>,
     #[serde(default)]
+    identifier: Option<String>,
+    #[serde(default)]
     session_id: Option<String>,
     #[serde(default)]
     build_id: Option<String>,
@@ -85,6 +87,7 @@ pub async fn error(
             &ErrorOnlyOccurrenceInput {
                 project_id: ctx.project_id,
                 release: error.build_id.as_deref(),
+                identifier: payload.identifier.as_deref(),
                 session_id: error.session_id.as_deref(),
                 sdk_name: payload.sdk_name.as_deref(),
                 sdk_version: payload.sdk_version.as_deref(),

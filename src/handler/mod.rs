@@ -575,6 +575,7 @@ async fn process_collect_request(
         mut data,
         errors,
         context,
+        project_name: _,
     } = req;
 
     let server_id = id

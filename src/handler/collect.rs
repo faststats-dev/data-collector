@@ -75,6 +75,7 @@ pub async fn collect(
         mut data,
         errors,
         context,
+        project_name: _,
     } = req;
 
     let server_id = match id.value().parse::<Uuid>() {

@@ -61,6 +61,9 @@ pub struct Request {
     pub errors: Option<Vec<ErrorTracking>>,
     #[serde(default)]
     pub context: Option<Value>,
+    // TODO: handle project_name once project-level routing is supported.
+    #[serde(default)]
+    pub project_name: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

@@ -575,7 +575,6 @@ async fn process_collect_request(
         mut data,
         errors,
         context,
-        session_id,
     } = req;
 
     let server_id = id
@@ -619,16 +618,13 @@ async fn process_collect_request(
     {
         let fallback_identity = server_id.to_string();
         let sdk_version = event_row.plugin_version.as_deref();
-        for mut error in errors {
-            if error.session_id.is_none() {
-                error.session_id = session_id.clone();
-            }
+        for error in errors {
             let occurrence = crate::error_tracking::v3::build_mods_occurrence(
                 &crate::error_tracking::v3::ModsOccurrenceInput {
                     project_id: ctx.project_id,
                     release: error.build_id.as_deref(),
                     server_id: fallback_identity.as_str(),
-                    session_id: error.session_id.as_deref(),
+                    session_id: None,
                     sdk_version,
                     context: error_v3_context,
                 },

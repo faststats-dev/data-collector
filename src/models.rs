@@ -41,12 +41,14 @@ pub struct ErrorTracking {
     pub error: Error,
     #[serde(default)]
     pub count: Option<i32>,
-    #[serde(default, rename = "sessionId")]
-    pub session_id: Option<String>,
     #[serde(default, rename = "buildId")]
     pub build_id: Option<String>,
     #[serde(default)]
     pub context: Option<Value>,
+    #[serde(default, rename = "sdkVersion")]
+    pub sdk_version: Option<String>,
+    #[serde(default, skip_deserializing)]
+    pub session_id: Option<String>,
     pub handled: Option<bool>,
 }
 
@@ -59,8 +61,6 @@ pub struct Request {
     pub errors: Option<Vec<ErrorTracking>>,
     #[serde(default)]
     pub context: Option<Value>,
-    #[serde(default, rename = "sessionId")]
-    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

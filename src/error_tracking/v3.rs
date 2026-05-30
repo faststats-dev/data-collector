@@ -302,6 +302,7 @@ mod tests {
             build_id: None,
             context: None,
             handled: None,
+            sdk_version: None,
         };
 
         let row = build_mods_occurrence(

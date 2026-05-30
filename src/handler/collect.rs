@@ -75,7 +75,6 @@ pub async fn collect(
         mut data,
         errors,
         context,
-        session_id,
     } = req;
 
     let server_id = match id.value().parse::<Uuid>() {
@@ -128,18 +127,14 @@ pub async fn collect(
         && !errors.is_empty()
     {
         let fallback_identity = server_id.to_string();
-        let sdk_version = event_row.plugin_version.as_deref();
-        for mut error in errors {
-            if error.session_id.is_none() {
-                error.session_id = session_id.clone();
-            }
+        for error in errors {
             let occurrence = build_mods_occurrence(
                 &ModsOccurrenceInput {
                     project_id: ctx.project_id,
                     release: error.build_id.as_deref(),
                     server_id: fallback_identity.as_str(),
                     session_id: error.session_id.as_deref(),
-                    sdk_version,
+                    sdk_version: error.sdk_version.as_deref(),
                     context: error_v3_context,
                 },
                 &error,

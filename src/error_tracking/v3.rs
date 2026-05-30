@@ -3,7 +3,7 @@ use crate::error_tracking::{fingerprint, java_fingerprint};
 use crate::models::ErrorTracking;
 use crate::tinybird::{ErrorOccurrenceV3Row, ModsEventRow, WebEventRow};
 use chrono::Utc;
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::collections::HashMap;
 use uuid::Uuid;
 
@@ -15,7 +15,7 @@ pub struct WebOccurrenceInput<'a> {
     pub window_id: Option<&'a str>,
     pub sdk_name: Option<&'a str>,
     pub sdk_version: Option<&'a str>,
-    pub context: &'a str,
+    pub context: &'a Value,
 }
 
 pub struct ModsOccurrenceInput<'a> {
@@ -24,7 +24,7 @@ pub struct ModsOccurrenceInput<'a> {
     pub server_id: &'a str,
     pub session_id: Option<&'a str>,
     pub sdk_version: Option<&'a str>,
-    pub context: &'a str,
+    pub context: &'a Value,
 }
 
 pub struct ErrorOnlyOccurrenceInput<'a> {
@@ -33,7 +33,7 @@ pub struct ErrorOnlyOccurrenceInput<'a> {
     pub session_id: Option<&'a str>,
     pub sdk_name: Option<&'a str>,
     pub sdk_version: Option<&'a str>,
-    pub context: &'a str,
+    pub context: &'a Value,
 }
 
 pub fn build_web_occurrence(
@@ -112,7 +112,7 @@ struct OccurrenceInput<'a> {
     runtime: &'a str,
     sdk_name: Option<&'a str>,
     sdk_version: Option<&'a str>,
-    context: &'a str,
+    context: &'a Value,
     group_hash: fn(&str, &str, &str) -> String,
 }
 
@@ -150,7 +150,7 @@ fn build_occurrence(input: OccurrenceInput<'_>, error: &ErrorTracking) -> ErrorO
         runtime: input.runtime.to_string(),
         sdk_name: input.sdk_name.unwrap_or_default().to_string(),
         sdk_version: input.sdk_version.unwrap_or_default().to_string(),
-        context: input.context.to_string(),
+        context: occurrence_context(input.context, error.context.as_ref()),
     }
 }
 
@@ -198,7 +198,7 @@ pub async fn enrich_with_sourcemap(
     row
 }
 
-pub fn web_context(row: &WebEventRow, custom: &HashMap<String, Value>) -> String {
+pub fn web_context(row: &WebEventRow, custom: &HashMap<String, Value>) -> Value {
     let mut context = match serde_json::to_value(row) {
         Ok(Value::Object(context)) => context,
         _ => serde_json::Map::new(),
@@ -211,10 +211,10 @@ pub fn web_context(row: &WebEventRow, custom: &HashMap<String, Value>) -> String
         );
     }
 
-    serde_json::to_string(&context).unwrap_or_else(|_| "{}".to_string())
+    Value::Object(context)
 }
 
-pub fn mods_context(row: &ModsEventRow, custom: &HashMap<String, Value>) -> String {
+pub fn mods_context(row: &ModsEventRow, custom: &HashMap<String, Value>) -> Value {
     let mut context = match serde_json::to_value(row) {
         Ok(Value::Object(context)) => context,
         _ => serde_json::Map::new(),
@@ -227,20 +227,68 @@ pub fn mods_context(row: &ModsEventRow, custom: &HashMap<String, Value>) -> Stri
         );
     }
 
-    serde_json::to_string(&context).unwrap_or_else(|_| "{}".to_string())
+    Value::Object(context)
+}
+
+pub fn empty_context() -> Value {
+    Value::Object(Map::new())
+}
+
+pub fn request_context(provided: Option<Value>, fallback: impl FnOnce() -> Value) -> Value {
+    provided.unwrap_or_else(fallback)
+}
+
+pub fn occurrence_context(base_context: &Value, error_context: Option<&Value>) -> String {
+    let Some(error_context) = error_context else {
+        return serialize_context(base_context);
+    };
+
+    let merged = merge_context_values(base_context.clone(), error_context.clone());
+    serialize_context(&merged)
+}
+
+fn serialize_context(context: &Value) -> String {
+    serde_json::to_string(context).unwrap_or_else(|_| "{}".to_string())
+}
+
+fn merge_context_values(base_context: Value, error_context: Value) -> Value {
+    match (base_context, error_context) {
+        (Value::Object(mut base), Value::Object(error)) => {
+            for (key, value) in error {
+                base.insert(key, value);
+            }
+            Value::Object(base)
+        }
+        (Value::Object(mut base), error) => {
+            base.insert("error".to_string(), error);
+            Value::Object(base)
+        }
+        (base, Value::Object(mut error)) => {
+            if !matches!(base, Value::Object(ref object) if object.is_empty()) {
+                error.insert("request".to_string(), base);
+            }
+            Value::Object(error)
+        }
+        (base, error) => {
+            let mut context = Map::new();
+            context.insert("request".to_string(), base);
+            context.insert("error".to_string(), error);
+            Value::Object(context)
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ModsOccurrenceInput, build_mods_occurrence};
+    use super::{ModsOccurrenceInput, build_mods_occurrence, empty_context, occurrence_context};
     use crate::error_tracking::java_fingerprint;
     use crate::models::{Error, ErrorTracking};
+    use serde_json::json;
     use uuid::Uuid;
 
     #[test]
     fn mods_occurrences_use_java_group_hash() {
         let error = ErrorTracking {
-            hash: "legacy-client-hash".to_string(),
             error: Error {
                 error: "java.lang.RuntimeException".to_string(),
                 message: Some("Failed for player 123".to_string()),
@@ -252,6 +300,7 @@ mod tests {
             count: None,
             session_id: None,
             build_id: None,
+            context: None,
             handled: None,
         };
 
@@ -262,7 +311,7 @@ mod tests {
                 server_id: "server-id",
                 session_id: None,
                 sdk_version: None,
-                context: "{}",
+                context: &empty_context(),
             },
             &error,
         );
@@ -274,6 +323,24 @@ mod tests {
                 "Failed for player 123",
                 "\tat plugin-1.2.3.jar//com.example.Plugin.handle(Plugin.java:42)"
             )
+        );
+    }
+
+    #[test]
+    fn occurrence_context_merges_error_context_over_base_context() {
+        let context = occurrence_context(
+            &json!({"page":"/checkout","plan":"pro"}),
+            Some(&json!({"plan":"enterprise","component":"pay-button"})),
+        );
+
+        let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
+        assert_eq!(
+            parsed,
+            json!({
+                "page": "/checkout",
+                "plan": "enterprise",
+                "component": "pay-button"
+            })
         );
     }
 }

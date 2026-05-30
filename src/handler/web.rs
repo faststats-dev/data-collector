@@ -5,7 +5,9 @@ use super::{
     validate_hostname,
 };
 use crate::batch_queue::{FailedRequest, RequestType, TrackingContext};
-use crate::error_tracking::v3::{WebOccurrenceInput, build_web_occurrence, web_context};
+use crate::error_tracking::v3::{
+    WebOccurrenceInput, build_web_occurrence, request_context, web_context,
+};
 use crate::identity::resolve_person_for_distinct_id;
 use crate::models::{AppState, ErrorTracking};
 use crate::utils::debounce::should_debounce;
@@ -203,12 +205,8 @@ pub async fn web(
         &valid_custom,
     );
     let should_process_errors = ctx.error_tracking_enabled && HAS_ERRORS(&errors);
-    let error_v3_context = should_process_errors.then(|| {
-        context
-            .as_ref()
-            .map(|value| serde_json::to_string(value).unwrap_or_else(|_| "{}".to_string()))
-            .unwrap_or_else(|| web_context(&event_row, &valid_custom))
-    });
+    let error_v3_context = should_process_errors
+        .then(|| request_context(context, || web_context(&event_row, &valid_custom)));
 
     if let Some(session_id) = session_id.as_deref()
         && let Some(replay_storage) = state.replay_storage.as_deref()
@@ -238,8 +236,9 @@ pub async fn web(
         }
     }
 
-    if should_process_errors && let Some(error_list) = errors {
-        let error_v3_context = error_v3_context.as_deref().unwrap_or("{}");
+    if let (true, Some(error_list), Some(error_v3_context)) =
+        (should_process_errors, errors, error_v3_context.as_ref())
+    {
         // The browser SDK sends this as `buildId`; the Tinybird v3 schema stores it as `release`.
         let release = build_id.as_deref();
         for mut error in error_list {

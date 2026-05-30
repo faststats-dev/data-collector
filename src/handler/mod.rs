@@ -574,6 +574,7 @@ async fn process_collect_request(
         id,
         mut data,
         errors,
+        context,
         session_id,
     } = req;
 
@@ -600,21 +601,24 @@ async fn process_collect_request(
         &valid_custom,
     );
 
-    let error_v3_context = ctx
-        .error_tracking_enabled
-        .then(|| crate::error_tracking::v3::mods_context(&event_row, &valid_custom));
+    let error_v3_context = ctx.error_tracking_enabled.then(|| {
+        crate::error_tracking::v3::request_context(context, || {
+            crate::error_tracking::v3::mods_context(&event_row, &valid_custom)
+        })
+    });
 
     insert_mods_event(batch_queue, event_row.clone(), Some(tracking_ctx.clone()))
         .await
         .map_err(|_| "Failed to queue event".to_string())?;
 
-    if ctx.error_tracking_enabled
-        && let Some(errors) = errors
-        && !errors.is_empty()
+    if let (true, Some(errors), Some(error_v3_context)) = (
+        ctx.error_tracking_enabled,
+        errors,
+        error_v3_context.as_ref(),
+    ) && !errors.is_empty()
     {
         let fallback_identity = server_id.to_string();
         let sdk_version = event_row.plugin_version.as_deref();
-        let error_v3_context = error_v3_context.as_deref().unwrap_or("{}");
         for mut error in errors {
             if error.session_id.is_none() {
                 error.session_id = session_id.clone();
@@ -734,11 +738,9 @@ async fn process_web_request(
     );
     let should_process_errors = ctx.error_tracking_enabled && has_errors;
     let error_v3_context = should_process_errors.then(|| {
-        parsed
-            .context
-            .as_ref()
-            .map(|value| serde_json::to_string(value).unwrap_or_else(|_| "{}".to_string()))
-            .unwrap_or_else(|| crate::error_tracking::v3::web_context(&event_row, &valid_custom))
+        crate::error_tracking::v3::request_context(parsed.context, || {
+            crate::error_tracking::v3::web_context(&event_row, &valid_custom)
+        })
     });
 
     if let Some(session_id) = parsed.session_id.as_deref()
@@ -766,8 +768,11 @@ async fn process_web_request(
         .await
         .map_err(|_| "Failed to queue event".to_string())?;
 
-    if should_process_errors && let Some(errors) = parsed.errors {
-        let error_v3_context = error_v3_context.as_deref().unwrap_or("{}");
+    if let (true, Some(errors), Some(error_v3_context)) = (
+        should_process_errors,
+        parsed.errors,
+        error_v3_context.as_ref(),
+    ) {
         // The browser SDK sends this as `buildId`; the Tinybird v3 schema stores it as `release`.
         let release = parsed.build_id.as_deref();
         for mut error in errors {

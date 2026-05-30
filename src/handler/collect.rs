@@ -4,7 +4,9 @@ use super::{
     insert_error_occurrence_v3, insert_mods_event, load_project_context, success_response,
 };
 use crate::batch_queue::{FailedRequest, RequestType, TrackingContext};
-use crate::error_tracking::v3::{ModsOccurrenceInput, build_mods_occurrence, mods_context};
+use crate::error_tracking::v3::{
+    ModsOccurrenceInput, build_mods_occurrence, mods_context, request_context,
+};
 use crate::models::{AppState, Request};
 use crate::validation::validate_and_filter_payload;
 use axum::body::Bytes;
@@ -72,6 +74,7 @@ pub async fn collect(
         id,
         mut data,
         errors,
+        context,
         session_id,
     } = req;
 
@@ -105,7 +108,7 @@ pub async fn collect(
     );
     let error_v3_context = ctx
         .error_tracking_enabled
-        .then(|| mods_context(&event_row, &valid_custom));
+        .then(|| request_context(context, || mods_context(&event_row, &valid_custom)));
 
     if let Err(e) = insert_mods_event(
         &state.batch_queue,
@@ -121,12 +124,11 @@ pub async fn collect(
         return success_response(warnings);
     }
 
-    if let Some(errors) = errors
+    if let (Some(errors), Some(error_v3_context)) = (errors, error_v3_context.as_ref())
         && !errors.is_empty()
     {
         let fallback_identity = server_id.to_string();
         let sdk_version = event_row.plugin_version.as_deref();
-        let error_v3_context = error_v3_context.as_deref().unwrap_or("{}");
         for mut error in errors {
             if error.session_id.is_none() {
                 error.session_id = session_id.clone();

@@ -3,7 +3,9 @@ use super::{
     load_project_context, success_response,
 };
 use crate::batch_queue::TrackingContext;
-use crate::error_tracking::v3::{ErrorOnlyOccurrenceInput, build_error_only_occurrence};
+use crate::error_tracking::v3::{
+    ErrorOnlyOccurrenceInput, build_error_only_occurrence, empty_context, request_context,
+};
 use crate::models::{AppState, ErrorTracking};
 use axum::Json;
 use axum::extract::State;
@@ -60,9 +62,7 @@ pub async fn error(
         organization_id: ctx.organization_id.as_deref().map(Into::into),
     };
 
-    let context = payload
-        .context
-        .map(|v| serde_json::to_string(&v).unwrap_or_else(|_| "{}".to_string()));
+    let context = request_context(payload.context, empty_context);
 
     for mut error in payload.errors {
         if error.session_id.is_none() {
@@ -79,7 +79,7 @@ pub async fn error(
                 session_id: error.session_id.as_deref(),
                 sdk_name: payload.sdk_name.as_deref(),
                 sdk_version: payload.sdk_version.as_deref(),
-                context: context.as_deref().unwrap_or("{}"),
+                context: &context,
             },
             &error,
         );

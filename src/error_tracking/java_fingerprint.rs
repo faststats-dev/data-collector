@@ -25,6 +25,7 @@ static LAMBDA_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 static WHITESPACE_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\s+").expect("valid whitespace regex"));
+const JAVA_INTERNAL_FRAME_PREFIXES: &[&str] = &["java.", "javax.", "sun.", "com.sun.", "jdk."];
 
 pub fn group_hash(error_type: &str, message: &str, stacktrace: &str) -> String {
     let normalized = normalize_for_grouping(error_type, message, stacktrace);
@@ -39,7 +40,7 @@ fn normalize_for_grouping(error_type: &str, message: &str, stacktrace: &str) -> 
 
     for line in stacktrace.lines().take(80) {
         let normalized = normalize_piece(line);
-        if normalized.is_empty() {
+        if normalized.is_empty() || is_java_internal_frame(&normalized) {
             continue;
         }
         out.push('\n');
@@ -61,6 +62,14 @@ fn normalize_piece(input: &str) -> String {
     value = NUMBER_RE.replace_all(&value, "<num>").into_owned();
     value = WHITESPACE_RE.replace_all(&value, " ").into_owned();
     value.trim().to_string()
+}
+
+fn is_java_internal_frame(line: &str) -> bool {
+    let frame = line.strip_prefix("at ").unwrap_or(line);
+
+    JAVA_INTERNAL_FRAME_PREFIXES
+        .iter()
+        .any(|prefix| frame.starts_with(prefix))
 }
 
 #[cfg(test)]
@@ -91,6 +100,25 @@ mod tests {
             "Failed for player 456",
             "\tat plugin-9.9.9.jar//com.example.Plugin.handle(Plugin.java:99)",
         );
+
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn group_hash_ignores_java_internal_frames() {
+        let app_frame = "\tat com.example.Plugin.handle(Plugin.java:42)";
+        let with_internals = [
+            "\tat java.base/java.lang.Thread.run(Thread.java:840)",
+            "\tat javax.servlet.Filter.doFilter(Filter.java:10)",
+            "\tat sun.reflect.NativeMethodAccessorImpl.invoke0(Native Method)",
+            "\tat com.sun.proxy.$Proxy1.invoke(Unknown Source)",
+            "\tat jdk.proxy2.$Proxy2.run(Unknown Source)",
+            app_frame,
+        ]
+        .join("\n");
+
+        let a = group_hash("RuntimeException", "Failed", app_frame);
+        let b = group_hash("RuntimeException", "Failed", &with_internals);
 
         assert_eq!(a, b);
     }

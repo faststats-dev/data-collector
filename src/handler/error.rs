@@ -4,7 +4,8 @@ use super::{
 };
 use crate::batch_queue::TrackingContext;
 use crate::error_tracking::v3::{
-    ErrorOnlyOccurrenceInput, build_error_only_occurrence, empty_context, request_context,
+    ErrorLanguage, ErrorOnlyOccurrenceInput, build_error_only_occurrence, empty_context,
+    request_context,
 };
 use crate::models::{AppState, ErrorTracking};
 use axum::body::Bytes;
@@ -35,6 +36,8 @@ pub(crate) struct ErrorRequest {
     sdk_name: Option<String>,
     #[serde(default, alias = "sdk_version")]
     sdk_version: Option<String>,
+    #[serde(default)]
+    language: Option<String>,
 }
 
 pub async fn error(
@@ -66,6 +69,11 @@ pub async fn error(
         return error_response(StatusCode::FORBIDDEN, "Error tracking is not enabled");
     }
 
+    let language = match ErrorLanguage::parse_optional(payload.language.as_deref()) {
+        Ok(language) => language,
+        Err(message) => return error_response(StatusCode::BAD_REQUEST, message),
+    };
+
     let tracking_ctx = TrackingContext {
         owner_id: ctx.billing_customer_id.as_str().into(),
         token: token.into(),
@@ -91,13 +99,18 @@ pub async fn error(
                 session_id: error.session_id.as_deref(),
                 sdk_name: payload.sdk_name.as_deref(),
                 sdk_version: payload.sdk_version.as_deref(),
+                language,
                 context: &context,
             },
             &error,
         );
-        if let Err(e) =
-            insert_error_occurrence_v3(&state.batch_queue, occurrence, Some(tracking_ctx.clone()))
-                .await
+        if let Err(e) = insert_error_occurrence_v3(
+            &state.batch_queue,
+            occurrence,
+            language,
+            Some(tracking_ctx.clone()),
+        )
+        .await
         {
             return e;
         }

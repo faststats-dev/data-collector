@@ -2,6 +2,7 @@ mod backup_store;
 pub use backup_store::BackupStore;
 
 use crate::error_tracking::sourcemaps::SourcemapResolver;
+use crate::error_tracking::v3::ErrorLanguage;
 use crate::polar::{PolarClient, UsageCounts};
 use crate::tinybird::{
     ErrorOccurrenceV3Row, ModsEventRow, ReplayRow, TinybirdClient, WebEventRow, WebVitalRow,
@@ -79,6 +80,8 @@ pub enum QueuedEvent {
     },
     ErrorOccurrenceV3 {
         row: Box<ErrorOccurrenceV3Row>,
+        #[serde(default)]
+        language: ErrorLanguage,
         #[serde(skip_serializing_if = "Option::is_none")]
         tracking: Option<TrackingContext>,
     },
@@ -112,7 +115,7 @@ const INITIAL_BATCH_CAPACITY: usize = 64;
 struct InMemoryBatch {
     web_events: Vec<(WebEventRow, Option<TrackingContext>)>,
     mods_events: Vec<(ModsEventRow, Option<TrackingContext>)>,
-    error_occurrences_v3: Vec<(ErrorOccurrenceV3Row, Option<TrackingContext>)>,
+    error_occurrences_v3: Vec<(ErrorOccurrenceV3Row, ErrorLanguage, Option<TrackingContext>)>,
     web_vitals: Vec<(WebVitalRow, Option<TrackingContext>)>,
     replays: Vec<(ReplayRow, Option<TrackingContext>)>,
 }
@@ -150,9 +153,11 @@ impl InMemoryBatch {
         match event {
             QueuedEvent::WebEvent { row, tracking } => self.web_events.push((*row, tracking)),
             QueuedEvent::ModsEvent { row, tracking } => self.mods_events.push((row, tracking)),
-            QueuedEvent::ErrorOccurrenceV3 { row, tracking } => {
-                self.error_occurrences_v3.push((*row, tracking))
-            }
+            QueuedEvent::ErrorOccurrenceV3 {
+                row,
+                language,
+                tracking,
+            } => self.error_occurrences_v3.push((*row, language, tracking)),
             QueuedEvent::WebVital { row, tracking } => self.web_vitals.push((row, tracking)),
             QueuedEvent::Replay { row, tracking } => self.replays.push((row, tracking)),
         }
@@ -176,8 +181,9 @@ impl InMemoryBatch {
         result.extend(
             self.error_occurrences_v3
                 .into_iter()
-                .map(|(row, tracking)| QueuedEvent::ErrorOccurrenceV3 {
+                .map(|(row, language, tracking)| QueuedEvent::ErrorOccurrenceV3 {
                     row: Box::new(row),
+                    language,
                     tracking,
                 }),
         );
@@ -224,7 +230,19 @@ impl InMemoryBatch {
 
         count_usage!(&self.web_events, events);
         count_usage!(&self.mods_events, events);
-        count_usage!(&self.error_occurrences_v3, error_tracking);
+        for (_, _, ctx) in &self.error_occurrences_v3 {
+            if let Some(ctx) = ctx {
+                usage
+                    .entry(Arc::clone(&ctx.owner_id))
+                    .or_insert_with(|| OwnerUsage {
+                        counts: UsageCounts::default(),
+                        token: Arc::clone(&ctx.token),
+                        org: ctx.organization_id.as_ref().map(Arc::clone),
+                    })
+                    .counts
+                    .error_tracking += 1;
+            }
+        }
         count_usage!(&self.web_vitals, web_vitals);
         for (row, ctx) in &self.replays {
             if let Some(ctx) = ctx {
@@ -251,7 +269,8 @@ impl InMemoryBatch {
 struct BatchSendResult {
     failed_web_events: Vec<(WebEventRow, Option<TrackingContext>)>,
     failed_mods_events: Vec<(ModsEventRow, Option<TrackingContext>)>,
-    failed_error_occurrences_v3: Vec<(ErrorOccurrenceV3Row, Option<TrackingContext>)>,
+    failed_error_occurrences_v3:
+        Vec<(ErrorOccurrenceV3Row, ErrorLanguage, Option<TrackingContext>)>,
     failed_web_vitals: Vec<(WebVitalRow, Option<TrackingContext>)>,
     failed_replays: Vec<(ReplayRow, Option<TrackingContext>)>,
     had_permanent_failure: bool,
@@ -564,7 +583,7 @@ impl BatchQueue {
         let mods_event_rows: Vec<_> = mods_events.iter().map(|(e, _)| e).collect();
         let error_occurrences_v3 = self.enrich_error_occurrences_v3(error_occurrences_v3).await;
         let error_occurrence_v3_rows: Vec<_> =
-            error_occurrences_v3.iter().map(|(e, _)| e).collect();
+            error_occurrences_v3.iter().map(|(e, _, _)| e).collect();
         let web_vital_rows: Vec<_> = web_vitals.iter().map(|(e, _)| e).collect();
         let replay_rows: Vec<_> = replays.iter().map(|(e, _)| e).collect();
 
@@ -664,17 +683,18 @@ impl BatchQueue {
 
     async fn enrich_error_occurrences_v3(
         &self,
-        rows: Vec<(ErrorOccurrenceV3Row, Option<TrackingContext>)>,
-    ) -> Vec<(ErrorOccurrenceV3Row, Option<TrackingContext>)> {
+        rows: Vec<(ErrorOccurrenceV3Row, ErrorLanguage, Option<TrackingContext>)>,
+    ) -> Vec<(ErrorOccurrenceV3Row, ErrorLanguage, Option<TrackingContext>)> {
         if rows.is_empty() || self.sourcemaps.is_none() {
             return rows;
         }
 
         let resolver = self.sourcemaps.as_deref();
         let mut enriched = Vec::with_capacity(rows.len());
-        for (row, tracking) in rows {
+        for (row, language, tracking) in rows {
             enriched.push((
-                crate::error_tracking::v3::enrich_with_sourcemap(resolver, row).await,
+                crate::error_tracking::v3::enrich_with_sourcemap(resolver, row, language).await,
+                language,
                 tracking,
             ));
         }
@@ -889,6 +909,7 @@ mod tests {
                 count: 1,
                 context: "{}".to_string(),
             }),
+            language: ErrorLanguage::Java,
             tracking: None,
         }
     }

@@ -523,11 +523,13 @@ pub async fn insert_mods_event(
 pub async fn insert_error_occurrence_v3(
     batch_queue: &BatchQueue,
     row: ErrorOccurrenceV3Row,
+    language: crate::error_tracking::v3::ErrorLanguage,
     tracking: Option<TrackingContext>,
 ) -> Result<(), HandlerResponse> {
     batch_queue
         .queue_event(QueuedEvent::ErrorOccurrenceV3 {
             row: Box::new(row),
+            language,
             tracking,
         })
         .await
@@ -631,9 +633,14 @@ async fn process_collect_request(
                 },
                 &error,
             );
-            insert_error_occurrence_v3(batch_queue, occurrence, Some(tracking_ctx.clone()))
-                .await
-                .map_err(|_| "Failed to queue error".to_string())?;
+            insert_error_occurrence_v3(
+                batch_queue,
+                occurrence,
+                crate::error_tracking::v3::ErrorLanguage::Java,
+                Some(tracking_ctx.clone()),
+            )
+            .await
+            .map_err(|_| "Failed to queue error".to_string())?;
         }
     }
 
@@ -789,9 +796,14 @@ async fn process_web_request(
                 },
                 &error,
             );
-            insert_error_occurrence_v3(batch_queue, occurrence, Some(tracking_ctx.clone()))
-                .await
-                .map_err(|_| "Failed to queue error occurrence".to_string())?;
+            insert_error_occurrence_v3(
+                batch_queue,
+                occurrence,
+                crate::error_tracking::v3::ErrorLanguage::Javascript,
+                Some(tracking_ctx.clone()),
+            )
+            .await
+            .map_err(|_| "Failed to queue error occurrence".to_string())?;
         }
 
         if let Some(session_id) = parsed.session_id.as_deref()

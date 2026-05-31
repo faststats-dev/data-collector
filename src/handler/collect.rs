@@ -143,6 +143,7 @@ pub async fn collect(
             if let Err(e) = insert_error_occurrence_v3(
                 &state.batch_queue,
                 occurrence,
+                crate::error_tracking::v3::ErrorLanguage::Java,
                 Some(tracking_ctx.clone()),
             )
             .await

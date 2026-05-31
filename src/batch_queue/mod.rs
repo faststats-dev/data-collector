@@ -886,6 +886,7 @@ mod tests {
                 window_id: String::new(),
                 sdk_name: String::new(),
                 sdk_version: String::new(),
+                count: 1,
                 context: "{}".to_string(),
             }),
             tracking: None,

@@ -141,6 +141,10 @@ fn build_occurrence(input: OccurrenceInput<'_>, error: &ErrorTracking) -> ErrorO
         window_id: input.window_id.unwrap_or_default().to_string(),
         sdk_name: input.sdk_name.unwrap_or_default().to_string(),
         sdk_version: input.sdk_version.unwrap_or_default().to_string(),
+        count: error
+            .count
+            .and_then(|count| count.try_into().ok())
+            .unwrap_or(1),
         context: occurrence_context(input.context, error.context.as_ref()),
     }
 }
@@ -281,7 +285,7 @@ mod tests {
                 ]),
                 cause: None,
             },
-            count: None,
+            count: Some(3),
             session_id: None,
             build_id: None,
             context: None,
@@ -309,6 +313,7 @@ mod tests {
                 "\tat plugin-1.2.3.jar//com.example.Plugin.handle(Plugin.java:42)"
             )
         );
+        assert_eq!(row.count, 3);
     }
 
     #[test]

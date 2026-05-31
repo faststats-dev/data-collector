@@ -89,6 +89,7 @@ pub struct ErrorOccurrenceV3Row {
     pub window_id: String,
     pub sdk_name: String,
     pub sdk_version: String,
+    pub count: u32,
     pub context: String,
 }
 

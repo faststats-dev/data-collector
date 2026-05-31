@@ -40,7 +40,7 @@ fn normalize_for_grouping(error_type: &str, message: &str, stacktrace: &str) -> 
 
     for line in stacktrace.lines().take(80) {
         let normalized = normalize_piece(line);
-        if normalized.is_empty() || is_java_internal_frame(&normalized) {
+        if normalized.is_empty() || should_ignore_frame(&normalized) {
             continue;
         }
         out.push('\n');
@@ -62,6 +62,10 @@ fn normalize_piece(input: &str) -> String {
     value = NUMBER_RE.replace_all(&value, "<num>").into_owned();
     value = WHITESPACE_RE.replace_all(&value, " ").into_owned();
     value.trim().to_string()
+}
+
+fn should_ignore_frame(line: &str) -> bool {
+    is_java_internal_frame(line) || line.trim_start().starts_with("...")
 }
 
 fn is_java_internal_frame(line: &str) -> bool {
@@ -119,6 +123,17 @@ mod tests {
 
         let a = group_hash("RuntimeException", "Failed", app_frame);
         let b = group_hash("RuntimeException", "Failed", &with_internals);
+
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn group_hash_ignores_java_cause_elision() {
+        let app_frame = "\tat com.example.Plugin.handle(Plugin.java:42)";
+        let with_elision = [app_frame, "\t... 23 more"].join("\n");
+
+        let a = group_hash("RuntimeException", "Failed", app_frame);
+        let b = group_hash("RuntimeException", "Failed", &with_elision);
 
         assert_eq!(a, b);
     }

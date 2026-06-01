@@ -23,7 +23,7 @@ impl ErrorLanguage {
         }
     }
 
-    fn group_hash(self) -> fn(&str, &str, &str) -> String {
+    fn group_hash(self) -> fn(&str, &str) -> String {
         match self {
             Self::Java => java_fingerprint::group_hash,
             Self::Javascript => fingerprint::group_hash,
@@ -153,7 +153,7 @@ fn build_occurrence(input: OccurrenceInput<'_>, error: &ErrorTracking) -> ErrorO
         // release behavior are verified in production data.
         environment: "prod".to_string(),
         release: input.release.unwrap_or_default().to_string(),
-        group_hash: (input.language.group_hash())(&error_type, &error_message, source_stack),
+        group_hash: (input.language.group_hash())(&error_type, source_stack),
         exact_hash: fingerprint::exact_hash(&error_type, &error_message, source_stack),
         error_type,
         error_message,
@@ -201,8 +201,7 @@ pub async fn enrich_with_sourcemap(
     };
 
     if let Some(mapped) = mapped {
-        row.group_hash =
-            (language.group_hash())(&row.error_type, &row.error_message, &mapped.stacktrace);
+        row.group_hash = (language.group_hash())(&row.error_type, &mapped.stacktrace);
         row.exact_hash =
             fingerprint::exact_hash(&row.error_type, &row.error_message, &mapped.stacktrace);
         row.mapped_stacktrace = Some(mapped.stacktrace);
@@ -288,11 +287,8 @@ fn merge_context_values(base_context: Value, error_context: Value) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        ErrorLanguage, ErrorOnlyOccurrenceInput, ModsOccurrenceInput, build_error_only_occurrence,
-        build_mods_occurrence, empty_context, occurrence_context,
-    };
-    use crate::error_tracking::{fingerprint, java_fingerprint};
+    use super::{ModsOccurrenceInput, build_mods_occurrence, empty_context, occurrence_context};
+    use crate::error_tracking::java_fingerprint;
     use crate::models::{Error, ErrorTracking};
     use serde_json::json;
     use uuid::Uuid;
@@ -332,7 +328,6 @@ mod tests {
             row.group_hash,
             java_fingerprint::group_hash(
                 "java.lang.RuntimeException",
-                "Failed for player 123",
                 "\tat plugin-1.2.3.jar//com.example.Plugin.handle(Plugin.java:42)"
             )
         );

@@ -27,16 +27,14 @@ static WHITESPACE_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\s+").expect("valid whitespace regex"));
 const JAVA_INTERNAL_FRAME_PREFIXES: &[&str] = &["java.", "javax.", "sun.", "com.sun.", "jdk."];
 
-pub fn group_hash(error_type: &str, message: &str, stacktrace: &str) -> String {
-    let normalized = normalize_for_grouping(error_type, message, stacktrace);
+pub fn group_hash(error_type: &str, stacktrace: &str) -> String {
+    let normalized = normalize_for_grouping(error_type, stacktrace);
     sha256_hex(&[normalized.as_bytes()])
 }
 
-fn normalize_for_grouping(error_type: &str, message: &str, stacktrace: &str) -> String {
+fn normalize_for_grouping(error_type: &str, stacktrace: &str) -> String {
     let mut out = String::new();
     out.push_str(&normalize_piece(error_type));
-    out.push('\n');
-    out.push_str(&normalize_piece(message));
 
     for line in stacktrace.lines().take(80) {
         let normalized = normalize_piece(line);
@@ -96,12 +94,10 @@ mod tests {
     fn group_hash_ignores_jar_versions_and_line_numbers() {
         let a = group_hash(
             "java.lang.RuntimeException",
-            "Failed for player 123",
             "\tat plugin-1.2.3.jar//com.example.Plugin.handle(Plugin.java:42)",
         );
         let b = group_hash(
             "java.lang.RuntimeException",
-            "Failed for player 456",
             "\tat plugin-9.9.9.jar//com.example.Plugin.handle(Plugin.java:99)",
         );
 
@@ -121,8 +117,8 @@ mod tests {
         ]
         .join("\n");
 
-        let a = group_hash("RuntimeException", "Failed", app_frame);
-        let b = group_hash("RuntimeException", "Failed", &with_internals);
+        let a = group_hash("RuntimeException", app_frame);
+        let b = group_hash("RuntimeException", &with_internals);
 
         assert_eq!(a, b);
     }
@@ -132,8 +128,8 @@ mod tests {
         let app_frame = "\tat com.example.Plugin.handle(Plugin.java:42)";
         let with_elision = [app_frame, "\t... 23 more"].join("\n");
 
-        let a = group_hash("RuntimeException", "Failed", app_frame);
-        let b = group_hash("RuntimeException", "Failed", &with_elision);
+        let a = group_hash("RuntimeException", app_frame);
+        let b = group_hash("RuntimeException", &with_elision);
 
         assert_eq!(a, b);
     }

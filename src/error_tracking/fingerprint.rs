@@ -30,16 +30,14 @@ pub fn exact_hash(error_type: &str, message: &str, stacktrace: &str) -> String {
     ])
 }
 
-pub fn group_hash(error_type: &str, message: &str, stacktrace: &str) -> String {
-    let normalized = normalize_for_grouping(error_type, message, stacktrace);
+pub fn group_hash(error_type: &str, stacktrace: &str) -> String {
+    let normalized = normalize_for_grouping(error_type, stacktrace);
     sha256_hex(&[normalized.as_bytes()])
 }
 
-fn normalize_for_grouping(error_type: &str, message: &str, stacktrace: &str) -> String {
+fn normalize_for_grouping(error_type: &str, stacktrace: &str) -> String {
     let mut out = String::new();
     out.push_str(&normalize_piece(error_type));
-    out.push('\n');
-    out.push_str(&normalize_piece(message));
 
     for line in stacktrace.lines().take(50) {
         let normalized = normalize_piece(line);
@@ -149,17 +147,9 @@ mod tests {
     }
 
     #[test]
-    fn group_hash_ignores_line_column_and_quoted_message_values() {
-        let a = group_hash(
-            "TypeError",
-            "Cannot read property 'name' of user 123",
-            " at render (/app/static/chunk.js:10:20)",
-        );
-        let b = group_hash(
-            "TypeError",
-            "Cannot read property 'email' of user 456",
-            " at render (/app/static/chunk.js:99:1)",
-        );
+    fn group_hash_ignores_line_columns() {
+        let a = group_hash("TypeError", " at render (/app/static/chunk.js:10:20)");
+        let b = group_hash("TypeError", " at render (/app/static/chunk.js:99:1)");
 
         assert_eq!(a, b);
     }

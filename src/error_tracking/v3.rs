@@ -1,0 +1,354 @@
+use crate::error_tracking::sourcemaps::SourcemapResolver;
+use crate::error_tracking::{fingerprint, java_fingerprint};
+use crate::models::ErrorTracking;
+use crate::tinybird::{ErrorOccurrenceV3Row, ModsEventRow, WebEventRow};
+use chrono::Utc;
+use serde_json::{Map, Value};
+use std::collections::HashMap;
+use uuid::Uuid;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize, Default)]
+pub enum ErrorLanguage {
+    #[default]
+    Java,
+    Javascript,
+}
+
+impl ErrorLanguage {
+    pub fn parse_optional(value: Option<&str>) -> Result<Self, &'static str> {
+        match value.map(str::trim).filter(|value| !value.is_empty()) {
+            None | Some("java") => Ok(Self::Java),
+            Some("javascript") => Ok(Self::Javascript),
+            Some(_) => Err("Unsupported language. Expected java or javascript"),
+        }
+    }
+
+    fn group_hash(self) -> fn(&str, &str) -> String {
+        match self {
+            Self::Java => java_fingerprint::group_hash,
+            Self::Javascript => fingerprint::group_hash,
+        }
+    }
+}
+
+pub struct WebOccurrenceInput<'a> {
+    pub project_id: Uuid,
+    pub release: Option<&'a str>,
+    pub user_id: Option<&'a str>,
+    pub session_id: Option<&'a str>,
+    pub window_id: Option<&'a str>,
+    pub sdk_name: Option<&'a str>,
+    pub sdk_version: Option<&'a str>,
+    pub context: &'a Value,
+}
+
+pub struct ModsOccurrenceInput<'a> {
+    pub project_id: Uuid,
+    pub release: Option<&'a str>,
+    pub server_id: &'a str,
+    pub session_id: Option<&'a str>,
+    pub sdk_version: Option<&'a str>,
+    pub context: &'a Value,
+}
+
+pub struct ErrorOnlyOccurrenceInput<'a> {
+    pub project_id: Uuid,
+    pub release: Option<&'a str>,
+    pub identifier: Option<&'a str>,
+    pub session_id: Option<&'a str>,
+    pub sdk_name: Option<&'a str>,
+    pub sdk_version: Option<&'a str>,
+    pub language: ErrorLanguage,
+    pub context: &'a Value,
+}
+
+pub fn build_web_occurrence(
+    input: &WebOccurrenceInput<'_>,
+    error: &ErrorTracking,
+) -> ErrorOccurrenceV3Row {
+    build_occurrence(
+        OccurrenceInput {
+            project_id: input.project_id,
+            release: input.release,
+            user_id: input.user_id,
+            session_id: input.session_id,
+            window_id: input.window_id,
+            sdk_name: input.sdk_name,
+            sdk_version: input.sdk_version,
+            context: input.context,
+            language: ErrorLanguage::Javascript,
+        },
+        error,
+    )
+}
+
+pub fn build_mods_occurrence(
+    input: &ModsOccurrenceInput<'_>,
+    error: &ErrorTracking,
+) -> ErrorOccurrenceV3Row {
+    build_occurrence(
+        OccurrenceInput {
+            project_id: input.project_id,
+            release: input.release,
+            user_id: Some(input.server_id),
+            session_id: input.session_id,
+            window_id: None,
+            sdk_name: Some("minecraft-plugin"),
+            sdk_version: input.sdk_version,
+            context: input.context,
+            language: ErrorLanguage::Java,
+        },
+        error,
+    )
+}
+
+pub fn build_error_only_occurrence(
+    input: &ErrorOnlyOccurrenceInput<'_>,
+    error: &ErrorTracking,
+) -> ErrorOccurrenceV3Row {
+    build_occurrence(
+        OccurrenceInput {
+            project_id: input.project_id,
+            release: input.release,
+            user_id: input.identifier,
+            session_id: input.session_id,
+            window_id: None,
+            sdk_name: input.sdk_name,
+            sdk_version: input.sdk_version,
+            context: input.context,
+            language: input.language,
+        },
+        error,
+    )
+}
+
+struct OccurrenceInput<'a> {
+    project_id: Uuid,
+    release: Option<&'a str>,
+    user_id: Option<&'a str>,
+    session_id: Option<&'a str>,
+    window_id: Option<&'a str>,
+    sdk_name: Option<&'a str>,
+    sdk_version: Option<&'a str>,
+    context: &'a Value,
+    language: ErrorLanguage,
+}
+
+fn build_occurrence(input: OccurrenceInput<'_>, error: &ErrorTracking) -> ErrorOccurrenceV3Row {
+    let stacktrace = error
+        .error
+        .stack
+        .as_ref()
+        .map(|stack| stack.join("\n"))
+        .unwrap_or_default();
+    let error_type = error.error.error.clone();
+    let error_message = error.error.message.clone().unwrap_or_default();
+    let source_stack = stacktrace.as_str();
+
+    ErrorOccurrenceV3Row {
+        timestamp: Utc::now(),
+        project_id: input.project_id,
+        // TODO(error-tracking-v3): hardcoded to "prod" while v3 is being tested.
+        // Replace this with the SDK/request-provided environment once grouping and
+        // release behavior are verified in production data.
+        environment: "prod".to_string(),
+        release: input.release.unwrap_or_default().to_string(),
+        group_hash: (input.language.group_hash())(&error_type, source_stack),
+        exact_hash: fingerprint::exact_hash(&error_type, &error_message, source_stack),
+        error_type,
+        error_message,
+        handled: error.handled.unwrap_or(false),
+        stacktrace,
+        mapped_stacktrace: None,
+        mapping_used: None,
+        identifier: input.user_id.unwrap_or_default().to_string(),
+        session_id: input.session_id.unwrap_or_default().to_string(),
+        window_id: input.window_id.unwrap_or_default().to_string(),
+        sdk_name: input.sdk_name.unwrap_or_default().to_string(),
+        sdk_version: input.sdk_version.unwrap_or_default().to_string(),
+        count: error
+            .count
+            .and_then(|count| count.try_into().ok())
+            .unwrap_or(1),
+        context: occurrence_context(input.context, error.context.as_ref()),
+    }
+}
+
+pub async fn enrich_with_sourcemap(
+    resolver: Option<&SourcemapResolver>,
+    mut row: ErrorOccurrenceV3Row,
+    language: ErrorLanguage,
+) -> ErrorOccurrenceV3Row {
+    let Some(resolver) = resolver else {
+        return row;
+    };
+    let build_id = row.release.as_str();
+    if build_id.is_empty() || row.stacktrace.is_empty() {
+        return row;
+    }
+
+    let mapped = match language {
+        ErrorLanguage::Java => {
+            resolver
+                .apply_r8(row.project_id, build_id, &row.stacktrace)
+                .await
+        }
+        ErrorLanguage::Javascript => {
+            resolver
+                .apply_javascript(row.project_id, build_id, &row.stacktrace)
+                .await
+        }
+    };
+
+    if let Some(mapped) = mapped {
+        row.group_hash = (language.group_hash())(&row.error_type, &mapped.stacktrace);
+        row.exact_hash =
+            fingerprint::exact_hash(&row.error_type, &row.error_message, &mapped.stacktrace);
+        row.mapped_stacktrace = Some(mapped.stacktrace);
+        row.mapping_used = Some(mapped.mapping_used);
+    }
+
+    row
+}
+
+pub fn web_context(row: &WebEventRow, custom: &HashMap<String, Value>) -> Value {
+    let mut context = match serde_json::to_value(row) {
+        Ok(Value::Object(context)) => context,
+        _ => serde_json::Map::new(),
+    };
+
+    for (key, value) in custom {
+        context.insert(key.clone(), value.clone());
+    }
+
+    Value::Object(context)
+}
+
+pub fn mods_context(row: &ModsEventRow, custom: &HashMap<String, Value>) -> Value {
+    let mut context = match serde_json::to_value(row) {
+        Ok(Value::Object(context)) => context,
+        _ => serde_json::Map::new(),
+    };
+
+    for (key, value) in custom {
+        context.insert(key.clone(), value.clone());
+    }
+
+    Value::Object(context)
+}
+
+pub fn empty_context() -> Value {
+    Value::Object(Map::new())
+}
+
+pub fn request_context(provided: Option<Value>, fallback: impl FnOnce() -> Value) -> Value {
+    provided.unwrap_or_else(fallback)
+}
+
+pub fn occurrence_context(base_context: &Value, error_context: Option<&Value>) -> String {
+    let Some(error_context) = error_context else {
+        return serialize_context(base_context);
+    };
+
+    let merged = merge_context_values(base_context.clone(), error_context.clone());
+    serialize_context(&merged)
+}
+
+fn serialize_context(context: &Value) -> String {
+    serde_json::to_string(context).unwrap_or_else(|_| "{}".to_string())
+}
+
+fn merge_context_values(base_context: Value, error_context: Value) -> Value {
+    match (base_context, error_context) {
+        (Value::Object(mut base), Value::Object(error)) => {
+            for (key, value) in error {
+                base.insert(key, value);
+            }
+            Value::Object(base)
+        }
+        (Value::Object(mut base), error) => {
+            base.insert("error".to_string(), error);
+            Value::Object(base)
+        }
+        (base, Value::Object(mut error)) => {
+            if !matches!(base, Value::Object(ref object) if object.is_empty()) {
+                error.insert("request".to_string(), base);
+            }
+            Value::Object(error)
+        }
+        (base, error) => {
+            let mut context = Map::new();
+            context.insert("request".to_string(), base);
+            context.insert("error".to_string(), error);
+            Value::Object(context)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ModsOccurrenceInput, build_mods_occurrence, empty_context, occurrence_context};
+    use crate::error_tracking::java_fingerprint;
+    use crate::models::{Error, ErrorTracking};
+    use serde_json::json;
+    use uuid::Uuid;
+
+    #[test]
+    fn mods_occurrences_use_java_group_hash() {
+        let error = ErrorTracking {
+            error: Error {
+                error: "java.lang.RuntimeException".to_string(),
+                message: Some("Failed for player 123".to_string()),
+                stack: Some(vec![
+                    "\tat plugin-1.2.3.jar//com.example.Plugin.handle(Plugin.java:42)".to_string(),
+                ]),
+                cause: None,
+            },
+            count: Some(3),
+            session_id: None,
+            build_id: None,
+            context: None,
+            handled: None,
+            sdk_version: None,
+        };
+
+        let row = build_mods_occurrence(
+            &ModsOccurrenceInput {
+                project_id: Uuid::new_v4(),
+                release: None,
+                server_id: "server-id",
+                session_id: None,
+                sdk_version: None,
+                context: &empty_context(),
+            },
+            &error,
+        );
+
+        assert_eq!(
+            row.group_hash,
+            java_fingerprint::group_hash(
+                "java.lang.RuntimeException",
+                "\tat plugin-1.2.3.jar//com.example.Plugin.handle(Plugin.java:42)"
+            )
+        );
+        assert_eq!(row.count, 3);
+    }
+
+    #[test]
+    fn occurrence_context_merges_error_context_over_base_context() {
+        let context = occurrence_context(
+            &json!({"page":"/checkout","plan":"pro"}),
+            Some(&json!({"plan":"enterprise","component":"pay-button"})),
+        );
+
+        let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
+        assert_eq!(
+            parsed,
+            json!({
+                "page": "/checkout",
+                "plan": "enterprise",
+                "component": "pay-button"
+            })
+        );
+    }
+}

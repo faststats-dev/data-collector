@@ -68,47 +68,29 @@ pub struct ModsEventRow {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ErrorRow {
-    pub hash: String,
-    pub name: String,
-    pub message: String,
-    pub stack: Vec<String>,
-    pub cause_hash: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ErrorTrackingRow {
-    pub id: Uuid,
-    pub project_id: Uuid,
-    pub hash: String,
-    pub error_hash: String,
-    pub count: u32,
-    pub data_entry_id: Option<Uuid>,
-    pub session_id: Option<String>,
-    pub identity_key: Option<String>,
-    pub build_id: Option<String>,
-    pub plugin_version: String,
-    pub source_kind: String,
-    pub entry_session_id: String,
-    pub entry_country: String,
-    pub entry_browser: String,
-    pub entry_device: String,
-    pub entry_os: String,
-    pub player_count: Option<f64>,
-    pub online_mode: Option<bool>,
-    pub minecraft_version: String,
-    pub server_type: String,
-    pub java_version: String,
-    pub java_vendor: String,
-    pub os_version: String,
-    pub os_arch: String,
-    pub core_count: Option<u16>,
-    pub entry_data: String,
-    pub stack_placeholders: String,
-    pub context: Option<String>,
-    pub handled: Option<bool>,
+pub struct ErrorOccurrenceV3Row {
     #[serde(with = "chrono::serde::ts_milliseconds")]
-    pub created_at: DateTime<Utc>,
+    pub timestamp: DateTime<Utc>,
+    pub project_id: Uuid,
+    pub environment: String,
+    pub release: String,
+    pub group_hash: String,
+    pub exact_hash: String,
+    pub error_type: String,
+    pub error_message: String,
+    pub handled: bool,
+    pub stacktrace: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mapped_stacktrace: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mapping_used: Option<String>,
+    pub identifier: String,
+    pub session_id: String,
+    pub window_id: String,
+    pub sdk_name: String,
+    pub sdk_version: String,
+    pub count: u32,
+    pub context: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -260,15 +242,11 @@ impl TinybirdClient {
         self.send_batch("mods_events", events).await
     }
 
-    pub async fn insert_errors(&self, errors: &[ErrorRow]) -> Result<(), TinybirdError> {
-        self.send_batch("errors", errors).await
-    }
-
-    pub async fn insert_error_trackings(
+    pub async fn insert_error_occurrences_v3(
         &self,
-        rows: &[&ErrorTrackingRow],
+        rows: &[&ErrorOccurrenceV3Row],
     ) -> Result<(), TinybirdError> {
-        self.send_batch("error_occurences_v2", rows).await
+        self.send_batch("error_tracking_v3", rows).await
     }
 
     pub async fn insert_web_vitals(&self, rows: &[&WebVitalRow]) -> Result<(), TinybirdError> {

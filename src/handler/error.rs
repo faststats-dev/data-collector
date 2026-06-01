@@ -1,11 +1,14 @@
 use super::{
-    ErrorEntryDetails, ErrorEntryParams, ErrorStackProcessing, check_ip_allowed, error_response,
-    get_authorization, get_client_ip, insert_error_entries, load_project_context,
-    resolve_identity_key, success_response,
+    check_ip_allowed, error_response, get_authorization, get_client_ip, insert_error_occurrence_v3,
+    load_project_context, success_response,
 };
 use crate::batch_queue::TrackingContext;
+use crate::error_tracking::v3::{
+    ErrorLanguage, ErrorOnlyOccurrenceInput, build_error_only_occurrence, empty_context,
+    request_context,
+};
 use crate::models::{AppState, ErrorTracking};
-use axum::Json;
+use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
@@ -19,21 +22,37 @@ use tracing::warn;
 pub(crate) struct ErrorRequest {
     errors: Vec<ErrorTracking>,
     #[serde(default)]
+    identifier: Option<String>,
+    #[serde(default)]
     session_id: Option<String>,
     #[serde(default)]
     build_id: Option<String>,
     #[serde(default)]
     context: Option<Value>,
+    // TODO: handle project_name once project-level routing is supported.
+    #[serde(default)]
+    project_name: Option<String>,
+    #[serde(default, alias = "sdk_name")]
+    sdk_name: Option<String>,
+    #[serde(default, alias = "sdk_version")]
+    sdk_version: Option<String>,
+    #[serde(default)]
+    language: Option<String>,
 }
 
 pub async fn error(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(payload): Json<ErrorRequest>,
+    body: Bytes,
 ) -> impl IntoResponse {
     let token = match get_authorization(&headers) {
         Some(t) => t,
         None => return error_response(StatusCode::UNAUTHORIZED, "Unauthorized"),
+    };
+
+    let payload: ErrorRequest = match serde_json::from_slice(&body) {
+        Ok(payload) => payload,
+        Err(_) => return error_response(StatusCode::BAD_REQUEST, "Invalid JSON"),
     };
 
     let ctx = match load_project_context(&state.pool, &token).await {
@@ -50,15 +69,19 @@ pub async fn error(
         return error_response(StatusCode::FORBIDDEN, "Error tracking is not enabled");
     }
 
+    let language = match ErrorLanguage::parse_optional(payload.language.as_deref()) {
+        Ok(language) => language,
+        Err(message) => return error_response(StatusCode::BAD_REQUEST, message),
+    };
+
     let tracking_ctx = TrackingContext {
         owner_id: ctx.billing_customer_id.as_str().into(),
         token: token.into(),
         organization_id: ctx.organization_id.as_deref().map(Into::into),
     };
 
-    let context = payload
-        .context
-        .map(|v| serde_json::to_string(&v).unwrap_or_else(|_| "{}".to_string()));
+    let context = request_context(payload.context, empty_context);
+    let _project_name = payload.project_name;
 
     for mut error in payload.errors {
         if error.session_id.is_none() {
@@ -68,19 +91,24 @@ pub async fn error(
             error.build_id = payload.build_id.clone();
         }
         let replay_session_id = error.session_id.clone();
-        let identity_key = resolve_identity_key(error.session_id.as_deref(), None);
-        if let Err(e) = insert_error_entries(
-            &state.batch_queue,
-            ctx.project_id,
-            None,
-            error,
-            ErrorEntryParams {
-                identity_key,
-                context: context.clone(),
-                details: ErrorEntryDetails::error_only(),
-                tracking_ctx: Some(tracking_ctx.clone()),
-                stack_processing: ErrorStackProcessing::Raw,
+        let occurrence = build_error_only_occurrence(
+            &ErrorOnlyOccurrenceInput {
+                project_id: ctx.project_id,
+                release: error.build_id.as_deref(),
+                identifier: payload.identifier.as_deref(),
+                session_id: error.session_id.as_deref(),
+                sdk_name: payload.sdk_name.as_deref(),
+                sdk_version: payload.sdk_version.as_deref(),
+                language,
+                context: &context,
             },
+            &error,
+        );
+        if let Err(e) = insert_error_occurrence_v3(
+            &state.batch_queue,
+            occurrence,
+            language,
+            Some(tracking_ctx.clone()),
         )
         .await
         {

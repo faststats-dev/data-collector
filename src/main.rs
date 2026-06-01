@@ -21,6 +21,7 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::decompression::RequestDecompressionLayer;
 use tracing::{info, warn};
 mod batch_queue;
+mod error_tracking;
 mod handler;
 mod identity;
 mod models;
@@ -110,6 +111,7 @@ async fn main() {
         polar_client,
         &backup_path,
         backup_store_enabled,
+        error_tracking::sourcemaps::SourcemapResolver::from_env(pool.clone()).map(Arc::new),
     );
     let replay_storage = match replay_storage::ReplayStorage::from_env() {
         Ok(Some(storage)) => {

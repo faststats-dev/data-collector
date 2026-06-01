@@ -1,10 +1,12 @@
 use super::{
-    ErrorEntryParams, ErrorStackProcessing, MODS_EVENT_FIELDS, build_mods_error_entry_details,
-    build_mods_event_row, check_ip_allowed, error_response, extract_known_fields,
-    get_authorization, get_client_ip, get_country, insert_error_entries, insert_mods_event,
-    load_project_context, resolve_identity_key, success_response,
+    MODS_EVENT_FIELDS, build_mods_event_row, check_ip_allowed, error_response,
+    extract_known_fields, get_authorization, get_client_ip, get_country,
+    insert_error_occurrence_v3, insert_mods_event, load_project_context, success_response,
 };
 use crate::batch_queue::{FailedRequest, RequestType, TrackingContext};
+use crate::error_tracking::v3::{
+    ModsOccurrenceInput, build_mods_occurrence, mods_context, request_context,
+};
 use crate::models::{AppState, Request};
 use crate::validation::validate_and_filter_payload;
 use axum::body::Bytes;
@@ -72,7 +74,8 @@ pub async fn collect(
         id,
         mut data,
         errors,
-        session_id,
+        context,
+        project_name: _,
     } = req;
 
     let server_id = match id.value().parse::<Uuid>() {
@@ -103,48 +106,45 @@ pub async fn collect(
         &mut known,
         &valid_custom,
     );
+    let error_v3_context = ctx
+        .error_tracking_enabled
+        .then(|| request_context(context, || mods_context(&event_row, &valid_custom)));
 
-    let data_entry_id = match insert_mods_event(
+    if let Err(e) = insert_mods_event(
         &state.batch_queue,
         event_row.clone(),
         Some(tracking_ctx.clone()),
     )
     .await
     {
-        Ok(id) => id,
-        Err(e) => return e,
-    };
+        return e;
+    }
 
     if !ctx.error_tracking_enabled {
         return success_response(warnings);
     }
 
-    if let Some(errors) = errors
+    if let (Some(errors), Some(error_v3_context)) = (errors, error_v3_context.as_ref())
         && !errors.is_empty()
     {
-        let error_entry_details =
-            build_mods_error_entry_details(country.as_deref(), &event_row, &valid_custom);
         let fallback_identity = server_id.to_string();
-        for mut error in errors {
-            if error.session_id.is_none() {
-                error.session_id = session_id.clone();
-            }
-            let identity_key = resolve_identity_key(
-                error.session_id.as_deref(),
-                Some(fallback_identity.as_str()),
-            );
-            if let Err(e) = insert_error_entries(
-                &state.batch_queue,
-                ctx.project_id,
-                Some(data_entry_id),
-                error,
-                ErrorEntryParams {
-                    identity_key,
-                    context: None,
-                    details: error_entry_details.clone(),
-                    tracking_ctx: Some(tracking_ctx.clone()),
-                    stack_processing: ErrorStackProcessing::JavaCollect,
+        for error in errors {
+            let occurrence = build_mods_occurrence(
+                &ModsOccurrenceInput {
+                    project_id: ctx.project_id,
+                    release: error.build_id.as_deref(),
+                    server_id: fallback_identity.as_str(),
+                    session_id: error.session_id.as_deref(),
+                    sdk_version: error.sdk_version.as_deref(),
+                    context: error_v3_context,
                 },
+                &error,
+            );
+            if let Err(e) = insert_error_occurrence_v3(
+                &state.batch_queue,
+                occurrence,
+                crate::error_tracking::v3::ErrorLanguage::Java,
+                Some(tracking_ctx.clone()),
             )
             .await
             {

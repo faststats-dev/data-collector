@@ -216,6 +216,7 @@ pub fn web_context(row: &WebEventRow, custom: &HashMap<String, Value>) -> Value 
         Ok(Value::Object(context)) => context,
         _ => serde_json::Map::new(),
     };
+    context.remove("custom");
 
     for (key, value) in custom {
         context.insert(key.clone(), value.clone());
@@ -229,6 +230,7 @@ pub fn mods_context(row: &ModsEventRow, custom: &HashMap<String, Value>) -> Valu
         Ok(Value::Object(context)) => context,
         _ => serde_json::Map::new(),
     };
+    context.remove("custom");
 
     for (key, value) in custom {
         context.insert(key.clone(), value.clone());

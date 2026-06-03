@@ -5,7 +5,7 @@ use crate::error_tracking::sourcemaps::SourcemapResolver;
 use crate::error_tracking::v3::ErrorLanguage;
 use crate::polar::{PolarClient, UsageCounts};
 use crate::tinybird::{
-    ErrorOccurrenceV3Row, ModsEventRow, ReplayRow, TinybirdClient, WebEventRow, WebVitalRow,
+    ErrorOccurrenceV3Row, ModsEventRow, TinybirdClient, WebEventRow, WebVitalRow,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -90,11 +90,6 @@ pub enum QueuedEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         tracking: Option<TrackingContext>,
     },
-    Replay {
-        row: ReplayRow,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        tracking: Option<TrackingContext>,
-    },
 }
 
 impl QueuedEvent {
@@ -104,7 +99,6 @@ impl QueuedEvent {
             QueuedEvent::ModsEvent { .. } => "mods_events",
             QueuedEvent::ErrorOccurrenceV3 { .. } => "error_tracking_v3",
             QueuedEvent::WebVital { .. } => "web_vitals",
-            QueuedEvent::Replay { .. } => "session_replays",
         }
     }
 }
@@ -117,7 +111,6 @@ struct InMemoryBatch {
     mods_events: Vec<(ModsEventRow, Option<TrackingContext>)>,
     error_occurrences_v3: Vec<(ErrorOccurrenceV3Row, ErrorLanguage, Option<TrackingContext>)>,
     web_vitals: Vec<(WebVitalRow, Option<TrackingContext>)>,
-    replays: Vec<(ReplayRow, Option<TrackingContext>)>,
 }
 
 impl Default for InMemoryBatch {
@@ -127,7 +120,6 @@ impl Default for InMemoryBatch {
             mods_events: Vec::with_capacity(INITIAL_BATCH_CAPACITY),
             error_occurrences_v3: Vec::new(),
             web_vitals: Vec::with_capacity(INITIAL_BATCH_CAPACITY / 4),
-            replays: Vec::new(),
         }
     }
 }
@@ -138,7 +130,6 @@ impl InMemoryBatch {
             && self.mods_events.is_empty()
             && self.error_occurrences_v3.is_empty()
             && self.web_vitals.is_empty()
-            && self.replays.is_empty()
     }
 
     fn total_count(&self) -> usize {
@@ -146,7 +137,6 @@ impl InMemoryBatch {
             + self.mods_events.len()
             + self.error_occurrences_v3.len()
             + self.web_vitals.len()
-            + self.replays.len()
     }
 
     fn push(&mut self, event: QueuedEvent) {
@@ -159,7 +149,6 @@ impl InMemoryBatch {
                 tracking,
             } => self.error_occurrences_v3.push((*row, language, tracking)),
             QueuedEvent::WebVital { row, tracking } => self.web_vitals.push((row, tracking)),
-            QueuedEvent::Replay { row, tracking } => self.replays.push((row, tracking)),
         }
     }
 
@@ -192,11 +181,6 @@ impl InMemoryBatch {
                 .into_iter()
                 .map(|(row, tracking)| QueuedEvent::WebVital { row, tracking }),
         );
-        result.extend(
-            self.replays
-                .into_iter()
-                .map(|(row, tracking)| QueuedEvent::Replay { row, tracking }),
-        );
         result
     }
 
@@ -204,8 +188,7 @@ impl InMemoryBatch {
         let estimated_owners = (self.web_events.len()
             + self.mods_events.len()
             + self.error_occurrences_v3.len()
-            + self.web_vitals.len()
-            + self.replays.len())
+            + self.web_vitals.len())
         .min(100);
 
         let mut usage: AggregatedUsage = HashMap::with_capacity(estimated_owners);
@@ -244,23 +227,6 @@ impl InMemoryBatch {
             }
         }
         count_usage!(&self.web_vitals, web_vitals);
-        for (row, ctx) in &self.replays {
-            if let Some(ctx) = ctx {
-                let entry = usage
-                    .entry(Arc::clone(&ctx.owner_id))
-                    .or_insert_with(|| OwnerUsage {
-                        counts: UsageCounts::default(),
-                        token: Arc::clone(&ctx.token),
-                        org: ctx.organization_id.as_ref().map(Arc::clone),
-                    });
-                entry.counts.session_replays += 1;
-                entry
-                    .counts
-                    .session_replay_ids
-                    .insert(row.session_id.clone());
-            }
-        }
-
         usage
     }
 }
@@ -272,7 +238,6 @@ struct BatchSendResult {
     failed_error_occurrences_v3:
         Vec<(ErrorOccurrenceV3Row, ErrorLanguage, Option<TrackingContext>)>,
     failed_web_vitals: Vec<(WebVitalRow, Option<TrackingContext>)>,
-    failed_replays: Vec<(ReplayRow, Option<TrackingContext>)>,
     had_permanent_failure: bool,
     errors: Vec<String>,
 }
@@ -283,7 +248,6 @@ impl BatchSendResult {
             || !self.failed_mods_events.is_empty()
             || !self.failed_error_occurrences_v3.is_empty()
             || !self.failed_web_vitals.is_empty()
-            || !self.failed_replays.is_empty()
     }
 
     fn into_in_memory_batch(self) -> InMemoryBatch {
@@ -292,7 +256,6 @@ impl BatchSendResult {
             mods_events: self.failed_mods_events,
             error_occurrences_v3: self.failed_error_occurrences_v3,
             web_vitals: self.failed_web_vitals,
-            replays: self.failed_replays,
         }
     }
 
@@ -301,7 +264,6 @@ impl BatchSendResult {
             + self.failed_mods_events.len()
             + self.failed_error_occurrences_v3.len()
             + self.failed_web_vitals.len()
-            + self.failed_replays.len()
     }
 
     fn error_summary(&self) -> String {
@@ -391,8 +353,8 @@ impl BatchQueue {
     pub async fn queue_event(
         &self,
         event: QueuedEvent,
-    ) -> Result<(), mpsc::error::SendError<QueuedEvent>> {
-        self.sender.send(event).await
+    ) -> Result<(), mpsc::error::TrySendError<QueuedEvent>> {
+        self.sender.try_send(event)
     }
 
     pub fn track_replay_usage(&self, session_id: &str, tracking: TrackingContext) {
@@ -576,7 +538,6 @@ impl BatchQueue {
             mods_events,
             error_occurrences_v3,
             web_vitals,
-            replays,
         } = batch;
 
         let web_event_rows: Vec<_> = web_events.iter().map(|(e, _)| e).collect();
@@ -585,15 +546,8 @@ impl BatchQueue {
         let error_occurrence_v3_rows: Vec<_> =
             error_occurrences_v3.iter().map(|(e, _, _)| e).collect();
         let web_vital_rows: Vec<_> = web_vitals.iter().map(|(e, _)| e).collect();
-        let replay_rows: Vec<_> = replays.iter().map(|(e, _)| e).collect();
 
-        let (
-            web_events_res,
-            mods_events_res,
-            error_occurrences_v3_res,
-            web_vitals_res,
-            replays_res,
-        ) = tokio::join!(
+        let (web_events_res, mods_events_res, error_occurrences_v3_res, web_vitals_res) = tokio::join!(
             async {
                 if web_event_rows.is_empty() {
                     Ok(())
@@ -622,13 +576,6 @@ impl BatchQueue {
                     Ok(())
                 } else {
                     self.tinybird.insert_web_vitals(&web_vital_rows).await
-                }
-            },
-            async {
-                if replay_rows.is_empty() {
-                    Ok(())
-                } else {
-                    self.tinybird.insert_replays(&replay_rows).await
                 }
             },
         );
@@ -668,14 +615,6 @@ impl BatchQueue {
                 result.had_permanent_failure = true;
             }
             result.failed_web_vitals = web_vitals;
-        }
-
-        if let Err(e) = replays_res {
-            record_batch_error(&mut result, "session_replays", replays.len(), &e);
-            if !e.is_transient() {
-                result.had_permanent_failure = true;
-            }
-            result.failed_replays = replays;
         }
 
         result
@@ -1130,7 +1069,6 @@ mod tests {
             assert_eq!(batch.error_occurrences_v3.len(), 1);
             assert_eq!(batch.web_vitals.len(), 1);
             assert!(batch.web_events.is_empty());
-            assert!(batch.replays.is_empty());
         }
 
         #[test]
@@ -1205,22 +1143,6 @@ mod tests {
                 }
                 .datasource(),
                 "web_vitals"
-            );
-            assert_eq!(
-                QueuedEvent::Replay {
-                    row: ReplayRow {
-                        id: Uuid::new_v4(),
-                        project_id: Uuid::new_v4(),
-                        session_id: "session".to_string(),
-                        identifier: Some(Uuid::new_v4().to_string()),
-                        events: "[]".to_string(),
-                        has_full_snapshot: 0,
-                        created_at: Utc::now(),
-                    },
-                    tracking: None,
-                }
-                .datasource(),
-                "session_replays"
             );
         }
 

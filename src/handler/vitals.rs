@@ -1,6 +1,6 @@
 use super::{
     EncodingQuery, check_ip_allowed, decompress_body, error_response, get_authorization,
-    get_client_ip, load_project_context,
+    get_client_ip, load_project_context, queue_error_response,
 };
 use crate::batch_queue::{FailedRequest, QueuedEvent, RequestType, TrackingContext};
 use crate::models::AppState;
@@ -177,11 +177,7 @@ pub async fn vitals(
             })
             .await
         {
-            error!("Failed to queue web vital: {}", e);
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to queue web vital",
-            );
+            return queue_error_response(e, "web vital");
         }
 
         if let Some(session_id) = req.session_id.as_deref()

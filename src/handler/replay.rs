@@ -72,8 +72,6 @@ pub(crate) struct ReplayRequest {
     #[serde(default)]
     pub(crate) batch_id: Option<String>,
     pub(crate) sequence: u32,
-    #[allow(dead_code)]
-    pub(crate) timestamp: u64,
     pub(crate) url: String,
     #[serde(default, alias = "anonymousId")]
     pub(crate) identifier: Option<SqlxUuid>,
@@ -111,7 +109,6 @@ pub async fn replay(
         is_final,
         batch_id,
         sequence,
-        timestamp: _,
         url,
         identifier,
         mut events,

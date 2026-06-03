@@ -833,6 +833,10 @@ user_agent_parsers:
   # Vivaldi
   - regex: '(Vivaldi)/(\d+)(?:\.(\d+)|)(?:\.(\d+)|)'
 
+  # Microsoft Teams embedded browser (needs to be before Edge and Chrome)
+  - regex: '.{0,200}(Teams)/(\d+)\.(\d+)\.(\d+)'
+    family_replacement: "Microsoft Teams"
+
   # Edge/major_version.minor_version
   # Edge with chromium Edg/major_version.minor_version.patch.minor_patch
   - regex: '(Edge?)/(\d+)(?:\.(\d+)|)(?:\.(\d+)|)(?:\.(\d+)|)'
@@ -948,6 +952,9 @@ user_agent_parsers:
   # Steam desktop client browser
   - regex: '(Valve(?: Steam|) Client).{1,200}Chrome/(\d+)\.(\d+)\.(\d+)'
     family_replacement: "Steam Client"
+
+  # Ladybird
+  - regex: '(Ladybird)/(\d+)\.(\d+)(?:\.(\d+)|)'
 
   # Chrome/Chromium/major_version.minor_version
   - regex: '(Chromium|Chrome)/(\d+)\.(\d+)(?:\.(\d+)|)(?:\.(\d+)|)'

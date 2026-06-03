@@ -5,11 +5,13 @@ use serde::Serialize;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
+use std::time::Duration;
 use tracing::warn;
 use uuid::Uuid;
 
 const REPLAY_CONTENT_ENCODING: &str = "zstd";
 const ZSTD_COMPRESSION_LEVEL: i32 = 3;
+const REPLAY_COMPRESSION_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone)]
 pub struct ReplayStorage {
@@ -47,6 +49,8 @@ pub struct ReplayFilterEventInput<'a> {
 pub enum ReplayStorageError {
     Serialization(serde_json::Error),
     Compression(std::io::Error),
+    CompressionTimeout,
+    CompressionTask(String),
     Upload(String),
     Database(sqlx::Error),
 }
@@ -59,6 +63,12 @@ impl std::fmt::Display for ReplayStorageError {
             }
             ReplayStorageError::Compression(error) => {
                 write!(f, "Failed to compress replay chunk: {}", error)
+            }
+            ReplayStorageError::CompressionTimeout => {
+                write!(f, "Timed out while compressing replay chunk")
+            }
+            ReplayStorageError::CompressionTask(error) => {
+                write!(f, "Replay compression task failed: {}", error)
             }
             ReplayStorageError::Upload(error) => {
                 write!(f, "Failed to upload replay chunk: {}", error)
@@ -162,7 +172,7 @@ impl ReplayStorage {
         }
 
         let snapshot_id = Uuid::new_v4();
-        let (compressed, uncompressed_bytes) = zstd_json_value_array(&input.events)?;
+        let (compressed, uncompressed_bytes) = compress_replay_events(input.events.clone()).await?;
         let compressed_bytes = i64::try_from(compressed.len()).unwrap_or(i64::MAX);
         let first_event_timestamp_ms = replay_first_event_timestamp_ms(&input.events);
         let last_event_timestamp_ms = replay_last_event_timestamp_ms(&input.events);
@@ -610,6 +620,14 @@ fn zstd_json_value_array(events: &[Value]) -> Result<(Vec<u8>, i64), ReplayStora
     let uncompressed_bytes = i64::try_from(writer.bytes_written()).unwrap_or(i64::MAX);
 
     Ok((writer.into_inner(), uncompressed_bytes))
+}
+
+async fn compress_replay_events(events: Vec<Value>) -> Result<(Vec<u8>, i64), ReplayStorageError> {
+    let task = tokio::task::spawn_blocking(move || zstd_json_value_array(&events));
+    tokio::time::timeout(REPLAY_COMPRESSION_TIMEOUT, task)
+        .await
+        .map_err(|_| ReplayStorageError::CompressionTimeout)?
+        .map_err(|error| ReplayStorageError::CompressionTask(error.to_string()))?
 }
 
 fn replay_timestamp_ms(event: &Value) -> Option<i64> {

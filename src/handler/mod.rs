@@ -37,6 +37,7 @@ static PROJECT_CACHE: LazyLock<Cache<String, Arc<ProjectContext>>> = LazyLock::n
 });
 
 pub type HandlerResponse = (StatusCode, Json<Value>);
+pub const MAX_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Deserialize, Default)]
 pub struct EncodingQuery {
@@ -47,31 +48,44 @@ pub fn decompress_body<'a>(
     body: &'a [u8],
     encoding: Option<&str>,
 ) -> Result<Cow<'a, [u8]>, String> {
+    if body.len() > MAX_REQUEST_BODY_BYTES {
+        return Err("Request body too large".to_string());
+    }
+
     match encoding {
         Some("gzip") => {
             let mut decoder = flate2::read::GzDecoder::new(body);
-            let mut decompressed = Vec::with_capacity(body.len());
-            decoder
-                .read_to_end(&mut decompressed)
-                .map_err(|e| format!("Failed to decompress gzip: {}", e))?;
+            let decompressed = read_limited(&mut decoder, "gzip")?;
             Ok(Cow::Owned(decompressed))
         }
         Some("zstd") => {
-            let decompressed = zstd::stream::decode_all(body)
+            let mut decoder = zstd::stream::read::Decoder::new(body)
                 .map_err(|e| format!("Failed to decompress zstd: {}", e))?;
+            let decompressed = read_limited(&mut decoder, "zstd")?;
             Ok(Cow::Owned(decompressed))
         }
         Some("deflate") => {
             let mut decoder = flate2::read::DeflateDecoder::new(body);
-            let mut decompressed = Vec::with_capacity(body.len());
-            decoder
-                .read_to_end(&mut decompressed)
-                .map_err(|e| format!("Failed to decompress deflate: {}", e))?;
+            let decompressed = read_limited(&mut decoder, "deflate")?;
             Ok(Cow::Owned(decompressed))
         }
         Some(enc) => Err(format!("Unsupported encoding: {}", enc)),
         None => Ok(Cow::Borrowed(body)),
     }
+}
+
+fn read_limited(reader: &mut impl Read, encoding: &str) -> Result<Vec<u8>, String> {
+    let mut limited = reader.take((MAX_REQUEST_BODY_BYTES + 1) as u64);
+    let mut decompressed = Vec::with_capacity(MAX_REQUEST_BODY_BYTES.min(1024 * 1024));
+    limited
+        .read_to_end(&mut decompressed)
+        .map_err(|e| format!("Failed to decompress {}: {}", encoding, e))?;
+
+    if decompressed.len() > MAX_REQUEST_BODY_BYTES {
+        return Err("Request body too large after decompression".to_string());
+    }
+
+    Ok(decompressed)
 }
 
 pub fn get_authorization(headers: &HeaderMap) -> Option<String> {
@@ -90,6 +104,22 @@ pub fn get_authorization(headers: &HeaderMap) -> Option<String> {
 
 pub fn error_response(status: StatusCode, message: &str) -> HandlerResponse {
     (status, Json(serde_json::json!({ "error": message })))
+}
+
+pub fn queue_error_response(
+    error: tokio::sync::mpsc::error::TrySendError<QueuedEvent>,
+    item: &str,
+) -> HandlerResponse {
+    match error {
+        tokio::sync::mpsc::error::TrySendError::Full(_) => {
+            warn!("Ingestion queue full while queueing {}", item);
+            error_response(StatusCode::SERVICE_UNAVAILABLE, "Ingestion queue is full")
+        }
+        tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+            error!("Ingestion queue closed while queueing {}", item);
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Failed to queue event")
+        }
+    }
 }
 
 pub fn success_response(warnings: HashMap<String, String>) -> HandlerResponse {
@@ -469,10 +499,7 @@ pub async fn insert_web_event(
             tracking,
         })
         .await
-        .map_err(|e| {
-            error!("Failed to queue event: {}", e);
-            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Failed to queue event")
-        })?;
+        .map_err(|e| queue_error_response(e, "web event"))?;
     Ok(event_id)
 }
 
@@ -513,10 +540,7 @@ pub async fn insert_mods_event(
     batch_queue
         .queue_event(QueuedEvent::ModsEvent { row, tracking })
         .await
-        .map_err(|e| {
-            error!("Failed to queue event: {}", e);
-            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Failed to queue event")
-        })?;
+        .map_err(|e| queue_error_response(e, "mods event"))?;
     Ok(event_id)
 }
 
@@ -533,13 +557,7 @@ pub async fn insert_error_occurrence_v3(
             tracking,
         })
         .await
-        .map_err(|e| {
-            error!("Failed to queue error occurrence v3: {}", e);
-            error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to queue error occurrence",
-            )
-        })?;
+        .map_err(|e| queue_error_response(e, "error occurrence"))?;
     Ok(())
 }
 
@@ -916,7 +934,6 @@ async fn process_replay_request(
         is_final,
         batch_id,
         sequence,
-        timestamp: _,
         url,
         identifier,
         mut events,

@@ -29,9 +29,6 @@ pub(crate) struct ErrorRequest {
     build_id: Option<String>,
     #[serde(default)]
     context: Option<Value>,
-    // TODO: handle project_name once project-level routing is supported.
-    #[serde(default)]
-    project_name: Option<String>,
     #[serde(default, alias = "sdk_name")]
     sdk_name: Option<String>,
     #[serde(default, alias = "sdk_version")]
@@ -81,7 +78,6 @@ pub async fn error(
     };
 
     let context = request_context(payload.context, empty_context);
-    let _project_name = payload.project_name;
 
     for mut error in payload.errors {
         if error.session_id.is_none() {

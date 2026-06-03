@@ -1,6 +1,6 @@
 use axum::{
     Router,
-    extract::{MatchedPath, Request},
+    extract::{DefaultBodyLimit, MatchedPath, Request},
     http::HeaderName,
     http::Method,
     http::StatusCode,
@@ -53,6 +53,13 @@ async fn shutdown_signal() {
     }
 }
 
+fn env_u32(name: &str, default: u32) -> u32 {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default)
+}
+
 #[tokio::main]
 async fn main() {
     #[cfg(debug_assertions)]
@@ -77,9 +84,12 @@ async fn main() {
 
     let database_url = std::env::var("DATABASE_URL")
         .expect("DATABASE_URL must be set in .env file or environment variables");
+    let database_max_connections = env_u32("DATABASE_MAX_CONNECTIONS", 10);
+    let database_acquire_timeout_secs = env_u32("DATABASE_ACQUIRE_TIMEOUT_SECS", 5);
 
     let pool = PgPoolOptions::new()
-        .max_connections(3)
+        .max_connections(database_max_connections)
+        .acquire_timeout(Duration::from_secs(database_acquire_timeout_secs.into()))
         .connect(&database_url)
         .await
         .expect("Failed to connect to database");
@@ -170,6 +180,7 @@ async fn main() {
         .route("/v1/error", post(handler::error))
         .route("/v1/replay", post(handler::replay))
         .layer(axum::middleware::from_fn(track_metrics))
+        .layer(DefaultBodyLimit::max(handler::MAX_REQUEST_BODY_BYTES))
         .layer(RequestDecompressionLayer::new())
         .layer(cors)
         .with_state(state);

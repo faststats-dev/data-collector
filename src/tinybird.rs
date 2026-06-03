@@ -112,18 +112,6 @@ pub struct WebVitalRow {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReplayRow {
-    pub id: Uuid,
-    pub project_id: Uuid,
-    pub session_id: String,
-    pub identifier: Option<String>,
-    pub events: String,
-    pub has_full_snapshot: u8,
-    #[serde(with = "chrono::serde::ts_milliseconds")]
-    pub created_at: DateTime<Utc>,
-}
-
 #[derive(Debug)]
 pub enum TinybirdError {
     Request(reqwest::Error),
@@ -251,9 +239,5 @@ impl TinybirdClient {
 
     pub async fn insert_web_vitals(&self, rows: &[&WebVitalRow]) -> Result<(), TinybirdError> {
         self.send_batch("web_vitals", rows).await
-    }
-
-    pub async fn insert_replays(&self, rows: &[&ReplayRow]) -> Result<(), TinybirdError> {
-        self.send_batch("session_replays", rows).await
     }
 }

@@ -45,30 +45,31 @@ pub fn validate_and_filter_payload(
 
         if shape == "array" {
             if let Some(arr) = value.as_array_mut() {
-                let mut has_invalid = false;
-                let mut first_invalid_idx = None;
+                let mut first_invalid: Option<(usize, &'static str)> = None;
                 let mut idx = 0;
 
-                arr.retain(|elem| {
-                    let is_valid = validate_scalar(elem, ds, re.as_deref()).is_ok();
-                    if !is_valid {
-                        if !has_invalid {
-                            first_invalid_idx = Some(idx);
-                            has_invalid = true;
-                        }
-                        debug!("key='{}' element[{}] VALID=false", ref_id, idx);
+                arr.retain(|elem| match validate_scalar(elem, ds, re.as_deref()) {
+                    Ok(_) => {
+                        idx += 1;
+                        true
                     }
-                    idx += 1;
-                    is_valid
+                    Err(reason) => {
+                        if first_invalid.is_none() {
+                            first_invalid = Some((idx, reason));
+                        }
+                        debug!(
+                            "key='{}' element[{}] VALID=false reason='{}'",
+                            ref_id, idx, reason
+                        );
+                        idx += 1;
+                        false
+                    }
                 });
 
-                if has_invalid {
+                if let Some((bad_idx, reason)) = first_invalid {
                     warnings.insert(
                         ref_id.clone(),
-                        format!(
-                            "element[{}] failed validation",
-                            first_invalid_idx.unwrap_or(0)
-                        ),
+                        format!("element[{}] failed validation: {}", bad_idx, reason),
                     );
                 }
 
@@ -85,27 +86,25 @@ pub fn validate_and_filter_payload(
             }
         } else if shape == "map" {
             if let Some(obj) = value.as_object_mut() {
-                let mut has_invalid = false;
-                let mut first_invalid_key: Option<String> = None;
-                obj.retain(|key, elem| {
-                    let is_valid = validate_scalar(elem, ds, re.as_deref()).is_ok();
-                    if !is_valid {
-                        if !has_invalid {
-                            first_invalid_key = Some(key.clone());
-                            has_invalid = true;
+                let mut first_invalid: Option<(String, &'static str)> = None;
+                obj.retain(|key, elem| match validate_scalar(elem, ds, re.as_deref()) {
+                    Ok(_) => true,
+                    Err(reason) => {
+                        if first_invalid.is_none() {
+                            first_invalid = Some((key.clone(), reason));
                         }
-                        debug!("key='{}' map['{}'] VALID=false", ref_id, key);
+                        debug!(
+                            "key='{}' map['{}'] VALID=false reason='{}'",
+                            ref_id, key, reason
+                        );
+                        false
                     }
-                    is_valid
                 });
 
-                if has_invalid {
+                if let Some((bad_key, reason)) = first_invalid {
                     warnings.insert(
                         ref_id.clone(),
-                        format!(
-                            "map key '{}' failed validation",
-                            first_invalid_key.unwrap_or_default()
-                        ),
+                        format!("map key '{}' failed validation: {}", bad_key, reason),
                     );
                 }
 
@@ -138,9 +137,9 @@ pub fn validate_and_filter_payload(
                     debug!("key='{}' VALID=true", ref_id);
                     true
                 }
-                Err(_) => {
-                    warnings.insert(ref_id.clone(), "failed validation".into());
-                    debug!("key='{}' VALID=false", ref_id);
+                Err(reason) => {
+                    warnings.insert(ref_id.clone(), format!("failed validation: {}", reason));
+                    debug!("key='{}' VALID=false reason='{}'", ref_id, reason);
                     false
                 }
             }

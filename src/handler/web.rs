@@ -187,9 +187,8 @@ pub async fn web(
 
     let url = known.get("url").and_then(|v| v.as_str()).unwrap_or("");
     let event = known.get("event").and_then(|v| v.as_str());
-    const HAS_ERRORS: fn(&Option<Vec<ErrorTracking>>) -> bool =
-        |errors| errors.as_ref().is_some_and(|items| !items.is_empty());
-    let is_debounced = !HAS_ERRORS(&errors) && should_debounce(resolved_user_id, url, event);
+    let has_errors = errors.as_ref().is_some_and(|items| !items.is_empty());
+    let is_debounced = !has_errors && should_debounce(resolved_user_id, url, event);
 
     let tracking_ctx = TrackingContext {
         owner_id: ctx.billing_customer_id.as_str().into(),
@@ -204,7 +203,7 @@ pub async fn web(
         country.clone(),
         &valid_custom,
     );
-    let should_process_errors = ctx.error_tracking_enabled && HAS_ERRORS(&errors);
+    let should_process_errors = ctx.error_tracking_enabled && has_errors;
     let error_v3_context = should_process_errors
         .then(|| request_context(context, || web_context(&event_row, &valid_custom)));
 
@@ -239,12 +238,15 @@ pub async fn web(
     if let (true, Some(error_list), Some(error_v3_context)) =
         (should_process_errors, errors, error_v3_context.as_ref())
     {
-        // The browser SDK sends this as `buildId`; the Tinybird v3 schema stores it as `release`.
-        let release = build_id.as_deref();
         for mut error in error_list {
             if error.session_id.is_none() {
-                error.session_id = session_id.clone();
+                error.session_id.clone_from(&session_id);
             }
+            if error.build_id.is_none() {
+                error.build_id.clone_from(&build_id);
+            }
+            // The browser SDK sends this as `buildId`; the Tinybird v3 schema stores it as `release`.
+            let release = error.build_id.as_deref();
             let occurrence = build_web_occurrence(
                 &WebOccurrenceInput {
                     project_id: ctx.project_id,

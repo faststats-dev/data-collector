@@ -172,21 +172,21 @@ impl ReplayStorage {
         }
 
         let snapshot_id = Uuid::new_v4();
-        let (compressed, uncompressed_bytes) = compress_replay_events(input.events.clone()).await?;
-        let compressed_bytes = i64::try_from(compressed.len()).unwrap_or(i64::MAX);
         let first_event_timestamp_ms = replay_first_event_timestamp_ms(&input.events);
         let last_event_timestamp_ms = replay_last_event_timestamp_ms(&input.events);
         let has_full_snapshot = replay_has_full_snapshot(&input.events);
         let event_count = i32::try_from(input.events.len()).unwrap_or(i32::MAX);
+        let route_metadata = replay_route_metadata(&input.events, input.url.as_deref());
         let object_key = self.object_key(
             input.project_id,
             &input.session_id,
             first_event_timestamp_ms.unwrap_or(0),
             snapshot_id,
         );
+        let (compressed, uncompressed_bytes) = compress_replay_events(input.events).await?;
+        let compressed_bytes = i64::try_from(compressed.len()).unwrap_or(i64::MAX);
 
         self.put_object(&object_key, compressed).await?;
-        let route_metadata = replay_route_metadata(&input.events, input.url.as_deref());
 
         let result = async {
             let mut tx = pool.begin().await?;

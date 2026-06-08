@@ -11,7 +11,8 @@ use uuid::Uuid;
 
 const NONCE_LEN: usize = 12;
 const TAG_LEN: usize = 16;
-const MAP_CACHE_CAPACITY: u64 = 512;
+const JS_MAP_CACHE_CAPACITY: u64 = 64;
+const PROGUARD_MAP_CACHE_CAPACITY: u64 = 16;
 const MAP_CACHE_TTL: Duration = Duration::from_secs(600);
 const BUILD_CACHE_CAPACITY: u64 = 2048;
 
@@ -93,11 +94,11 @@ impl SourcemapResolver {
             bucket: bucket.into(),
             crypto,
             maps: Cache::builder()
-                .max_capacity(MAP_CACHE_CAPACITY)
+                .max_capacity(JS_MAP_CACHE_CAPACITY)
                 .time_to_idle(MAP_CACHE_TTL)
                 .build(),
             proguard_maps: Cache::builder()
-                .max_capacity(MAP_CACHE_CAPACITY)
+                .max_capacity(PROGUARD_MAP_CACHE_CAPACITY)
                 .time_to_idle(MAP_CACHE_TTL)
                 .build(),
             known_builds: Cache::builder()

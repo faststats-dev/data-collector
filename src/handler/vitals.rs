@@ -35,6 +35,8 @@ pub(crate) struct WebVitalMetric {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct WebVitalRequest {
+    #[serde(default)]
+    pub(crate) token: Option<String>,
     pub(crate) vitals: Vec<WebVitalMetric>,
     #[serde(default)]
     pub(crate) metadata: Option<WebVitalsMetadata>,
@@ -53,7 +55,17 @@ pub async fn vitals(
         Err(e) => return error_response(StatusCode::BAD_REQUEST, &e),
     };
 
-    let token = match get_authorization(&headers) {
+    let WebVitalRequest {
+        token: body_token,
+        vitals,
+        metadata,
+        session_id,
+    } = match serde_json::from_slice(&body) {
+        Ok(req) => req,
+        Err(_) => return error_response(StatusCode::BAD_REQUEST, "Invalid JSON"),
+    };
+
+    let token = match body_token.or_else(|| get_authorization(&headers)) {
         Some(t) => t,
         None => return error_response(StatusCode::UNAUTHORIZED, "Unauthorized"),
     };
@@ -93,12 +105,7 @@ pub async fn vitals(
         return error_response(StatusCode::FORBIDDEN, msg);
     }
 
-    let req: WebVitalRequest = match serde_json::from_slice(&body) {
-        Ok(req) => req,
-        Err(_) => return error_response(StatusCode::BAD_REQUEST, "Invalid JSON"),
-    };
-
-    if req.vitals.is_empty() {
+    if vitals.is_empty() {
         return error_response(StatusCode::BAD_REQUEST, "No vitals provided");
     }
 
@@ -122,7 +129,7 @@ pub async fn vitals(
         None => return (StatusCode::OK, Json(json!({ "status": "success" }))),
     };
 
-    let metadata = req.metadata.as_ref();
+    let metadata = metadata.as_ref();
     let device = metadata
         .and_then(|m| m.device.as_deref())
         .unwrap_or(ua_info.device);
@@ -137,7 +144,7 @@ pub async fn vitals(
     let url = metadata.and_then(|m| m.url.as_deref()).unwrap_or("");
     let now = chrono::Utc::now();
 
-    for vital in &req.vitals {
+    for vital in &vitals {
         let attributes = vital
             .attributes
             .as_ref()
@@ -165,7 +172,7 @@ pub async fn vitals(
             },
             url: url.to_owned(),
             attributes,
-            session_id: req.session_id.clone(),
+            session_id: session_id.clone(),
             created_at: now,
         };
 
@@ -180,7 +187,7 @@ pub async fn vitals(
             return queue_error_response(e, "web vital");
         }
 
-        if let Some(session_id) = req.session_id.as_deref()
+        if let Some(session_id) = session_id.as_deref()
             && let Some(replay_storage) = state.replay_storage.as_deref()
             && is_poor_web_vital(&vital.metric, vital.value)
             && let Err(error) = replay_storage
@@ -203,5 +210,26 @@ pub(crate) fn is_poor_web_vital(metric: &str, value: f64) -> bool {
         "TTFB" => value >= 1800.0,
         "FID" => value >= 300.0,
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WebVitalRequest;
+
+    #[test]
+    fn web_vital_request_accepts_body_token() {
+        let req: WebVitalRequest = serde_json::from_str(
+            r#"{
+                "token": "site_test",
+                "sessionId": "session-1",
+                "vitals": [{ "metric": "CLS", "value": 0.1 }]
+            }"#,
+        )
+        .expect("valid vitals payload");
+
+        assert_eq!(req.token.as_deref(), Some("site_test"));
+        assert_eq!(req.session_id.as_deref(), Some("session-1"));
+        assert_eq!(req.vitals.len(), 1);
     }
 }

@@ -397,7 +397,7 @@ fn to_custom_json(data: &HashMap<String, Value>) -> String {
 }
 
 /// Known internal fields for web_events row. These are extracted before
-/// datasource validation so they always reach the Tinybird row.
+/// event properties are serialized so they always reach the Tinybird row.
 const WEB_EVENT_FIELDS: &[&str] = &[
     "event",
     "browser",
@@ -414,7 +414,6 @@ const WEB_EVENT_FIELDS: &[&str] = &[
     "title",
     "page",
     "url",
-    "outbound_link",
 ];
 
 /// Known internal fields for mods_events row.
@@ -452,7 +451,7 @@ pub fn build_web_event_row(
     known: &mut HashMap<String, Value>,
     session_id: Option<String>,
     country: Option<String>,
-    custom: &HashMap<String, Value>,
+    properties: &HashMap<String, Value>,
 ) -> WebEventRow {
     WebEventRow {
         id: Uuid::new_v4(),
@@ -480,9 +479,8 @@ pub fn build_web_event_row(
         title: extract_optional_string(known, "title"),
         page: extract_optional_string(known, "page"),
         url: extract_optional_string(known, "url"),
-        outbound_link: extract_optional_string(known, "outbound_link"),
         country,
-        custom: to_custom_json(custom),
+        properties: to_custom_json(properties),
         created_at: chrono::Utc::now(),
     }
 }
@@ -698,14 +696,15 @@ async fn process_web_request(
     };
 
     let mut data = parsed.data;
+    let mut properties = parsed.properties;
     let mut known = extract_known_fields(&mut data, WEB_EVENT_FIELDS);
+    properties.extend(data);
     known.insert(
         "user_id".into(),
         Value::String(resolved_user_id.to_string()),
     );
     crate::handler::web::stamp_person_identity(pool, ctx.project_id, resolved_user_id, &mut known)
         .await;
-    let (valid_custom, _) = crate::validation::validate_and_filter_payload(data, &ctx.datasources);
 
     use crate::utils::debounce::should_debounce;
 
@@ -756,12 +755,12 @@ async fn process_web_request(
         &mut known,
         parsed.session_id.clone(),
         request.country.clone(),
-        &valid_custom,
+        &properties,
     );
     let should_process_errors = ctx.error_tracking_enabled && has_errors;
     let error_v3_context = should_process_errors.then(|| {
         crate::error_tracking::v3::request_context(parsed.context, || {
-            crate::error_tracking::v3::web_context(&event_row, &valid_custom)
+            crate::error_tracking::v3::web_context(&event_row, &properties)
         })
     });
 
@@ -778,7 +777,7 @@ async fn process_web_request(
                     os: event_row.os.as_deref(),
                     country: request.country.as_deref(),
                     url: event_row.url.as_deref(),
-                    custom: &valid_custom,
+                    custom: &properties,
                 },
             )
             .await

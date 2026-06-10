@@ -38,9 +38,8 @@ pub struct WebEventRow {
     pub title: Option<String>,
     pub page: Option<String>,
     pub url: Option<String>,
-    pub outbound_link: Option<String>,
     pub country: Option<String>,
-    pub custom: String,
+    pub properties: String,
     #[serde(with = "chrono::serde::ts_milliseconds")]
     pub created_at: DateTime<Utc>,
 }

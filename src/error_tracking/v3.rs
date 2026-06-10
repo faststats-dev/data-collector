@@ -211,14 +211,14 @@ pub async fn enrich_with_sourcemap(
     row
 }
 
-pub fn web_context(row: &WebEventRow, custom: &HashMap<String, Value>) -> Value {
+pub fn web_context(row: &WebEventRow, properties: &HashMap<String, Value>) -> Value {
     let mut context = match serde_json::to_value(row) {
         Ok(Value::Object(context)) => context,
         _ => serde_json::Map::new(),
     };
-    context.remove("custom");
+    context.remove("properties");
 
-    for (key, value) in custom {
+    for (key, value) in properties {
         context.insert(key.clone(), value.clone());
     }
 

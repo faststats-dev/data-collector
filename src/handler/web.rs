@@ -11,7 +11,6 @@ use crate::error_tracking::v3::{
 use crate::identity::resolve_person_for_distinct_id;
 use crate::models::{AppState, ErrorTracking};
 use crate::utils::debounce::should_debounce;
-use crate::validation::validate_and_filter_payload;
 use axum::body::Bytes;
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -27,6 +26,9 @@ pub(crate) struct WebRequest {
     pub(crate) token: Option<String>,
     #[serde(default, alias = "identifier", alias = "anonymousId")]
     pub(crate) user_id: Option<Uuid>,
+    #[serde(default)]
+    pub(crate) properties: HashMap<String, Value>,
+    #[serde(default, flatten)]
     pub(crate) data: HashMap<String, Value>,
     pub(crate) errors: Option<Vec<ErrorTracking>>,
     #[serde(default)]
@@ -59,6 +61,7 @@ pub async fn web(
     let WebRequest {
         token: body_token,
         user_id,
+        mut properties,
         mut data,
         errors,
         session_id: parsed_session_id,
@@ -137,11 +140,10 @@ pub async fn web(
             .map(String::from)
     });
 
-    // Extract known row fields before datasource validation
+    // Extract known row fields before serializing event properties.
     let mut known = extract_known_fields(&mut data, WEB_EVENT_FIELDS);
-
-    // Remaining fields go through datasource validation → custom JSON
-    let (valid_custom, warnings) = validate_and_filter_payload(data, &ctx.datasources);
+    properties.extend(data);
+    let warnings = HashMap::new();
 
     let user_agent = headers
         .get("User-Agent")
@@ -201,11 +203,11 @@ pub async fn web(
         &mut known,
         session_id.clone(),
         country.clone(),
-        &valid_custom,
+        &properties,
     );
     let should_process_errors = ctx.error_tracking_enabled && has_errors;
     let error_v3_context = should_process_errors
-        .then(|| request_context(context, || web_context(&event_row, &valid_custom)));
+        .then(|| request_context(context, || web_context(&event_row, &properties)));
 
     if let Some(session_id) = session_id.as_deref()
         && let Some(replay_storage) = state.replay_storage.as_deref()
@@ -220,7 +222,7 @@ pub async fn web(
                     os: event_row.os.as_deref(),
                     country: country.as_deref(),
                     url: event_row.url.as_deref(),
-                    custom: &valid_custom,
+                    custom: &properties,
                 },
             )
             .await

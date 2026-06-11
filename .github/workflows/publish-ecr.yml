@@ -14,8 +14,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  AWS_REGION: ${{ vars.AWS_REGION }}
-  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
 
 jobs:
   publish:
@@ -30,8 +30,8 @@ jobs:
 
       - name: Validate configuration
         run: |
-          test -n "$AWS_REGION" || (echo "::error::Set repository variable AWS_REGION" && exit 1)
-          test -n "$ECR_REPOSITORY" || (echo "::error::Set repository variable ECR_REPOSITORY" && exit 1)
+          test -n "$AWS_REGION" || (echo "::error::Set repository secret AWS_REGION" && exit 1)
+          test -n "$ECR_REPOSITORY" || (echo "::error::Set repository secret ECR_REPOSITORY" && exit 1)
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v6.2.0

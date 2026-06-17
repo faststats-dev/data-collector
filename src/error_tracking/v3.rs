@@ -1,5 +1,5 @@
-use crate::error_tracking::sourcemaps::SourcemapResolver;
-use crate::error_tracking::{fingerprint, java_fingerprint};
+use crate::error_tracking::mapping::MappingResolver;
+use crate::error_tracking::{exact_hash, group_hash};
 use crate::models::ErrorTracking;
 use crate::tinybird::{ErrorOccurrenceV3Row, ModsEventRow, WebEventRow};
 use chrono::Utc;
@@ -7,27 +7,12 @@ use serde_json::{Map, Value};
 use std::collections::HashMap;
 use uuid::Uuid;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize, Default)]
-pub enum ErrorLanguage {
-    #[default]
-    Java,
-    Javascript,
-}
+pub use crate::error_tracking::language::ErrorLanguage;
 
 impl ErrorLanguage {
-    pub fn parse_optional(value: Option<&str>) -> Result<Self, &'static str> {
-        match value.map(str::trim).filter(|value| !value.is_empty()) {
-            None | Some("java") => Ok(Self::Java),
-            Some("javascript") => Ok(Self::Javascript),
-            Some(_) => Err("Unsupported language. Expected java or javascript"),
-        }
-    }
-
-    fn group_hash(self) -> fn(&str, &str) -> String {
-        match self {
-            Self::Java => java_fingerprint::group_hash,
-            Self::Javascript => fingerprint::group_hash,
-        }
+    fn group_hash(self, error_type: &str, stacktrace: &str) -> String {
+        group_hash::group_hash(self.as_str(), error_type, stacktrace)
+            .expect("ErrorLanguage must map to a group hash provider")
     }
 }
 
@@ -153,8 +138,8 @@ fn build_occurrence(input: OccurrenceInput<'_>, error: &ErrorTracking) -> ErrorO
         // release behavior are verified in production data.
         environment: "prod".to_string(),
         release: input.release.unwrap_or_default().to_string(),
-        group_hash: (input.language.group_hash())(&error_type, source_stack),
-        exact_hash: fingerprint::exact_hash(&error_type, &error_message, source_stack),
+        group_hash: input.language.group_hash(&error_type, source_stack),
+        exact_hash: exact_hash::exact_hash(&error_type, &error_message, source_stack),
         error_type,
         error_message,
         handled: error.handled.unwrap_or(false),
@@ -174,8 +159,8 @@ fn build_occurrence(input: OccurrenceInput<'_>, error: &ErrorTracking) -> ErrorO
     }
 }
 
-pub async fn enrich_with_sourcemap(
-    resolver: Option<&SourcemapResolver>,
+pub async fn enrich_with_mapping(
+    resolver: Option<&MappingResolver>,
     mut row: ErrorOccurrenceV3Row,
     language: ErrorLanguage,
 ) -> ErrorOccurrenceV3Row {
@@ -187,23 +172,14 @@ pub async fn enrich_with_sourcemap(
         return row;
     }
 
-    let mapped = match language {
-        ErrorLanguage::Java => {
-            resolver
-                .apply_r8(row.project_id, build_id, &row.stacktrace)
-                .await
-        }
-        ErrorLanguage::Javascript => {
-            resolver
-                .apply_javascript(row.project_id, build_id, &row.stacktrace)
-                .await
-        }
-    };
+    let mapped = resolver
+        .apply(language.as_str(), row.project_id, build_id, &row.stacktrace)
+        .await;
 
     if let Some(mapped) = mapped {
-        row.group_hash = (language.group_hash())(&row.error_type, &mapped.stacktrace);
+        row.group_hash = language.group_hash(&row.error_type, &mapped.stacktrace);
         row.exact_hash =
-            fingerprint::exact_hash(&row.error_type, &row.error_message, &mapped.stacktrace);
+            exact_hash::exact_hash(&row.error_type, &row.error_message, &mapped.stacktrace);
         row.mapped_stacktrace = Some(mapped.stacktrace);
         row.mapping_used = Some(mapped.mapping_used);
     }
@@ -289,8 +265,11 @@ fn merge_context_values(base_context: Value, error_context: Value) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{ModsOccurrenceInput, build_mods_occurrence, empty_context, occurrence_context};
-    use crate::error_tracking::java_fingerprint;
+    use super::{
+        ErrorLanguage, ErrorOnlyOccurrenceInput, ModsOccurrenceInput, build_error_only_occurrence,
+        build_mods_occurrence, empty_context, occurrence_context,
+    };
+    use crate::error_tracking::group_hash;
     use crate::models::{Error, ErrorTracking};
     use serde_json::json;
     use uuid::Uuid;
@@ -327,12 +306,102 @@ mod tests {
 
         assert_eq!(
             row.group_hash,
-            java_fingerprint::group_hash(
+            group_hash::java::group_hash(
                 "java.lang.RuntimeException",
                 "\tat plugin-1.2.3.jar//com.example.Plugin.handle(Plugin.java:42)"
             )
         );
         assert_eq!(row.count, 3);
+    }
+
+    #[test]
+    fn parses_php_language() {
+        assert_eq!(
+            ErrorLanguage::parse_optional(Some(" PHP ")).unwrap(),
+            ErrorLanguage::Php
+        );
+    }
+
+    #[test]
+    fn error_only_occurrences_can_use_php_group_hash() {
+        let error = ErrorTracking {
+            error: Error {
+                error: "RuntimeException".to_string(),
+                message: Some("Failed for user 123".to_string()),
+                stack: Some(vec![
+                    "#0 /var/www/app/src/UserService.php(42): App\\Service\\UserService->find('abc', 123)".to_string(),
+                ]),
+                cause: None,
+            },
+            count: None,
+            session_id: None,
+            build_id: None,
+            context: None,
+            handled: None,
+            sdk_version: None,
+        };
+
+        let row = build_error_only_occurrence(
+            &ErrorOnlyOccurrenceInput {
+                project_id: Uuid::new_v4(),
+                release: None,
+                identifier: None,
+                session_id: None,
+                sdk_name: None,
+                sdk_version: None,
+                language: ErrorLanguage::Php,
+                context: &empty_context(),
+            },
+            &error,
+        );
+
+        assert_eq!(
+            row.group_hash,
+            group_hash::php::group_hash(
+                "RuntimeException",
+                "#0 /var/www/app/src/UserService.php(42): App\\Service\\UserService->find('abc', 123)"
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn php_mapping_without_provider_leaves_row_unchanged() {
+        let error = ErrorTracking {
+            error: Error {
+                error: "RuntimeException".to_string(),
+                message: Some("Failed for user 123".to_string()),
+                stack: Some(vec![
+                    "#0 /var/www/app/src/UserService.php(42): App\\Service\\UserService->find('abc', 123)".to_string(),
+                ]),
+                cause: None,
+            },
+            count: None,
+            session_id: None,
+            build_id: Some("build-1".to_string()),
+            context: None,
+            handled: None,
+            sdk_version: None,
+        };
+        let row = build_error_only_occurrence(
+            &ErrorOnlyOccurrenceInput {
+                project_id: Uuid::new_v4(),
+                release: Some("build-1"),
+                identifier: None,
+                session_id: None,
+                sdk_name: None,
+                sdk_version: None,
+                language: ErrorLanguage::Php,
+                context: &empty_context(),
+            },
+            &error,
+        );
+
+        let enriched = super::enrich_with_mapping(None, row.clone(), ErrorLanguage::Php).await;
+
+        assert_eq!(enriched.group_hash, row.group_hash);
+        assert_eq!(enriched.exact_hash, row.exact_hash);
+        assert_eq!(enriched.mapped_stacktrace, None);
+        assert_eq!(enriched.mapping_used, None);
     }
 
     #[test]

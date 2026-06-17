@@ -1,4 +1,4 @@
-use crate::utils::sha256_hex;
+use super::{GroupHashProvider, hash_normalized};
 use regex::Regex;
 use std::sync::LazyLock;
 
@@ -20,19 +20,17 @@ static HASHISH_RE: LazyLock<Regex> =
 static WHITESPACE_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\s+").expect("valid whitespace regex"));
 
-pub fn exact_hash(error_type: &str, message: &str, stacktrace: &str) -> String {
-    sha256_hex(&[
-        error_type.as_bytes(),
-        b"\x1f",
-        message.as_bytes(),
-        b"\x1f",
-        stacktrace.as_bytes(),
-    ])
+pub struct JavascriptGroupHashProvider;
+
+impl GroupHashProvider for JavascriptGroupHashProvider {
+    fn group_hash(&self, error_type: &str, stacktrace: &str) -> String {
+        group_hash(error_type, stacktrace)
+    }
 }
 
 pub fn group_hash(error_type: &str, stacktrace: &str) -> String {
     let normalized = normalize_for_grouping(error_type, stacktrace);
-    sha256_hex(&[normalized.as_bytes()])
+    hash_normalized(&normalized)
 }
 
 fn normalize_for_grouping(error_type: &str, stacktrace: &str) -> String {

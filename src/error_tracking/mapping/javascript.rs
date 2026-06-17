@@ -1,0 +1,273 @@
+use super::{MappedStacktrace, MappingProvider, MappingRequest, MappingResolver};
+use sourcemap::SourceMap;
+use std::future::Future;
+use std::pin::Pin;
+use uuid::Uuid;
+
+#[derive(Debug, Clone, Copy)]
+struct JavaScriptFrame<'a> {
+    prefix: &'a str,
+    file_name: &'a str,
+    line: u32,
+    column: u32,
+    suffix: &'static str,
+}
+
+struct OriginalPosition {
+    source: String,
+    line: u32,
+    column: u32,
+    name: Option<String>,
+}
+
+pub struct JavascriptMappingProvider;
+
+impl MappingProvider for JavascriptMappingProvider {
+    fn mapping_kind(&self) -> &'static str {
+        "javascript"
+    }
+
+    fn apply<'a>(
+        &'a self,
+        resolver: &'a MappingResolver,
+        request: MappingRequest<'a>,
+    ) -> Pin<Box<dyn Future<Output = Option<MappedStacktrace>> + Send + 'a>> {
+        Box::pin(async move {
+            if !resolver
+                .build_exists(request.project_id, request.build_id)
+                .await
+            {
+                return None;
+            }
+
+            let mut mapped_any = false;
+            let mut mapped_stacktrace = String::with_capacity(request.stacktrace.len());
+
+            for (idx, line) in request.stacktrace.lines().enumerate() {
+                if idx > 0 {
+                    mapped_stacktrace.push('\n');
+                }
+
+                let Some(frame) = parse_javascript_frame(line) else {
+                    mapped_stacktrace.push_str(line);
+                    continue;
+                };
+
+                match apply_frame(resolver, request.project_id, request.build_id, &frame).await {
+                    Some(mapped) => {
+                        mapped_any = true;
+                        mapped_stacktrace.push_str(&mapped);
+                    }
+                    None => mapped_stacktrace.push_str(line),
+                }
+            }
+
+            mapped_any.then(|| MappedStacktrace {
+                stacktrace: mapped_stacktrace,
+                mapping_used: format!("{}:{}", self.mapping_kind(), request.build_id),
+            })
+        })
+    }
+}
+
+async fn apply_frame(
+    resolver: &MappingResolver,
+    project_id: Uuid,
+    build_id: &str,
+    frame: &JavaScriptFrame<'_>,
+) -> Option<String> {
+    let map = resolver
+        .load_javascript_map(project_id, build_id, frame.file_name)
+        .await?;
+    let original = apply_source_map(&map, frame.line, frame.column)?;
+
+    let mut out = String::with_capacity(
+        frame.prefix.len()
+            + frame.suffix.len()
+            + original.source.len()
+            + original.name.as_ref().map(String::len).unwrap_or(0)
+            + 32,
+    );
+    out.push_str(frame.prefix);
+    push_original_position(&mut out, &original);
+    out.push_str(frame.suffix);
+    Some(out)
+}
+
+fn apply_source_map(map: &SourceMap, line: u32, column: u32) -> Option<OriginalPosition> {
+    let token = map.lookup_token(line.saturating_sub(1), column.saturating_sub(1))?;
+    let source = token.get_source()?;
+    let src_line = token.get_src_line();
+    let src_col = token.get_src_col();
+
+    if src_line == u32::MAX || src_col == u32::MAX {
+        return None;
+    }
+
+    Some(OriginalPosition {
+        source: source.to_string(),
+        line: src_line.saturating_add(1),
+        column: src_col.saturating_add(1),
+        name: token.get_name().map(ToString::to_string),
+    })
+}
+
+fn push_original_position(out: &mut String, original: &OriginalPosition) {
+    if let Some(name) = original.name.as_deref().filter(|name| !name.is_empty()) {
+        out.push_str(name);
+        out.push_str(" (");
+        out.push_str(&original.source);
+        out.push(':');
+        push_u32(out, original.line);
+        out.push(':');
+        push_u32(out, original.column);
+        out.push(')');
+    } else {
+        out.push_str(&original.source);
+        out.push(':');
+        push_u32(out, original.line);
+        out.push(':');
+        push_u32(out, original.column);
+    }
+}
+
+fn push_u32(out: &mut String, value: u32) {
+    use std::fmt::Write;
+    let _ = write!(out, "{value}");
+}
+
+fn parse_javascript_frame(line: &str) -> Option<JavaScriptFrame<'_>> {
+    let trimmed = line.trim_end();
+    let mut end = trimmed.len();
+    let suffix = if trimmed.ends_with(')') {
+        end -= 1;
+        ")"
+    } else {
+        ""
+    };
+
+    let before_suffix = &trimmed[..end];
+    let (before_column, column) = split_trailing_u32(before_suffix)?;
+    let before_column = before_column.strip_suffix(':')?;
+    let (before_line, line_no) = split_trailing_u32(before_column)?;
+    let file_part = before_line.strip_suffix(':')?;
+
+    let file_start = file_part
+        .rfind([' ', '(', '@'])
+        .map(|idx| idx + 1)
+        .unwrap_or(0);
+    let raw_file = &file_part[file_start..];
+    if raw_file.is_empty() {
+        return None;
+    }
+
+    Some(JavaScriptFrame {
+        prefix: &trimmed[..file_start],
+        file_name: normalize_file_name(raw_file),
+        line: line_no,
+        column,
+        suffix,
+    })
+}
+
+fn split_trailing_u32(input: &str) -> Option<(&str, u32)> {
+    let start = input
+        .char_indices()
+        .rev()
+        .find_map(|(idx, ch)| (!ch.is_ascii_digit()).then_some(idx + ch.len_utf8()))
+        .unwrap_or(0);
+    if start == input.len() {
+        return None;
+    }
+    Some((&input[..start], input[start..].parse().ok()?))
+}
+
+fn normalize_file_name(raw_file: &str) -> &str {
+    let without_query = raw_file.split_once('?').map_or(raw_file, |(path, _)| path);
+    let without_query = without_query
+        .split_once('#')
+        .map_or(without_query, |(path, _)| path);
+
+    let without_scheme = without_query
+        .split_once("://")
+        .and_then(|(_, rest)| rest.split_once('/').map(|(_, path)| path))
+        .unwrap_or(without_query);
+    without_scheme.trim_start_matches('/')
+}
+
+pub(super) fn s3_key(project_id: Uuid, build_id: &str, file_name: &str) -> String {
+    let map_suffix = if file_name.ends_with(".map") {
+        ""
+    } else {
+        ".map"
+    };
+    let mut key =
+        String::with_capacity(36 + 1 + build_id.len() + 1 + file_name.len() + map_suffix.len());
+    use std::fmt::Write;
+    let _ = write!(key, "{project_id}");
+    key.push('/');
+    key.push_str(build_id);
+    key.push('/');
+    key.push_str(file_name);
+    key.push_str(map_suffix);
+    key
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_file_name, parse_javascript_frame, s3_key};
+    use uuid::Uuid;
+
+    #[test]
+    fn parses_chrome_frame() {
+        let frame =
+            parse_javascript_frame("    at render (https://cdn.test/assets/app.js:12:34)").unwrap();
+
+        assert_eq!(frame.prefix, "    at render (");
+        assert_eq!(frame.file_name, "assets/app.js");
+        assert_eq!(frame.line, 12);
+        assert_eq!(frame.column, 34);
+        assert_eq!(frame.suffix, ")");
+    }
+
+    #[test]
+    fn parses_firefox_frame() {
+        let frame = parse_javascript_frame("render@https://cdn.test/assets/app.js:12:34").unwrap();
+
+        assert_eq!(frame.prefix, "render@");
+        assert_eq!(frame.file_name, "assets/app.js");
+        assert_eq!(frame.line, 12);
+        assert_eq!(frame.column, 34);
+    }
+
+    #[test]
+    fn normalizes_file_name() {
+        assert_eq!(
+            normalize_file_name("https://cdn.test/assets/app.js?v=1"),
+            "assets/app.js"
+        );
+        assert_eq!(normalize_file_name("/assets/chunk.js"), "assets/chunk.js");
+    }
+
+    #[test]
+    fn appends_map_suffix() {
+        let project_id = Uuid::parse_str("01954b9b-7b1d-72b8-8af3-f8d058f60b79").unwrap();
+        assert_eq!(
+            s3_key(project_id, "build-1", "app.js"),
+            "01954b9b-7b1d-72b8-8af3-f8d058f60b79/build-1/app.js.map"
+        );
+        assert_eq!(
+            s3_key(project_id, "build-1", "app.js.map"),
+            "01954b9b-7b1d-72b8-8af3-f8d058f60b79/build-1/app.js.map"
+        );
+    }
+
+    #[test]
+    fn builds_matching_s3_key() {
+        let project_id = Uuid::parse_str("01954b9b-7b1d-72b8-8af3-f8d058f60b79").unwrap();
+        assert_eq!(
+            s3_key(project_id, "build-1", "app.js.map"),
+            "01954b9b-7b1d-72b8-8af3-f8d058f60b79/build-1/app.js.map"
+        );
+    }
+}

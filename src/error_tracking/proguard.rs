@@ -1,10 +1,6 @@
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 
-use uuid::Uuid;
-
-const PROGUARD_DIR: &str = "proguard";
-
 pub struct ProguardMapping {
     classes: HashMap<String, ClassMapping>,
 }
@@ -13,7 +9,6 @@ struct ClassMapping {
     original_name: String,
     file_name: Option<String>,
     methods: Vec<MethodMapping>,
-    fields: HashMap<String, String>,
 }
 
 struct MethodMapping {
@@ -21,6 +16,11 @@ struct MethodMapping {
     obfuscated_name: String,
     start_line: Option<u32>,
     end_line: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum ProguardParseError {
+    InvalidUtf8,
 }
 
 impl ProguardMapping {
@@ -55,7 +55,6 @@ impl ProguardMapping {
                             original_name: original.to_owned(),
                             file_name: None,
                             methods: Vec::new(),
-                            fields: HashMap::new(),
                         },
                     ));
                 }
@@ -74,11 +73,11 @@ impl ProguardMapping {
         Self { classes }
     }
 
-    pub fn parse_many_bytes(parts: &[Vec<u8>]) -> Result<Self, ()> {
+    pub fn parse_many_bytes(parts: &[Vec<u8>]) -> Result<Self, ProguardParseError> {
         let mut classes: HashMap<String, ClassMapping> = HashMap::new();
 
         for part in parts {
-            let input = std::str::from_utf8(part).map_err(|_| ())?;
+            let input = std::str::from_utf8(part).map_err(|_| ProguardParseError::InvalidUtf8)?;
             let mapping = Self::parse(input);
             for (obfuscated_name, class) in mapping.classes {
                 match classes.entry(obfuscated_name) {
@@ -259,7 +258,6 @@ impl ClassMapping {
             self.file_name = other.file_name;
         }
         self.methods.extend(other.methods);
-        self.fields.extend(other.fields);
     }
 }
 
@@ -310,22 +308,15 @@ fn parse_member_line(line: &str, class: &mut ClassMapping) {
         return;
     }
 
-    if original_part.contains('(') {
-        if let Some(method_name) = parse_method_name(original_part) {
-            class.methods.push(MethodMapping {
-                original_name: method_name,
-                obfuscated_name: obfuscated.to_owned(),
-                start_line: None,
-                end_line: None,
-            });
-        }
-        return;
-    }
-
-    if let Some(field_name) = original_part.split_whitespace().last() {
-        class
-            .fields
-            .insert(obfuscated.to_owned(), field_name.to_owned());
+    if original_part.contains('(')
+        && let Some(method_name) = parse_method_name(original_part)
+    {
+        class.methods.push(MethodMapping {
+            original_name: method_name,
+            obfuscated_name: obfuscated.to_owned(),
+            start_line: None,
+            end_line: None,
+        });
     }
 }
 
@@ -378,31 +369,9 @@ fn push_u32(out: &mut String, value: u32) {
     let _ = write!(out, "{value}");
 }
 
-pub fn s3_prefix(project_id: Uuid, build_id: &str) -> String {
-    let mut key = String::with_capacity(36 + 1 + build_id.len() + 1 + PROGUARD_DIR.len() + 1);
-    use std::fmt::Write;
-    let _ = write!(key, "{project_id}");
-    key.push('/');
-    key.push_str(build_id);
-    key.push('/');
-    key.push_str(PROGUARD_DIR);
-    key.push('/');
-    key
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{ProguardMapping, s3_prefix};
-    use uuid::Uuid;
-
-    #[test]
-    fn builds_s3_prefix_with_trailing_slash() {
-        let project_id = Uuid::parse_str("01954b9b-7b1d-72b8-8af3-f8d058f60b79").unwrap();
-        assert_eq!(
-            s3_prefix(project_id, "build-1"),
-            "01954b9b-7b1d-72b8-8af3-f8d058f60b79/build-1/proguard/"
-        );
-    }
+    use super::{ProguardMapping, ProguardParseError};
 
     #[test]
     fn retraces_r8_stacktrace() {
@@ -441,5 +410,14 @@ java.lang.RuntimeException: oops
 \tat core.file.FileIO.reload(FileIO.java:92)
 \tat core.file.Validatable.validate(Validatable.java:26)"
         );
+    }
+
+    #[test]
+    fn parse_many_bytes_rejects_invalid_utf8() {
+        let error = ProguardMapping::parse_many_bytes(&[vec![0xff]])
+            .err()
+            .expect("invalid utf8 should fail");
+
+        assert_eq!(error, ProguardParseError::InvalidUtf8);
     }
 }

@@ -5,7 +5,6 @@ const secretNames = [
   "TINYBIRD_URL",
   "TINYBIRD_TOKEN",
   "POLAR_TOKEN",
-  "POLAR_WEBHOOK_SECRET",
   "REPLAY_S3_BUCKET",
   "REPLAY_S3_REGION",
   "REPLAY_S3_ENDPOINT",
@@ -28,6 +27,8 @@ const serviceEnvironment = {
   DATABASE_ACQUIRE_TIMEOUT_SECS: "5",
 };
 
+const parameterPath = "/prod/data-collector";
+
 export default $config({
   app(input) {
     const isProduction = input.stage === "production";
@@ -40,7 +41,6 @@ export default $config({
     };
   },
   async run() {
-    const parameterPath = "/prod/data-collector";
     const region = aws.getRegionOutput().region;
     const accountId = aws.getCallerIdentityOutput().accountId;
     const ssm = Object.fromEntries(
@@ -65,7 +65,9 @@ export default $config({
         dockerfile: "Dockerfile",
       },
       loadBalancer: {
-        rules: [{ listen: "80/http", forward: "8080/http" }],
+        rules: [
+          { listen: "80/http", forward: "8080/http" },
+        ],
         health: {
           "8080/http": {
             path: "/v1/health",

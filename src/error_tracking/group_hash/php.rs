@@ -1,4 +1,4 @@
-use super::{GroupHashProvider, hash_normalized};
+use super::hash_normalized;
 use regex::Regex;
 use std::sync::LazyLock;
 
@@ -27,14 +27,6 @@ static URL_OR_PATH_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 static WHITESPACE_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\s+").expect("valid whitespace regex"));
-
-pub struct PhpGroupHashProvider;
-
-impl GroupHashProvider for PhpGroupHashProvider {
-    fn group_hash(&self, error_type: &str, stacktrace: &str) -> String {
-        group_hash(error_type, stacktrace)
-    }
-}
 
 pub fn group_hash(error_type: &str, stacktrace: &str) -> String {
     let normalized = normalize_for_grouping(error_type, stacktrace);

@@ -26,14 +26,6 @@ impl ErrorLanguage {
             None => Ok(Self::default()),
         }
     }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Java => "java",
-            Self::Javascript => "javascript",
-            Self::Php => "php",
-        }
-    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -46,10 +38,6 @@ impl UnsupportedLanguage {
         Self {
             language: language.into(),
         }
-    }
-
-    pub fn language(&self) -> &str {
-        &self.language
     }
 }
 
@@ -92,7 +80,7 @@ mod tests {
     fn rejects_unsupported_languages() {
         let error = ErrorLanguage::parse("ruby").unwrap_err();
 
-        assert_eq!(error.language(), "ruby");
+        assert_eq!(error.language, "ruby");
         assert_eq!(
             ErrorLanguage::parse_optional(Some("ruby")).unwrap_err(),
             UNSUPPORTED_LANGUAGE_MESSAGE

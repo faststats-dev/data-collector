@@ -5,8 +5,6 @@ use aws_sdk_s3::Client;
 use moka::future::Cache;
 use sourcemap::SourceMap;
 use sqlx::PgPool;
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::warn;
@@ -14,7 +12,6 @@ use uuid::Uuid;
 
 pub mod java;
 pub mod javascript;
-pub mod php;
 
 const NONCE_LEN: usize = 12;
 const TAG_LEN: usize = 16;
@@ -22,10 +19,6 @@ const JS_MAP_CACHE_CAPACITY: u64 = 64;
 const PROGUARD_MAP_CACHE_CAPACITY: u64 = 16;
 const MAP_CACHE_TTL: Duration = Duration::from_secs(600);
 const BUILD_CACHE_CAPACITY: u64 = 2048;
-
-static JAVA: java::JavaMappingProvider = java::JavaMappingProvider;
-static JAVASCRIPT: javascript::JavascriptMappingProvider = javascript::JavascriptMappingProvider;
-static PHP: php::PhpMappingProvider = php::PhpMappingProvider;
 
 #[derive(Clone)]
 pub struct MappingResolver {
@@ -49,15 +42,6 @@ pub struct MappingRequest<'a> {
     pub project_id: Uuid,
     pub build_id: &'a str,
     pub stacktrace: &'a str,
-}
-
-pub trait MappingProvider: Sync {
-    fn mapping_kind(&self) -> &'static str;
-    fn apply<'a>(
-        &'a self,
-        resolver: &'a MappingResolver,
-        request: MappingRequest<'a>,
-    ) -> Pin<Box<dyn Future<Output = Option<MappedStacktrace>> + Send + 'a>>;
 }
 
 struct MappingCrypto {
@@ -121,7 +105,7 @@ impl MappingResolver {
 
     pub async fn apply(
         &self,
-        language: &str,
+        language: ErrorLanguage,
         project_id: Uuid,
         build_id: &str,
         stacktrace: &str,
@@ -130,17 +114,17 @@ impl MappingResolver {
             return None;
         }
 
-        let provider = provider_for_language(language)?;
-        provider
-            .apply(
-                self,
-                MappingRequest {
-                    project_id,
-                    build_id,
-                    stacktrace,
-                },
-            )
-            .await
+        let request = MappingRequest {
+            project_id,
+            build_id,
+            stacktrace,
+        };
+
+        match language {
+            ErrorLanguage::Java => java::apply(self, request).await,
+            ErrorLanguage::Javascript => javascript::apply(self, request).await,
+            ErrorLanguage::Php => None,
+        }
     }
 
     pub(super) async fn build_exists(&self, project_id: Uuid, build_id: &str) -> bool {
@@ -345,43 +329,6 @@ impl MappingCrypto {
     }
 }
 
-fn provider_for_language(language: &str) -> Option<&'static dyn MappingProvider> {
-    match ErrorLanguage::parse(language).ok()? {
-        ErrorLanguage::Java => Some(&JAVA),
-        ErrorLanguage::Javascript => Some(&JAVASCRIPT),
-        ErrorLanguage::Php => Some(&PHP),
-    }
-}
-
 fn build_cache_key(project_id: Uuid, build_id: &str) -> String {
-    let mut key = String::with_capacity(36 + 1 + build_id.len());
-    use std::fmt::Write;
-    let _ = write!(key, "{project_id}");
-    key.push('/');
-    key.push_str(build_id);
-    key
-}
-
-#[cfg(test)]
-mod tests {
-    use super::provider_for_language;
-
-    #[test]
-    fn dispatches_supported_languages() {
-        assert_eq!(provider_for_language("java").unwrap().mapping_kind(), "r8");
-        assert_eq!(
-            provider_for_language("javascript").unwrap().mapping_kind(),
-            "javascript"
-        );
-        assert_eq!(
-            provider_for_language("js").unwrap().mapping_kind(),
-            "javascript"
-        );
-        assert_eq!(provider_for_language("php").unwrap().mapping_kind(), "none");
-    }
-
-    #[test]
-    fn rejects_unknown_languages() {
-        assert!(provider_for_language("ruby").is_none());
-    }
+    format!("{project_id}/{build_id}")
 }

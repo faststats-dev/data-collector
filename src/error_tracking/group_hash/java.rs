@@ -1,4 +1,4 @@
-use super::{GroupHashProvider, hash_normalized};
+use super::hash_normalized;
 use regex::Regex;
 use std::sync::LazyLock;
 
@@ -26,14 +26,6 @@ static LAMBDA_RE: LazyLock<Regex> = LazyLock::new(|| {
 static WHITESPACE_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\s+").expect("valid whitespace regex"));
 const JAVA_INTERNAL_FRAME_PREFIXES: &[&str] = &["java.", "javax.", "sun.", "com.sun.", "jdk."];
-
-pub struct JavaGroupHashProvider;
-
-impl GroupHashProvider for JavaGroupHashProvider {
-    fn group_hash(&self, error_type: &str, stacktrace: &str) -> String {
-        group_hash(error_type, stacktrace)
-    }
-}
 
 pub fn group_hash(error_type: &str, stacktrace: &str) -> String {
     let normalized = normalize_for_grouping(error_type, stacktrace);

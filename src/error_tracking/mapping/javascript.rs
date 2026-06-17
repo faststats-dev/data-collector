@@ -1,8 +1,8 @@
-use super::{MappedStacktrace, MappingProvider, MappingRequest, MappingResolver};
+use super::{MappedStacktrace, MappingRequest, MappingResolver};
 use sourcemap::SourceMap;
-use std::future::Future;
-use std::pin::Pin;
 use uuid::Uuid;
+
+const MAPPING_KIND: &str = "javascript";
 
 #[derive(Debug, Clone, Copy)]
 struct JavaScriptFrame<'a> {
@@ -20,54 +20,43 @@ struct OriginalPosition {
     name: Option<String>,
 }
 
-pub struct JavascriptMappingProvider;
-
-impl MappingProvider for JavascriptMappingProvider {
-    fn mapping_kind(&self) -> &'static str {
-        "javascript"
+pub async fn apply(
+    resolver: &MappingResolver,
+    request: MappingRequest<'_>,
+) -> Option<MappedStacktrace> {
+    if !resolver
+        .build_exists(request.project_id, request.build_id)
+        .await
+    {
+        return None;
     }
 
-    fn apply<'a>(
-        &'a self,
-        resolver: &'a MappingResolver,
-        request: MappingRequest<'a>,
-    ) -> Pin<Box<dyn Future<Output = Option<MappedStacktrace>> + Send + 'a>> {
-        Box::pin(async move {
-            if !resolver
-                .build_exists(request.project_id, request.build_id)
-                .await
-            {
-                return None;
+    let mut mapped_any = false;
+    let mut mapped_stacktrace = String::with_capacity(request.stacktrace.len());
+
+    for (idx, line) in request.stacktrace.lines().enumerate() {
+        if idx > 0 {
+            mapped_stacktrace.push('\n');
+        }
+
+        let Some(frame) = parse_javascript_frame(line) else {
+            mapped_stacktrace.push_str(line);
+            continue;
+        };
+
+        match apply_frame(resolver, request.project_id, request.build_id, &frame).await {
+            Some(mapped) => {
+                mapped_any = true;
+                mapped_stacktrace.push_str(&mapped);
             }
-
-            let mut mapped_any = false;
-            let mut mapped_stacktrace = String::with_capacity(request.stacktrace.len());
-
-            for (idx, line) in request.stacktrace.lines().enumerate() {
-                if idx > 0 {
-                    mapped_stacktrace.push('\n');
-                }
-
-                let Some(frame) = parse_javascript_frame(line) else {
-                    mapped_stacktrace.push_str(line);
-                    continue;
-                };
-
-                match apply_frame(resolver, request.project_id, request.build_id, &frame).await {
-                    Some(mapped) => {
-                        mapped_any = true;
-                        mapped_stacktrace.push_str(&mapped);
-                    }
-                    None => mapped_stacktrace.push_str(line),
-                }
-            }
-
-            mapped_any.then(|| MappedStacktrace {
-                stacktrace: mapped_stacktrace,
-                mapping_used: format!("{}:{}", self.mapping_kind(), request.build_id),
-            })
-        })
+            None => mapped_stacktrace.push_str(line),
+        }
     }
+
+    mapped_any.then(|| MappedStacktrace {
+        stacktrace: mapped_stacktrace,
+        mapping_used: format!("{MAPPING_KIND}:{}", request.build_id),
+    })
 }
 
 async fn apply_frame(
@@ -201,16 +190,7 @@ pub(super) fn s3_key(project_id: Uuid, build_id: &str, file_name: &str) -> Strin
     } else {
         ".map"
     };
-    let mut key =
-        String::with_capacity(36 + 1 + build_id.len() + 1 + file_name.len() + map_suffix.len());
-    use std::fmt::Write;
-    let _ = write!(key, "{project_id}");
-    key.push('/');
-    key.push_str(build_id);
-    key.push('/');
-    key.push_str(file_name);
-    key.push_str(map_suffix);
-    key
+    format!("{project_id}/{build_id}/{file_name}{map_suffix}")
 }
 
 #[cfg(test)]

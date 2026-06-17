@@ -1,4 +1,4 @@
-use super::{GroupHashProvider, hash_normalized};
+use super::hash_normalized;
 use regex::Regex;
 use std::sync::LazyLock;
 
@@ -19,14 +19,6 @@ static HASHISH_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\b[0-9a-f]{12,}\b").expect("valid hash regex"));
 static WHITESPACE_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\s+").expect("valid whitespace regex"));
-
-pub struct JavascriptGroupHashProvider;
-
-impl GroupHashProvider for JavascriptGroupHashProvider {
-    fn group_hash(&self, error_type: &str, stacktrace: &str) -> String {
-        group_hash(error_type, stacktrace)
-    }
-}
 
 pub fn group_hash(error_type: &str, stacktrace: &str) -> String {
     let normalized = normalize_for_grouping(error_type, stacktrace);

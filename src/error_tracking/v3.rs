@@ -11,8 +11,7 @@ pub use crate::error_tracking::language::ErrorLanguage;
 
 impl ErrorLanguage {
     fn group_hash(self, error_type: &str, stacktrace: &str) -> String {
-        group_hash::group_hash(self.as_str(), error_type, stacktrace)
-            .expect("ErrorLanguage must map to a group hash provider")
+        group_hash::group_hash(self, error_type, stacktrace)
     }
 }
 
@@ -173,7 +172,7 @@ pub async fn enrich_with_mapping(
     }
 
     let mapped = resolver
-        .apply(language.as_str(), row.project_id, build_id, &row.stacktrace)
+        .apply(language, row.project_id, build_id, &row.stacktrace)
         .await;
 
     if let Some(mapped) = mapped {

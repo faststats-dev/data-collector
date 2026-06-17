@@ -4,3 +4,6 @@ data-collector
 coverage.out
 .idea
 backup.db
+
+# sst
+.sst

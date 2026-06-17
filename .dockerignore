@@ -5,3 +5,7 @@ target/
 .idea/
 backup.db
 *.md
+
+
+# sst
+.sst

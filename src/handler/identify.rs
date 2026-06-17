@@ -80,7 +80,7 @@ pub async fn identify(
     if let Err(msg) = check_ip_allowed(&ctx.ip_rules, client_ip) {
         return error_response(StatusCode::FORBIDDEN, msg);
     }
-    if ctx.cookieless_mode {
+    if matches!(ctx.cookieless_mode, Some(true)) {
         return error_response(
             StatusCode::CONFLICT,
             "identify is not supported when cookieless mode is enabled",

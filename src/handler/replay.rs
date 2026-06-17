@@ -161,13 +161,19 @@ pub async fn replay(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    let server_id = if context.cookieless_mode {
-        crate::utils::cookieless_server_id(client_ip, user_agent, context.project_id)
-    } else {
-        let Some(identifier) = identifier else {
-            return error_response(StatusCode::BAD_REQUEST, "identifier is required");
-        };
-        crate::utils::hash_server_id(identifier, context.project_id)
+    let server_id = match context.cookieless_mode {
+        Some(true) => crate::utils::cookieless_server_id(client_ip, user_agent, context.project_id),
+        Some(false) => {
+            let Some(identifier) = identifier else {
+                return error_response(StatusCode::BAD_REQUEST, "identifier is required");
+            };
+            crate::utils::hash_server_id(identifier, context.project_id)
+        }
+        None => identifier
+            .map(|identifier| crate::utils::hash_server_id(identifier, context.project_id))
+            .unwrap_or_else(|| {
+                crate::utils::cookieless_server_id(client_ip, user_agent, context.project_id)
+            }),
     };
 
     events.retain(is_valid_rrweb_event);

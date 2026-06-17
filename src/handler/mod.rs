@@ -152,7 +152,7 @@ pub struct ProjectContext {
     pub allowed_hostnames: Vec<String>,
     pub datasources: HashMap<String, DataSource>,
     pub error_tracking_enabled: bool,
-    pub cookieless_mode: bool,
+    pub cookieless_mode: Option<bool>,
     pub ip_rules: Vec<IpRule>,
 }
 
@@ -684,15 +684,26 @@ async fn process_web_request(
         return Err("Origin not allowed".to_string());
     }
 
-    let resolved_user_id = if ctx.cookieless_mode {
-        let ip = request.client_ip.as_deref().unwrap_or("");
-        let ua = request.user_agent.as_deref().unwrap_or("");
-        crate::utils::cookieless_server_id(ip, ua, ctx.project_id)
-    } else {
-        let user_id = parsed
-            .user_id
-            .ok_or_else(|| "userId is required".to_string())?;
-        crate::utils::hash_server_id(user_id, ctx.project_id)
+    let resolved_user_id = match ctx.cookieless_mode {
+        Some(true) => {
+            let ip = request.client_ip.as_deref().unwrap_or("");
+            let ua = request.user_agent.as_deref().unwrap_or("");
+            crate::utils::cookieless_server_id(ip, ua, ctx.project_id)
+        }
+        Some(false) => {
+            let user_id = parsed
+                .user_id
+                .ok_or_else(|| "userId is required".to_string())?;
+            crate::utils::hash_server_id(user_id, ctx.project_id)
+        }
+        None => match parsed.user_id {
+            Some(user_id) => crate::utils::hash_server_id(user_id, ctx.project_id),
+            None => {
+                let ip = request.client_ip.as_deref().unwrap_or("");
+                let ua = request.user_agent.as_deref().unwrap_or("");
+                crate::utils::cookieless_server_id(ip, ua, ctx.project_id)
+            }
+        },
     };
 
     let mut data = parsed.data;
@@ -945,13 +956,24 @@ async fn process_replay_request(
 
     let replay_storage =
         replay_storage.ok_or_else(|| "Replay storage is not configured".to_string())?;
-    let server_id = if ctx.cookieless_mode {
-        let ip = request.client_ip.as_deref().unwrap_or("");
-        let ua = request.user_agent.as_deref().unwrap_or("");
-        crate::utils::cookieless_server_id(ip, ua, ctx.project_id)
-    } else {
-        let identifier = identifier.ok_or_else(|| "identifier is required".to_string())?;
-        crate::utils::hash_server_id(identifier, ctx.project_id)
+    let server_id = match ctx.cookieless_mode {
+        Some(true) => {
+            let ip = request.client_ip.as_deref().unwrap_or("");
+            let ua = request.user_agent.as_deref().unwrap_or("");
+            crate::utils::cookieless_server_id(ip, ua, ctx.project_id)
+        }
+        Some(false) => {
+            let identifier = identifier.ok_or_else(|| "identifier is required".to_string())?;
+            crate::utils::hash_server_id(identifier, ctx.project_id)
+        }
+        None => match identifier {
+            Some(identifier) => crate::utils::hash_server_id(identifier, ctx.project_id),
+            None => {
+                let ip = request.client_ip.as_deref().unwrap_or("");
+                let ua = request.user_agent.as_deref().unwrap_or("");
+                crate::utils::cookieless_server_id(ip, ua, ctx.project_id)
+            }
+        },
     };
 
     let tracking_ctx = TrackingContext {

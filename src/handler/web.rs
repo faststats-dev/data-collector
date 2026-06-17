@@ -155,13 +155,19 @@ pub async fn web(
         None => return success_response(HashMap::new()),
     };
 
-    let resolved_user_id = if ctx.cookieless_mode {
-        crate::utils::cookieless_server_id(client_ip, user_agent, ctx.project_id)
-    } else {
-        let Some(uid) = user_id else {
-            return error_response(StatusCode::BAD_REQUEST, "userId is required");
-        };
-        crate::utils::hash_server_id(uid, ctx.project_id)
+    let resolved_user_id = match ctx.cookieless_mode {
+        Some(true) => crate::utils::cookieless_server_id(client_ip, user_agent, ctx.project_id),
+        Some(false) => {
+            let Some(uid) = user_id else {
+                return error_response(StatusCode::BAD_REQUEST, "userId is required");
+            };
+            crate::utils::hash_server_id(uid, ctx.project_id)
+        }
+        None => user_id
+            .map(|uid| crate::utils::hash_server_id(uid, ctx.project_id))
+            .unwrap_or_else(|| {
+                crate::utils::cookieless_server_id(client_ip, user_agent, ctx.project_id)
+            }),
     };
 
     known.insert(

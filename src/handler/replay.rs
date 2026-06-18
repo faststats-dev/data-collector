@@ -71,7 +71,7 @@ pub(crate) struct ReplayRequest {
     pub(crate) is_final: bool,
     #[serde(default)]
     pub(crate) batch_id: Option<String>,
-    pub(crate) sequence: u32,
+    pub(crate) sequence: u64,
     pub(crate) url: String,
     #[serde(default, alias = "anonymousId")]
     pub(crate) identifier: Option<SqlxUuid>,
@@ -114,6 +114,10 @@ pub async fn replay(
         mut events,
     } = parsed;
     let window_id = normalize_window_id(window_id, &session_id);
+    let sequence = match i64::try_from(sequence) {
+        Ok(value) => value,
+        Err(_) => return error_response(StatusCode::BAD_REQUEST, "sequence exceeds bigint range"),
+    };
 
     let context = match load_project_context(&state.pool, &token).await {
         Ok(ctx) => ctx,
@@ -176,7 +180,9 @@ pub async fn replay(
             }),
     };
 
+    let received_event_count = events.len();
     events.retain(is_valid_rrweb_event);
+    let dropped_event_count = received_event_count - events.len();
 
     if events.is_empty() {
         return error_response(StatusCode::BAD_REQUEST, "No valid events");
@@ -206,7 +212,7 @@ pub async fn replay(
                 session_start_ms: session_start.and_then(|value| i64::try_from(value).ok()),
                 is_final,
                 batch_id,
-                sequence: i32::try_from(sequence).ok(),
+                sequence,
                 identifier: Some(server_id.to_string()),
                 url: Some(url),
                 events,
@@ -257,7 +263,14 @@ pub async fn replay(
         }
     }
 
-    success_response(HashMap::new())
+    let mut warnings = HashMap::new();
+    if dropped_event_count > 0 {
+        warnings.insert(
+            "droppedEvents".to_string(),
+            format!("{} invalid replay events were dropped", dropped_event_count),
+        );
+    }
+    success_response(warnings)
 }
 
 #[cfg(test)]

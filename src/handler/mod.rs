@@ -792,6 +792,7 @@ async fn process_web_request(
                 crate::replay_storage::ReplayFilterEventInput {
                     project_id: ctx.project_id,
                     session_id,
+                    window_id: parsed.window_id.as_deref().unwrap_or(session_id),
                     identifier: Some(fallback_identity.as_str()),
                     browser: event_row.browser.as_deref(),
                     os: event_row.os.as_deref(),
@@ -846,7 +847,12 @@ async fn process_web_request(
         if let Some(session_id) = parsed.session_id.as_deref()
             && let Some(replay_storage) = replay_storage
             && let Err(error) = replay_storage
-                .mark_session_error(pool, ctx.project_id, session_id)
+                .mark_session_error(
+                    pool,
+                    ctx.project_id,
+                    session_id,
+                    parsed.window_id.as_deref().unwrap_or(session_id),
+                )
                 .await
         {
             warn!("Failed to persist replay error flag: {}", error);
@@ -924,7 +930,12 @@ async fn process_vitals_request(
             && let Some(replay_storage) = replay_storage
             && crate::handler::vitals::is_poor_web_vital(&vital.metric, vital.value)
             && let Err(error) = replay_storage
-                .mark_session_poor_vital(pool, ctx.project_id, session_id)
+                .mark_session_poor_vital(
+                    pool,
+                    ctx.project_id,
+                    session_id,
+                    req.window_id.as_deref().unwrap_or(session_id),
+                )
                 .await
         {
             warn!("Failed to persist replay poor-vital flag: {}", error);
@@ -958,6 +969,7 @@ async fn process_replay_request(
         mut events,
     } = parsed;
     let window_id = crate::handler::replay::normalize_window_id(window_id, &session_id);
+    let sequence = i64::try_from(sequence).map_err(|_| "sequence exceeds bigint range")?;
 
     let ctx = load_project_context(pool, &token)
         .await
@@ -1007,7 +1019,7 @@ async fn process_replay_request(
                 session_start_ms: session_start.and_then(|value| i64::try_from(value).ok()),
                 is_final,
                 batch_id,
-                sequence: i32::try_from(sequence).ok(),
+                sequence,
                 identifier: Some(server_id.to_string()),
                 url: Some(url),
                 events,

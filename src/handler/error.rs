@@ -26,6 +26,8 @@ pub(crate) struct ErrorRequest {
     #[serde(default)]
     session_id: Option<String>,
     #[serde(default)]
+    window_id: Option<String>,
+    #[serde(default)]
     build_id: Option<String>,
     #[serde(default)]
     context: Option<Value>,
@@ -114,7 +116,12 @@ pub async fn error(
         if let Some(session_id) = replay_session_id.as_deref()
             && let Some(replay_storage) = state.replay_storage.as_deref()
             && let Err(err) = replay_storage
-                .mark_session_error(&state.pool, ctx.project_id, session_id)
+                .mark_session_error(
+                    &state.pool,
+                    ctx.project_id,
+                    session_id,
+                    payload.window_id.as_deref().unwrap_or(session_id),
+                )
                 .await
         {
             warn!("Failed to persist replay error flag: {}", err);

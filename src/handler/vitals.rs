@@ -42,6 +42,8 @@ pub(crate) struct WebVitalRequest {
     pub(crate) metadata: Option<WebVitalsMetadata>,
     #[serde(default)]
     pub(crate) session_id: Option<String>,
+    #[serde(default)]
+    pub(crate) window_id: Option<String>,
 }
 
 pub async fn vitals(
@@ -60,6 +62,7 @@ pub async fn vitals(
         vitals,
         metadata,
         session_id,
+        window_id,
     } = match serde_json::from_slice(&body) {
         Ok(req) => req,
         Err(_) => return error_response(StatusCode::BAD_REQUEST, "Invalid JSON"),
@@ -191,7 +194,12 @@ pub async fn vitals(
             && let Some(replay_storage) = state.replay_storage.as_deref()
             && is_poor_web_vital(&vital.metric, vital.value)
             && let Err(error) = replay_storage
-                .mark_session_poor_vital(&state.pool, ctx.project_id, session_id)
+                .mark_session_poor_vital(
+                    &state.pool,
+                    ctx.project_id,
+                    session_id,
+                    window_id.as_deref().unwrap_or(session_id),
+                )
                 .await
         {
             warn!("Failed to persist replay poor-vital flag: {}", error);

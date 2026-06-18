@@ -229,6 +229,7 @@ pub async fn web(
                 crate::replay_storage::ReplayFilterEventInput {
                     project_id: ctx.project_id,
                     session_id,
+                    window_id: window_id.as_deref().unwrap_or(session_id),
                     identifier: Some(fallback_identity.as_str()),
                     browser: event_row.browser.as_deref(),
                     os: event_row.os.as_deref(),
@@ -289,7 +290,12 @@ pub async fn web(
         if let Some(session_id) = session_id.as_deref()
             && let Some(replay_storage) = state.replay_storage.as_deref()
             && let Err(error) = replay_storage
-                .mark_session_error(&state.pool, ctx.project_id, session_id)
+                .mark_session_error(
+                    &state.pool,
+                    ctx.project_id,
+                    session_id,
+                    window_id.as_deref().unwrap_or(session_id),
+                )
                 .await
         {
             warn!("Failed to persist replay error flag: {}", error);

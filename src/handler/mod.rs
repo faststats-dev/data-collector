@@ -414,6 +414,7 @@ const WEB_EVENT_FIELDS: &[&str] = &[
     "title",
     "page",
     "url",
+    "cookieless",
 ];
 
 /// Known internal fields for mods_events row.
@@ -480,6 +481,7 @@ pub fn build_web_event_row(
         page: extract_optional_string(known, "page"),
         url: extract_optional_string(known, "url"),
         country,
+        cookieless: known.remove("cookieless").and_then(|value| value.as_bool()),
         properties: to_custom_json(properties),
         created_at: chrono::Utc::now(),
     }
@@ -684,24 +686,30 @@ async fn process_web_request(
         return Err("Origin not allowed".to_string());
     }
 
-    let resolved_user_id = match ctx.cookieless_mode {
+    let (resolved_user_id, cookieless) = match ctx.cookieless_mode {
         Some(true) => {
             let ip = request.client_ip.as_deref().unwrap_or("");
             let ua = request.user_agent.as_deref().unwrap_or("");
-            crate::utils::cookieless_server_id(ip, ua, ctx.project_id)
+            (
+                crate::utils::cookieless_server_id(ip, ua, ctx.project_id),
+                true,
+            )
         }
         Some(false) => {
             let user_id = parsed
                 .user_id
                 .ok_or_else(|| "userId is required".to_string())?;
-            crate::utils::hash_server_id(user_id, ctx.project_id)
+            (crate::utils::hash_server_id(user_id, ctx.project_id), false)
         }
         None => match parsed.user_id {
-            Some(user_id) => crate::utils::hash_server_id(user_id, ctx.project_id),
+            Some(user_id) => (crate::utils::hash_server_id(user_id, ctx.project_id), false),
             None => {
                 let ip = request.client_ip.as_deref().unwrap_or("");
                 let ua = request.user_agent.as_deref().unwrap_or("");
-                crate::utils::cookieless_server_id(ip, ua, ctx.project_id)
+                (
+                    crate::utils::cookieless_server_id(ip, ua, ctx.project_id),
+                    true,
+                )
             }
         },
     };
@@ -714,6 +722,7 @@ async fn process_web_request(
         "user_id".into(),
         Value::String(resolved_user_id.to_string()),
     );
+    known.insert("cookieless".into(), Value::Bool(cookieless));
     crate::handler::web::stamp_person_identity(pool, ctx.project_id, resolved_user_id, &mut known)
         .await;
 

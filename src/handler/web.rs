@@ -155,25 +155,31 @@ pub async fn web(
         None => return success_response(HashMap::new()),
     };
 
-    let resolved_user_id = match ctx.cookieless_mode {
-        Some(true) => crate::utils::cookieless_server_id(client_ip, user_agent, ctx.project_id),
+    let (resolved_user_id, cookieless) = match ctx.cookieless_mode {
+        Some(true) => (
+            crate::utils::cookieless_server_id(client_ip, user_agent, ctx.project_id),
+            true,
+        ),
         Some(false) => {
             let Some(uid) = user_id else {
                 return error_response(StatusCode::BAD_REQUEST, "userId is required");
             };
-            crate::utils::hash_server_id(uid, ctx.project_id)
+            (crate::utils::hash_server_id(uid, ctx.project_id), false)
         }
-        None => user_id
-            .map(|uid| crate::utils::hash_server_id(uid, ctx.project_id))
-            .unwrap_or_else(|| {
-                crate::utils::cookieless_server_id(client_ip, user_agent, ctx.project_id)
-            }),
+        None => match user_id {
+            Some(uid) => (crate::utils::hash_server_id(uid, ctx.project_id), false),
+            None => (
+                crate::utils::cookieless_server_id(client_ip, user_agent, ctx.project_id),
+                true,
+            ),
+        },
     };
 
     known.insert(
         "user_id".into(),
         Value::String(resolved_user_id.to_string()),
     );
+    known.insert("cookieless".into(), Value::Bool(cookieless));
     stamp_person_identity(&state.pool, ctx.project_id, resolved_user_id, &mut known).await;
 
     if !ua_info.browser.is_empty() {

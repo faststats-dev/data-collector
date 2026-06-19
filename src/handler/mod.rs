@@ -145,6 +145,8 @@ pub struct IpRule {
 #[derive(Clone)]
 pub struct ProjectContext {
     pub project_id: Uuid,
+    pub replay_storage_generation: i32,
+    pub replay_storage_active: bool,
     /// The user ID to bill — either the owner_id directly (if it's a user)
     /// or the org owner's user_id (if owner_id is an organization).
     pub billing_customer_id: String,
@@ -167,6 +169,7 @@ pub async fn load_project_context(
     let rows = sqlx::query(
         r#"
         SELECT p.id, p.owner_id, p.allowed_hostnames, p.error_tracking_enabled, p.cookieless_mode,
+               p.replay_storage_generation, p.replay_storage_state::text AS replay_storage_state,
                o.id AS organization_id,
                m.user_id AS org_owner_user_id,
                d.reference_id, d.name, d.data_type::text, d.regex, d.allow_negative,
@@ -228,6 +231,8 @@ pub async fn load_project_context(
 
     let ctx = Arc::new(ProjectContext {
         project_id: first.get("id"),
+        replay_storage_generation: first.get("replay_storage_generation"),
+        replay_storage_active: first.get::<String, _>("replay_storage_state") == "active",
         billing_customer_id,
         organization_id,
         allowed_hostnames: first
@@ -565,6 +570,7 @@ pub async fn process_failed_request(
     batch_queue: &BatchQueue,
     pool: &sqlx::PgPool,
     replay_storage: Option<&crate::replay_storage::ReplayStorage>,
+    replay_coalescer: Option<&crate::replay_coalescer::ReplayCoalescer>,
     request: &FailedRequest,
 ) -> Result<(), String> {
     match request.request_type {
@@ -574,7 +580,7 @@ pub async fn process_failed_request(
             process_vitals_request(batch_queue, pool, replay_storage, request).await
         }
         RequestType::Replay => {
-            process_replay_request(batch_queue, pool, replay_storage, request).await
+            process_replay_request(batch_queue, pool, replay_coalescer, request).await
         }
     }
 }
@@ -784,13 +790,15 @@ async fn process_web_request(
         })
     });
 
-    if let Some(session_id) = parsed.session_id.as_deref()
+    if ctx.replay_storage_active
+        && let Some(session_id) = parsed.session_id.as_deref()
         && let Some(replay_storage) = replay_storage
         && let Err(error) = replay_storage
             .record_filter_event(
                 pool,
                 crate::replay_storage::ReplayFilterEventInput {
                     project_id: ctx.project_id,
+                    storage_generation: ctx.replay_storage_generation,
                     session_id,
                     window_id: parsed.window_id.as_deref().unwrap_or(session_id),
                     identifier: Some(fallback_identity.as_str()),
@@ -948,7 +956,7 @@ async fn process_vitals_request(
 async fn process_replay_request(
     batch_queue: &BatchQueue,
     pool: &sqlx::PgPool,
-    replay_storage: Option<&crate::replay_storage::ReplayStorage>,
+    replay_coalescer: Option<&crate::replay_coalescer::ReplayCoalescer>,
     request: &FailedRequest,
 ) -> Result<(), String> {
     use crate::handler::replay::ReplayRequest;
@@ -962,6 +970,7 @@ async fn process_replay_request(
         view_id,
         session_start,
         is_final,
+        flush_reason,
         batch_id,
         sequence,
         url,
@@ -975,8 +984,11 @@ async fn process_replay_request(
         .await
         .map_err(|_| "Unauthorized or database error")?;
 
-    let replay_storage =
-        replay_storage.ok_or_else(|| "Replay storage is not configured".to_string())?;
+    let replay_coalescer =
+        replay_coalescer.ok_or_else(|| "Replay storage is not configured".to_string())?;
+    if !ctx.replay_storage_active {
+        return Err("Replay storage is resetting".to_string());
+    }
     let server_id = match ctx.cookieless_mode {
         Some(true) => {
             let ip = request.client_ip.as_deref().unwrap_or("");
@@ -1008,23 +1020,26 @@ async fn process_replay_request(
         return Err("No valid events".to_string());
     }
 
-    replay_storage
-        .store_replay_chunk(
-            pool,
-            crate::replay_storage::ReplayChunkInput {
-                project_id: ctx.project_id,
-                session_id: session_id.clone(),
-                window_id,
-                view_id,
-                session_start_ms: session_start.and_then(|value| i64::try_from(value).ok()),
-                is_final,
-                batch_id,
-                sequence,
-                identifier: Some(server_id.to_string()),
-                url: Some(url),
-                events,
-            },
-        )
+    replay_coalescer
+        .ingest(crate::replay_storage::ReplayChunkInput {
+            project_id: ctx.project_id,
+            storage_generation: ctx.replay_storage_generation,
+            session_id: session_id.clone(),
+            window_id,
+            view_id,
+            session_start_ms: session_start.and_then(|value| i64::try_from(value).ok()),
+            is_final,
+            flush_reason,
+            batch_id,
+            sequence,
+            first_sequence: None,
+            last_sequence: None,
+            client_batch_count: 1,
+            approx_events_bytes: request.body.len(),
+            identifier: Some(server_id.to_string()),
+            url: Some(url),
+            events,
+        })
         .await
         .map_err(|error| error.to_string())?;
 

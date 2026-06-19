@@ -221,13 +221,15 @@ pub async fn web(
     let error_v3_context = should_process_errors
         .then(|| request_context(context, || web_context(&event_row, &properties)));
 
-    if let Some(session_id) = session_id.as_deref()
+    if ctx.replay_storage_active
+        && let Some(session_id) = session_id.as_deref()
         && let Some(replay_storage) = state.replay_storage.as_deref()
         && let Err(error) = replay_storage
             .record_filter_event(
                 &state.pool,
                 crate::replay_storage::ReplayFilterEventInput {
                     project_id: ctx.project_id,
+                    storage_generation: ctx.replay_storage_generation,
                     session_id,
                     window_id: window_id.as_deref().unwrap_or(session_id),
                     identifier: Some(fallback_identity.as_str()),

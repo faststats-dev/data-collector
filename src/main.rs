@@ -26,6 +26,7 @@ mod handler;
 mod identity;
 mod models;
 mod polar;
+mod replay_coalescer;
 mod replay_storage;
 mod tinybird;
 pub mod ua_parser;
@@ -136,6 +137,12 @@ async fn main() {
             panic!("Invalid replay storage configuration: {}", error);
         }
     };
+    let replay_coalescer = replay_storage
+        .as_ref()
+        .map(|storage| replay_coalescer::ReplayCoalescer::new(Arc::clone(storage), pool.clone()));
+    if replay_coalescer.is_some() {
+        info!("Replay coalescer enabled");
+    }
 
     let recorder_handle = setup_metrics_recorder();
 
@@ -157,9 +164,15 @@ async fn main() {
         pool: pool.clone(),
         batch_queue: Arc::clone(&batch_queue),
         replay_storage: replay_storage.clone(),
+        replay_coalescer: replay_coalescer.clone(),
     };
 
-    start_failed_request_replayer(pool, Arc::clone(&batch_queue), replay_storage);
+    start_failed_request_replayer(
+        pool.clone(),
+        Arc::clone(&batch_queue),
+        replay_storage,
+        replay_coalescer.clone(),
+    );
 
     let cors = CorsLayer::new()
         .allow_origin(AllowOrigin::mirror_request())
@@ -222,6 +235,11 @@ async fn main() {
         .expect("Server error");
 
     info!("Shutting down, flushing in-memory batch...");
+    if let Some(coalescer) = replay_coalescer.as_ref()
+        && let Err(error) = coalescer.flush_all().await
+    {
+        warn!("Failed to flush replay coalescer on shutdown: {}", error);
+    }
     batch_queue.flush_in_memory_batch().await;
     info!("Shutdown complete");
 }
@@ -230,6 +248,7 @@ fn start_failed_request_replayer(
     pool: sqlx::PgPool,
     batch_queue: Arc<batch_queue::BatchQueue>,
     replay_storage: Option<Arc<replay_storage::ReplayStorage>>,
+    replay_coalescer: Option<Arc<replay_coalescer::ReplayCoalescer>>,
 ) {
     tokio::spawn(async move {
         let replay_interval = std::time::Duration::from_secs(60);
@@ -237,7 +256,11 @@ fn start_failed_request_replayer(
         loop {
             tokio::time::sleep(replay_interval).await;
             batch_queue
-                .replay_failed_requests(&pool, replay_storage.as_deref())
+                .replay_failed_requests(
+                    &pool,
+                    replay_storage.as_deref(),
+                    replay_coalescer.as_deref(),
+                )
                 .await;
         }
     });

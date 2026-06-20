@@ -15,19 +15,25 @@ const REPLAY_COMPRESSION_TIMEOUT: Duration = Duration::from_secs(10);
 #[derive(Clone)]
 pub struct ReplayStorage {
     client: Client,
-    bucket: String,
-    prefix: String,
+    bucket_prefix: String,
 }
 
+#[derive(Clone)]
 pub struct ReplayChunkInput {
     pub project_id: Uuid,
+    pub storage_generation: i32,
     pub session_id: String,
     pub window_id: String,
     pub view_id: Option<String>,
     pub session_start_ms: Option<i64>,
     pub is_final: bool,
+    pub flush_reason: Option<String>,
     pub batch_id: Option<String>,
     pub sequence: i64,
+    pub first_sequence: Option<i64>,
+    pub last_sequence: Option<i64>,
+    pub client_batch_count: i32,
+    pub approx_events_bytes: usize,
     pub identifier: Option<String>,
     pub url: Option<String>,
     pub events: Vec<Value>,
@@ -35,6 +41,7 @@ pub struct ReplayChunkInput {
 
 pub struct ReplayFilterEventInput<'a> {
     pub project_id: Uuid,
+    pub storage_generation: i32,
     pub session_id: &'a str,
     pub window_id: &'a str,
     pub identifier: Option<&'a str>,
@@ -51,6 +58,7 @@ pub enum ReplayStorageError {
     Compression(std::io::Error),
     CompressionTimeout,
     CompressionTask(String),
+    Backpressure(String),
     Upload(String),
     Database(sqlx::Error),
 }
@@ -69,6 +77,9 @@ impl std::fmt::Display for ReplayStorageError {
             }
             ReplayStorageError::CompressionTask(error) => {
                 write!(f, "Replay compression task failed: {}", error)
+            }
+            ReplayStorageError::Backpressure(error) => {
+                write!(f, "Replay coalescer is overloaded: {}", error)
             }
             ReplayStorageError::Upload(error) => {
                 write!(f, "Failed to upload replay chunk: {}", error)
@@ -123,22 +134,28 @@ struct ReplayRouteMetadata {
 
 impl ReplayStorage {
     pub fn from_env() -> Result<Option<Self>, String> {
-        let bucket = std::env::var("REPLAY_S3_BUCKET").ok();
+        let bucket_prefix = std::env::var("REPLAY_S3_BUCKET_PREFIX")
+            .ok()
+            .or_else(|| std::env::var("REPLAY_S3_BUCKET").ok());
         let endpoint = std::env::var("REPLAY_S3_ENDPOINT").ok();
         let access_key = std::env::var("REPLAY_S3_ACCESS_KEY_ID").ok();
         let secret_key = std::env::var("REPLAY_S3_SECRET_ACCESS_KEY").ok();
 
-        if bucket.is_none() && endpoint.is_none() && access_key.is_none() && secret_key.is_none() {
+        if bucket_prefix.is_none()
+            && endpoint.is_none()
+            && access_key.is_none()
+            && secret_key.is_none()
+        {
             return Ok(None);
         }
 
-        let bucket = bucket.ok_or_else(|| "REPLAY_S3_BUCKET must be set".to_string())?;
+        let bucket_prefix =
+            bucket_prefix.ok_or_else(|| "REPLAY_S3_BUCKET_PREFIX must be set".to_string())?;
         let access_key =
             access_key.ok_or_else(|| "REPLAY_S3_ACCESS_KEY must be set".to_string())?;
         let secret_key =
             secret_key.ok_or_else(|| "REPLAY_S3_SECRET_KEY must be set".to_string())?;
         let region = std::env::var("REPLAY_S3_REGION").unwrap_or_else(|_| "us-east-1".to_string());
-        let prefix = std::env::var("REPLAY_S3_PREFIX").unwrap_or_else(|_| "replays".to_string());
 
         let mut config = S3ConfigBuilder::new()
             .region(Region::new(region))
@@ -157,42 +174,58 @@ impl ReplayStorage {
 
         Ok(Some(Self {
             client: Client::from_conf(config.build()),
-            bucket,
-            prefix: prefix.trim_matches('/').to_string(),
+            bucket_prefix: normalize_bucket_prefix(&bucket_prefix)?,
         }))
     }
 
     pub async fn store_replay_chunk(
         &self,
         pool: &sqlx::PgPool,
-        mut input: ReplayChunkInput,
+        input: &mut ReplayChunkInput,
     ) -> Result<(), ReplayStorageError> {
-        if replay_chunk_exists(pool, &input).await? {
+        if replay_chunk_exists(pool, input).await? {
             return Ok(());
         }
 
-        input.events.sort_by_key(replay_timestamp_ms);
+        if !replay_events_are_timestamp_ordered(&input.events) {
+            input.events.sort_by_key(replay_timestamp_ms);
+        }
         let snapshot_id = Uuid::new_v4();
         let first_event_timestamp_ms = replay_first_event_timestamp_ms(&input.events);
         let last_event_timestamp_ms = replay_last_event_timestamp_ms(&input.events);
         let has_full_snapshot = replay_has_full_snapshot(&input.events);
         let event_count = i32::try_from(input.events.len()).unwrap_or(i32::MAX);
+        let first_sequence = input.first_sequence.unwrap_or(input.sequence);
+        let last_sequence = input.last_sequence.unwrap_or(input.sequence);
+        let client_batch_count = input.client_batch_count.max(1);
         let route_metadata = replay_route_metadata(&input.events, input.url.as_deref());
-        let object_key = self.object_key(
-            input.project_id,
+        let object_key = replay_object_key(
+            input.storage_generation,
             &input.session_id,
             &input.window_id,
             input.batch_id.as_deref(),
             input.sequence,
             first_event_timestamp_ms.unwrap_or(0),
         );
-        let (compressed, uncompressed_bytes) = compress_replay_events(input.events).await?;
+        let (compressed, uncompressed_bytes) = compress_replay_events(input.events.clone()).await?;
         let compressed_bytes = i64::try_from(compressed.len()).unwrap_or(i64::MAX);
 
-        self.put_object(&object_key, compressed).await?;
+        let bucket = self.bucket_for_project(input.project_id);
+        self.put_object(&bucket, &object_key, compressed).await?;
 
         let result = async {
             let mut tx = pool.begin().await?;
+
+            if !replay_storage_generation_is_active(
+                &mut *tx,
+                input.project_id,
+                input.storage_generation,
+            )
+            .await?
+            {
+                tx.commit().await?;
+                return Ok::<(bool, bool), sqlx::Error>((false, false));
+            }
 
             let insert_result = sqlx::query(
                 r#"
@@ -206,9 +239,12 @@ impl ReplayStorage {
                     is_final,
                     batch_id,
                     sequence,
+                    first_sequence,
+                    last_sequence,
+                    client_batch_count,
                     identifier,
-                    s3_bucket,
                     s3_key,
+                    storage_generation,
                     content_encoding,
                     compressed_bytes,
                     uncompressed_bytes,
@@ -221,8 +257,11 @@ impl ReplayStorage {
                     routes,
                     route_count,
                     route_spans
-                ) VALUES (
-                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24
+                )
+                VALUES (
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+                    $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24,
+                    $25, $26, $27
                 )
                 ON CONFLICT DO NOTHING
                 "#,
@@ -236,9 +275,12 @@ impl ReplayStorage {
             .bind(input.is_final)
             .bind(&input.batch_id)
             .bind(input.sequence)
+            .bind(first_sequence)
+            .bind(last_sequence)
+            .bind(client_batch_count)
             .bind(&input.identifier)
-            .bind(&self.bucket)
             .bind(&object_key)
+            .bind(input.storage_generation)
             .bind(REPLAY_CONTENT_ENCODING)
             .bind(compressed_bytes)
             .bind(uncompressed_bytes)
@@ -255,8 +297,32 @@ impl ReplayStorage {
             .await?;
 
             if insert_result.rows_affected() == 0 {
+                let already_exists: bool = sqlx::query_scalar(
+                    r#"
+                    SELECT EXISTS (
+                        SELECT 1 FROM replay_snapshots
+                        WHERE project_id = $1
+                          AND session_id = $2
+                          AND window_id = $3
+                          AND storage_generation = $6
+                          AND (
+                              ($4::text IS NOT NULL AND batch_id = $4)
+                              OR ($4::text IS NULL AND sequence = $5)
+                              OR ($5 BETWEEN first_sequence AND last_sequence)
+                          )
+                    )
+                    "#,
+                )
+                .bind(input.project_id)
+                .bind(&input.session_id)
+                .bind(&input.window_id)
+                .bind(&input.batch_id)
+                .bind(input.sequence)
+                .bind(input.storage_generation)
+                .fetch_one(&mut *tx)
+                .await?;
                 tx.commit().await?;
-                return Ok::<bool, sqlx::Error>(false);
+                return Ok::<(bool, bool), sqlx::Error>((false, already_exists));
             }
 
             let latest_filter_metadata = sqlx::query_as::<_, ReplayFilterMetadata>(
@@ -426,15 +492,27 @@ impl ReplayStorage {
             .await?;
 
             tx.commit().await?;
-            Ok::<bool, sqlx::Error>(true)
+            Ok::<(bool, bool), sqlx::Error>((true, false))
         }
         .await;
 
         match result {
-            Ok(true) => {}
-            Ok(false) => {
+            Ok((true, _)) => {
+                record_replay_chunk_metrics(
+                    input.flush_reason.as_deref(),
+                    input.is_final,
+                    event_count,
+                    compressed_bytes,
+                    uncompressed_bytes,
+                );
+            }
+            Ok((false, true)) => {
                 // Idempotent retries use the same deterministic object key. Deleting it here
                 // would remove the object referenced by the transaction that won the race.
+                return Ok(());
+            }
+            Ok((false, false)) => {
+                self.delete_object(&bucket, &object_key).await?;
                 return Ok(());
             }
             Err(error) => {
@@ -454,6 +532,17 @@ impl ReplayStorage {
     ) -> Result<(), ReplayStorageError> {
         let mut tx = pool.begin().await?;
 
+        if !replay_storage_generation_is_active(
+            &mut *tx,
+            input.project_id,
+            input.storage_generation,
+        )
+        .await?
+        {
+            tx.commit().await?;
+            return Ok(());
+        }
+
         sqlx::query(
             r#"
             INSERT INTO replay_filter_events (
@@ -466,7 +555,8 @@ impl ReplayStorage {
                 os,
                 normalized_route,
                 custom
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             "#,
         )
         .bind(Uuid::new_v4())
@@ -553,30 +643,19 @@ impl ReplayStorage {
         Ok(())
     }
 
-    fn object_key(
-        &self,
-        project_id: Uuid,
-        session_id: &str,
-        window_id: &str,
-        batch_id: Option<&str>,
-        sequence: i64,
-        first_event_timestamp_ms: i64,
-    ) -> String {
-        let identity = batch_id
-            .map(|value| crate::utils::sha256_hex(&[value.as_bytes()]))
-            .unwrap_or_else(|| {
-                crate::utils::sha256_hex(&[window_id.as_bytes(), &sequence.to_be_bytes()])
-            });
-        format!(
-            "{}/{}/{}/{}-{}.json.zst",
-            self.prefix, project_id, session_id, first_event_timestamp_ms, identity
-        )
+    fn bucket_for_project(&self, project_id: Uuid) -> String {
+        format!("{}-{}", self.bucket_prefix, project_id)
     }
 
-    async fn put_object(&self, key: &str, body: Vec<u8>) -> Result<(), ReplayStorageError> {
+    async fn put_object(
+        &self,
+        bucket: &str,
+        key: &str,
+        body: Vec<u8>,
+    ) -> Result<(), ReplayStorageError> {
         self.client
             .put_object()
-            .bucket(&self.bucket)
+            .bucket(bucket)
             .key(key)
             .content_type("application/json")
             .content_encoding(REPLAY_CONTENT_ENCODING)
@@ -587,6 +666,137 @@ impl ReplayStorage {
 
         Ok(())
     }
+
+    async fn delete_object(&self, bucket: &str, key: &str) -> Result<(), ReplayStorageError> {
+        self.client
+            .delete_object()
+            .bucket(bucket)
+            .key(key)
+            .send()
+            .await
+            .map_err(|error| ReplayStorageError::Upload(error.to_string()))?;
+        Ok(())
+    }
+}
+
+/// Confirms the project's replay storage is active at `generation`, taking a
+/// `FOR SHARE` lock so the generation cannot change before the caller's
+/// transaction commits. This makes per-statement generation guards unnecessary.
+async fn replay_storage_generation_is_active<'e, E>(
+    executor: E,
+    project_id: Uuid,
+    generation: i32,
+) -> Result<bool, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let row = sqlx::query_scalar::<_, i32>(
+        r#"
+        SELECT replay_storage_generation
+        FROM project
+        WHERE id = $1
+          AND replay_storage_generation = $2
+          AND replay_storage_state = 'active'
+        FOR SHARE
+        "#,
+    )
+    .bind(project_id)
+    .bind(generation)
+    .fetch_optional(executor)
+    .await?;
+    Ok(row.is_some())
+}
+
+fn replay_object_key(
+    storage_generation: i32,
+    session_id: &str,
+    window_id: &str,
+    batch_id: Option<&str>,
+    sequence: i64,
+    first_event_timestamp_ms: i64,
+) -> String {
+    let identity = batch_id
+        .map(|value| crate::utils::sha256_hex(&[value.as_bytes()]))
+        .unwrap_or_else(|| {
+            crate::utils::sha256_hex(&[window_id.as_bytes(), &sequence.to_be_bytes()])
+        });
+    format!(
+        "{}/{}/{}/{}-{}.json.zst",
+        storage_generation, session_id, window_id, first_event_timestamp_ms, identity
+    )
+}
+
+/// Allowed `flush_reason` metric labels. Anything else is bucketed into
+/// `unknown` to keep metric cardinality bounded.
+const KNOWN_FLUSH_REASONS: &[&str] = &[
+    "interval",
+    "maxEvents",
+    "maxBytes",
+    "checkout",
+    "fullSnapshot",
+    "minLength",
+    "pageHidden",
+    "pageShow",
+    "unload",
+    "stop",
+    "sessionRotate",
+    "coalesced",
+    "manual",
+];
+
+fn normalize_flush_reason(value: Option<&str>) -> &str {
+    let value = value.unwrap_or("unknown");
+    if value.starts_with("coalesced:") {
+        "coalesced"
+    } else if KNOWN_FLUSH_REASONS.contains(&value) {
+        value
+    } else {
+        "unknown"
+    }
+}
+
+fn record_replay_chunk_metrics(
+    flush_reason: Option<&str>,
+    is_final: bool,
+    event_count: i32,
+    compressed_bytes: i64,
+    uncompressed_bytes: i64,
+) {
+    let labels = [
+        (
+            "flush_reason",
+            normalize_flush_reason(flush_reason).to_string(),
+        ),
+        ("is_final", is_final.to_string()),
+    ];
+    metrics::counter!("replay_chunks_committed_total", &labels).increment(1);
+    metrics::histogram!("replay_chunk_events", &labels).record(event_count as f64);
+    metrics::histogram!("replay_chunk_compressed_bytes", &labels).record(compressed_bytes as f64);
+    metrics::histogram!("replay_chunk_uncompressed_bytes", &labels)
+        .record(uncompressed_bytes as f64);
+}
+
+fn normalize_bucket_prefix(value: &str) -> Result<String, String> {
+    let normalized = value
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .map(|character| {
+            if character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-' {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .chars()
+        .take(26)
+        .collect::<String>();
+    if normalized.len() < 3 {
+        return Err("REPLAY_S3_BUCKET_PREFIX must contain at least 3 valid characters".to_string());
+    }
+    Ok(normalized)
 }
 
 struct CountingWriter<W> {
@@ -663,6 +873,19 @@ fn replay_first_event_timestamp_ms(events: &[Value]) -> Option<i64> {
 
 fn replay_last_event_timestamp_ms(events: &[Value]) -> Option<i64> {
     events.iter().filter_map(replay_timestamp_ms).max()
+}
+
+fn replay_events_are_timestamp_ordered(events: &[Value]) -> bool {
+    let mut previous = None;
+    for timestamp in events.iter().filter_map(replay_timestamp_ms) {
+        if let Some(previous) = previous
+            && timestamp < previous
+        {
+            return false;
+        }
+        previous = Some(timestamp);
+    }
+    true
 }
 
 fn replay_has_full_snapshot(events: &[Value]) -> bool {
@@ -766,6 +989,7 @@ async fn replay_chunk_exists(
                   AND session_id = $2
                   AND batch_id = $3
                   AND window_id = $4
+                  AND storage_generation = $5
             )
             "#,
         )
@@ -773,6 +997,7 @@ async fn replay_chunk_exists(
         .bind(&input.session_id)
         .bind(batch_id)
         .bind(&input.window_id)
+        .bind(input.storage_generation)
         .fetch_one(pool)
         .await?;
         if exists {
@@ -785,7 +1010,11 @@ async fn replay_chunk_exists(
         SELECT EXISTS (
             SELECT 1
             FROM replay_snapshots
-            WHERE project_id = $1 AND session_id = $2 AND window_id = $3 AND sequence = $4
+            WHERE project_id = $1
+              AND session_id = $2
+              AND window_id = $3
+              AND storage_generation = $5
+              AND (sequence = $4 OR $4 BETWEEN first_sequence AND last_sequence)
         )
         "#,
     )
@@ -793,6 +1022,7 @@ async fn replay_chunk_exists(
     .bind(&input.session_id)
     .bind(&input.window_id)
     .bind(input.sequence)
+    .bind(input.storage_generation)
     .fetch_one(pool)
     .await
 }
@@ -833,6 +1063,26 @@ fn normalize_path(path: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn normalizes_bucket_prefix_for_project_bucket_names() {
+        assert_eq!(
+            normalize_bucket_prefix(" FastStats_Replays ").unwrap(),
+            "faststats-replays"
+        );
+        assert_eq!(
+            normalize_bucket_prefix("abcdefghijklmnopqrstuvwxyz-more").unwrap(),
+            "abcdefghijklmnopqrstuvwxyz"
+        );
+        assert!(normalize_bucket_prefix("__").is_err());
+    }
+
+    #[test]
+    fn replay_object_keys_are_generation_scoped() {
+        let key = replay_object_key(7, "session-1", "window-1", Some("batch-1"), 3, 1234);
+        assert!(key.starts_with("7/session-1/window-1/1234-"));
+        assert!(key.ends_with(".json.zst"));
+    }
 
     #[test]
     fn replay_route_metadata_uses_fallback_route() {

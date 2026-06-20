@@ -70,6 +70,8 @@ pub(crate) struct ReplayRequest {
     #[serde(default)]
     pub(crate) is_final: bool,
     #[serde(default)]
+    pub(crate) flush_reason: Option<String>,
+    #[serde(default)]
     pub(crate) batch_id: Option<String>,
     pub(crate) sequence: u64,
     pub(crate) url: String,
@@ -88,6 +90,7 @@ pub async fn replay(
         Ok(b) => b,
         Err(e) => return error_response(StatusCode::BAD_REQUEST, &e),
     };
+    let replay_payload_bytes = body.len();
 
     let parsed: ReplayRequest = match serde_json::from_slice(&body) {
         Ok(p) => p,
@@ -107,6 +110,7 @@ pub async fn replay(
         view_id,
         session_start,
         is_final,
+        flush_reason,
         batch_id,
         sequence,
         url,
@@ -188,7 +192,14 @@ pub async fn replay(
         return error_response(StatusCode::BAD_REQUEST, "No valid events");
     }
 
-    let Some(replay_storage) = state.replay_storage.as_deref() else {
+    if !context.replay_storage_active {
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Replay storage is resetting",
+        );
+    }
+
+    let Some(replay_coalescer) = state.replay_coalescer.as_deref() else {
         return error_response(
             StatusCode::SERVICE_UNAVAILABLE,
             "Replay storage is not configured",
@@ -201,23 +212,26 @@ pub async fn replay(
         organization_id: context.organization_id.as_deref().map(Into::into),
     };
 
-    match replay_storage
-        .store_replay_chunk(
-            &state.pool,
-            crate::replay_storage::ReplayChunkInput {
-                project_id: context.project_id,
-                session_id: session_id.clone(),
-                window_id,
-                view_id,
-                session_start_ms: session_start.and_then(|value| i64::try_from(value).ok()),
-                is_final,
-                batch_id,
-                sequence,
-                identifier: Some(server_id.to_string()),
-                url: Some(url),
-                events,
-            },
-        )
+    match replay_coalescer
+        .ingest(crate::replay_storage::ReplayChunkInput {
+            project_id: context.project_id,
+            storage_generation: context.replay_storage_generation,
+            session_id: session_id.clone(),
+            window_id,
+            view_id,
+            session_start_ms: session_start.and_then(|value| i64::try_from(value).ok()),
+            is_final,
+            flush_reason,
+            batch_id,
+            sequence,
+            first_sequence: None,
+            last_sequence: None,
+            client_batch_count: 1,
+            approx_events_bytes: replay_payload_bytes,
+            identifier: Some(server_id.to_string()),
+            url: Some(url),
+            events,
+        })
         .await
     {
         Ok(()) => {

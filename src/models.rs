@@ -1,4 +1,5 @@
 use crate::batch_queue::BatchQueue;
+use crate::replay_coalescer::ReplayCoalescer;
 use crate::replay_storage::ReplayStorage;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -11,6 +12,7 @@ pub struct AppState {
     pub pool: PgPool,
     pub batch_queue: Arc<BatchQueue>,
     pub replay_storage: Option<Arc<ReplayStorage>>,
+    pub replay_coalescer: Option<Arc<ReplayCoalescer>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

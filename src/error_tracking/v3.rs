@@ -330,7 +330,6 @@ mod tests {
                 stack: Some(vec![
                     "#0 /var/www/app/src/UserService.php(42): App\\Service\\UserService->find('abc', 123)".to_string(),
                 ]),
-                cause: None,
             },
             count: None,
             session_id: None,
@@ -372,7 +371,6 @@ mod tests {
                 stack: Some(vec![
                     "#0 /var/www/app/src/UserService.php(42): App\\Service\\UserService->find('abc', 123)".to_string(),
                 ]),
-                cause: None,
             },
             count: None,
             session_id: None,
@@ -395,10 +393,12 @@ mod tests {
             &error,
         );
 
-        let enriched = super::enrich_with_mapping(None, row.clone(), ErrorLanguage::Php).await;
+        let group_hash = row.group_hash.clone();
+        let exact_hash = row.exact_hash.clone();
+        let enriched = super::enrich_with_mapping(None, row, ErrorLanguage::Php).await;
 
-        assert_eq!(enriched.group_hash, row.group_hash);
-        assert_eq!(enriched.exact_hash, row.exact_hash);
+        assert_eq!(enriched.group_hash, group_hash);
+        assert_eq!(enriched.exact_hash, exact_hash);
         assert_eq!(enriched.mapped_stacktrace, None);
         assert_eq!(enriched.mapping_used, None);
     }

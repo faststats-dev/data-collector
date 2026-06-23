@@ -1,17 +1,10 @@
-use super::hash_normalized;
+use super::{
+    HASHISH_RE, HEX_RE, NUMBER_RE, PHP_QUOTED_RE, URL_OR_PATH_RE, UUID_RE, WHITESPACE_RE,
+    hash_normalized, lowercase_trimmed, push_normalized_frames, replace_matches,
+};
 use regex::Regex;
 use std::sync::LazyLock;
 
-static UUID_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b")
-        .expect("valid uuid regex")
-});
-static HEX_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)\b0x[0-9a-f]+\b").expect("valid hex regex"));
-static HASHISH_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)\b[0-9a-f]{12,}\b").expect("valid hash regex"));
-static QUOTED_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#""[^"]*"|'[^']*'"#).expect("valid quoted regex"));
 static PHP_FRAME_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^#\d+\s+(?P<file>.+?\.php)\((?P<line>\d+)\):\s*(?P<call>.+)$")
         .expect("valid php frame regex")
@@ -20,13 +13,6 @@ static TRACE_TRAILER_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\{(?:main|closure)\}$").expect("valid php trace trailer regex"));
 static ARGS_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\([^)]*\)").expect("valid php args regex"));
-static NUMBER_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\b\d+(?:\.\d+)?\b").expect("valid number regex"));
-static URL_OR_PATH_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)(https?://)?([^/\s\)]+/)+([^/\s\):]+)").expect("valid path regex")
-});
-static WHITESPACE_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\s+").expect("valid whitespace regex"));
 
 pub fn group_hash(error_type: &str, stacktrace: &str) -> String {
     let normalized = normalize_for_grouping(error_type, stacktrace);
@@ -36,15 +22,10 @@ pub fn group_hash(error_type: &str, stacktrace: &str) -> String {
 fn normalize_for_grouping(error_type: &str, stacktrace: &str) -> String {
     let mut out = String::new();
     out.push_str(&normalize_piece(error_type));
-
-    for line in stacktrace.lines().take(80) {
+    push_normalized_frames(&mut out, stacktrace, 80, |line| {
         let normalized = normalize_piece(line);
-        if normalized.is_empty() || should_ignore_frame(&normalized) {
-            continue;
-        }
-        out.push('\n');
-        out.push_str(&normalized);
-    }
+        (!should_ignore_frame(&normalized)).then_some(normalized)
+    });
 
     out
 }
@@ -69,27 +50,27 @@ fn normalize_php_frame(input: &str) -> Option<String> {
 }
 
 fn normalize_call(call: &str) -> String {
-    let mut value = call.trim().to_ascii_lowercase();
-    value = QUOTED_RE.replace_all(&value, "<quoted>").into_owned();
-    value = UUID_RE.replace_all(&value, "<uuid>").into_owned();
-    value = HEX_RE.replace_all(&value, "<hex>").into_owned();
-    value = HASHISH_RE.replace_all(&value, "<hash>").into_owned();
-    value = ARGS_RE.replace_all(&value, "(<args>)").into_owned();
-    value = NUMBER_RE.replace_all(&value, "<num>").into_owned();
-    value = WHITESPACE_RE.replace_all(&value, " ").into_owned();
-    value.trim().to_string()
+    let mut value = lowercase_trimmed(call);
+    replace_matches(&mut value, &PHP_QUOTED_RE, "<quoted>");
+    replace_matches(&mut value, &UUID_RE, "<uuid>");
+    replace_matches(&mut value, &HEX_RE, "<hex>");
+    replace_matches(&mut value, &HASHISH_RE, "<hash>");
+    replace_matches(&mut value, &ARGS_RE, "(<args>)");
+    replace_matches(&mut value, &NUMBER_RE, "<num>");
+    replace_matches(&mut value, &WHITESPACE_RE, " ");
+    value.into_owned()
 }
 
 fn normalize_common(input: &str) -> String {
-    let mut value = input.trim().to_ascii_lowercase();
-    value = UUID_RE.replace_all(&value, "<uuid>").into_owned();
-    value = HEX_RE.replace_all(&value, "<hex>").into_owned();
-    value = HASHISH_RE.replace_all(&value, "<hash>").into_owned();
-    value = QUOTED_RE.replace_all(&value, "<quoted>").into_owned();
-    value = URL_OR_PATH_RE.replace_all(&value, "$3").into_owned();
-    value = NUMBER_RE.replace_all(&value, "<num>").into_owned();
-    value = WHITESPACE_RE.replace_all(&value, " ").into_owned();
-    value.trim().to_string()
+    let mut value = lowercase_trimmed(input);
+    replace_matches(&mut value, &UUID_RE, "<uuid>");
+    replace_matches(&mut value, &HEX_RE, "<hex>");
+    replace_matches(&mut value, &HASHISH_RE, "<hash>");
+    replace_matches(&mut value, &PHP_QUOTED_RE, "<quoted>");
+    replace_matches(&mut value, &URL_OR_PATH_RE, "$3");
+    replace_matches(&mut value, &NUMBER_RE, "<num>");
+    replace_matches(&mut value, &WHITESPACE_RE, " ");
+    value.into_owned()
 }
 
 fn basename(path: &str) -> &str {

@@ -1,19 +1,10 @@
-use super::hash_normalized;
+use super::{
+    HASHISH_RE, HEX_RE, NUMBER_RE, QUOTED_RE, UUID_RE, WHITESPACE_RE, hash_normalized,
+    lowercase_trimmed, push_normalized_frames, replace_matches,
+};
 use regex::Regex;
 use std::sync::LazyLock;
 
-static UUID_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b")
-        .expect("valid uuid regex")
-});
-static HEX_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)\b0x[0-9a-f]+\b").expect("valid hex regex"));
-static QUOTED_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#""[^"]*"|'[^']*'|`[^`]*`"#).expect("valid quoted regex"));
-static HASHISH_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)\b[0-9a-f]{12,}\b").expect("valid hash regex"));
-static NUMBER_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\b\d+(?:\.\d+)?\b").expect("valid number regex"));
 static JAR_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b[A-Za-z0-9._+-]+(?:-\d+(?:\.\d+)*(?:[-+][A-Za-z0-9._-]+)?)?\.jar\b")
         .expect("valid jar regex")
@@ -23,8 +14,6 @@ static JAVA_FRAME_LINE_RE: LazyLock<Regex> =
 static LAMBDA_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\$\$Lambda(?:\$[0-9]+)?(?:/[0-9a-fx]+)?").expect("valid lambda regex")
 });
-static WHITESPACE_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\s+").expect("valid whitespace regex"));
 const JAVA_INTERNAL_FRAME_PREFIXES: &[&str] = &["java.", "javax.", "sun.", "com.sun.", "jdk."];
 
 pub fn group_hash(error_type: &str, stacktrace: &str) -> String {
@@ -35,31 +24,26 @@ pub fn group_hash(error_type: &str, stacktrace: &str) -> String {
 fn normalize_for_grouping(error_type: &str, stacktrace: &str) -> String {
     let mut out = String::new();
     out.push_str(&normalize_piece(error_type));
-
-    for line in stacktrace.lines().take(80) {
+    push_normalized_frames(&mut out, stacktrace, 80, |line| {
         let normalized = normalize_piece(line);
-        if normalized.is_empty() || should_ignore_frame(&normalized) {
-            continue;
-        }
-        out.push('\n');
-        out.push_str(&normalized);
-    }
+        (!should_ignore_frame(&normalized)).then_some(normalized)
+    });
 
     out
 }
 
 fn normalize_piece(input: &str) -> String {
-    let mut value = input.trim().to_ascii_lowercase();
-    value = UUID_RE.replace_all(&value, "<uuid>").into_owned();
-    value = HEX_RE.replace_all(&value, "<hex>").into_owned();
-    value = HASHISH_RE.replace_all(&value, "<hash>").into_owned();
-    value = QUOTED_RE.replace_all(&value, "<quoted>").into_owned();
-    value = JAR_RE.replace_all(&value, "<jar>").into_owned();
-    value = JAVA_FRAME_LINE_RE.replace_all(&value, "($1)").into_owned();
-    value = LAMBDA_RE.replace_all(&value, "$$Lambda").into_owned();
-    value = NUMBER_RE.replace_all(&value, "<num>").into_owned();
-    value = WHITESPACE_RE.replace_all(&value, " ").into_owned();
-    value.trim().to_string()
+    let mut value = lowercase_trimmed(input);
+    replace_matches(&mut value, &UUID_RE, "<uuid>");
+    replace_matches(&mut value, &HEX_RE, "<hex>");
+    replace_matches(&mut value, &HASHISH_RE, "<hash>");
+    replace_matches(&mut value, &QUOTED_RE, "<quoted>");
+    replace_matches(&mut value, &JAR_RE, "<jar>");
+    replace_matches(&mut value, &JAVA_FRAME_LINE_RE, "($1)");
+    replace_matches(&mut value, &LAMBDA_RE, "$$Lambda");
+    replace_matches(&mut value, &NUMBER_RE, "<num>");
+    replace_matches(&mut value, &WHITESPACE_RE, " ");
+    value.into_owned()
 }
 
 fn should_ignore_frame(line: &str) -> bool {

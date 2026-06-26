@@ -26,7 +26,7 @@ fn debounce_key(visitor_id: Uuid, url: &str) -> [u8; 32] {
 }
 
 fn should_debounce_event(event: Option<&str>) -> bool {
-    matches!(event, Some("pageview" | "pageleave"))
+    matches!(event, Some("pageview" | "page_leave"))
 }
 
 pub fn should_debounce(visitor_id: Uuid, url: &str, event: Option<&str>) -> bool {
@@ -115,12 +115,12 @@ mod tests {
     }
 
     #[test]
-    fn test_pageleave_is_debounced() {
+    fn test_page_leave_is_debounced() {
         let unique_id = random_uuid();
         let url = "https://example.com/page4";
 
-        assert!(!should_debounce(unique_id, url, Some("pageleave")));
-        assert!(should_debounce(unique_id, url, Some("pageleave")));
+        assert!(!should_debounce(unique_id, url, Some("page_leave")));
+        assert!(should_debounce(unique_id, url, Some("page_leave")));
     }
 
     #[test]

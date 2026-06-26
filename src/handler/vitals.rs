@@ -1,6 +1,7 @@
 use super::{
     EncodingQuery, check_ip_allowed, decompress_body, error_response, get_authorization,
-    get_client_ip, load_project_context, queue_error_response,
+    get_client_ip, get_request_origin, load_project_context, queue_error_response,
+    validate_hostname,
 };
 use crate::batch_queue::{FailedRequest, QueuedEvent, RequestType, TrackingContext};
 use crate::models::AppState;
@@ -73,10 +74,14 @@ pub async fn vitals(
         None => return error_response(StatusCode::UNAUTHORIZED, "Unauthorized"),
     };
 
+    let request_origin = get_request_origin(&headers);
+
     let ctx = match load_project_context(&state.pool, &token).await {
         Ok(ctx) => ctx,
         Err(err) => {
             if err.0 == StatusCode::INTERNAL_SERVER_ERROR {
+                let client_ip = get_client_ip(&headers);
+                let user_agent = headers.get("User-Agent").and_then(|v| v.to_str().ok());
                 let failed = FailedRequest {
                     request_type: RequestType::Vitals,
                     token,
@@ -85,9 +90,13 @@ pub async fn vitals(
                         .get("CF-IPCountry")
                         .and_then(|v| v.to_str().ok())
                         .map(String::from),
-                    client_ip: None,
-                    user_agent: None,
-                    origin: None,
+                    client_ip: if client_ip.is_empty() {
+                        None
+                    } else {
+                        Some(client_ip.to_owned())
+                    },
+                    user_agent: user_agent.map(str::to_owned),
+                    origin: request_origin,
                 };
 
                 if let Err(e) = state.batch_queue.backup_store.backup_request(&failed).await {
@@ -102,6 +111,10 @@ pub async fn vitals(
             return err;
         }
     };
+
+    if !validate_hostname(&ctx.allowed_hostnames, request_origin.as_deref()) {
+        return error_response(StatusCode::FORBIDDEN, "Origin not allowed");
+    }
 
     let client_ip = get_client_ip(&headers);
     if let Err(msg) = check_ip_allowed(&ctx.ip_rules, client_ip) {

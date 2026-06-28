@@ -12,7 +12,7 @@ regex = "1.12.2"
 serde = "1.0.228"
 serde_json = "1.0.145"
 sha2 = "0.11"
-aes-gcm = "0.10.3"
+aes-gcm = "0.11.0"
 hex = "0.4.3"
 sourcemap = "9.3.2"
 sqlx = { version = "0.8.6", features = ["runtime-tokio-rustls", "postgres", "sqlite", "macros", "uuid", "time"] }

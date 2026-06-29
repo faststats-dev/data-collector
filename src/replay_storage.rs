@@ -3,6 +3,7 @@ use aws_sdk_s3::config::{Builder as S3ConfigBuilder, Credentials, Region};
 use aws_sdk_s3::primitives::ByteStream;
 use serde::Serialize;
 use serde_json::Value;
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::time::Duration;
@@ -152,9 +153,9 @@ impl ReplayStorage {
         let bucket_prefix =
             bucket_prefix.ok_or_else(|| "REPLAY_S3_BUCKET_PREFIX must be set".to_string())?;
         let access_key =
-            access_key.ok_or_else(|| "REPLAY_S3_ACCESS_KEY must be set".to_string())?;
+            access_key.ok_or_else(|| "REPLAY_S3_ACCESS_KEY_ID must be set".to_string())?;
         let secret_key =
-            secret_key.ok_or_else(|| "REPLAY_S3_SECRET_KEY must be set".to_string())?;
+            secret_key.ok_or_else(|| "REPLAY_S3_SECRET_ACCESS_KEY must be set".to_string())?;
         let region = std::env::var("REPLAY_S3_REGION").unwrap_or_else(|_| "us-east-1".to_string());
 
         let mut config = S3ConfigBuilder::new()
@@ -187,8 +188,8 @@ impl ReplayStorage {
             return Ok(());
         }
 
-        if !replay_events_are_timestamp_ordered(&input.events) {
-            input.events.sort_by_key(replay_timestamp_ms);
+        if !replay_events_are_ordered(&input.events) {
+            input.events.sort_by(replay_event_order_cmp);
         }
         let snapshot_id = Uuid::new_v4();
         let first_event_timestamp_ms = replay_first_event_timestamp_ms(&input.events);
@@ -867,6 +868,22 @@ fn replay_timestamp_ms(event: &Value) -> Option<i64> {
     }
 }
 
+fn replay_sequential_id(event: &Value) -> Option<i64> {
+    let value = event.get("_faststatsSeqId")?;
+    if let Some(sequence) = value.as_i64() {
+        return Some(sequence);
+    }
+    if let Some(sequence) = value.as_u64() {
+        return i64::try_from(sequence).ok();
+    }
+    let sequence = value.as_f64()?;
+    if sequence.is_finite() && sequence >= 0.0 {
+        Some(sequence.round() as i64)
+    } else {
+        None
+    }
+}
+
 fn replay_first_event_timestamp_ms(events: &[Value]) -> Option<i64> {
     events.iter().filter_map(replay_timestamp_ms).min()
 }
@@ -875,15 +892,17 @@ fn replay_last_event_timestamp_ms(events: &[Value]) -> Option<i64> {
     events.iter().filter_map(replay_timestamp_ms).max()
 }
 
-fn replay_events_are_timestamp_ordered(events: &[Value]) -> bool {
-    let mut previous = None;
-    for timestamp in events.iter().filter_map(replay_timestamp_ms) {
-        if let Some(previous) = previous
-            && timestamp < previous
-        {
+fn replay_event_order_cmp(left: &Value, right: &Value) -> Ordering {
+    replay_timestamp_ms(left)
+        .cmp(&replay_timestamp_ms(right))
+        .then_with(|| replay_sequential_id(left).cmp(&replay_sequential_id(right)))
+}
+
+fn replay_events_are_ordered(events: &[Value]) -> bool {
+    for pair in events.windows(2) {
+        if replay_event_order_cmp(&pair[0], &pair[1]).is_gt() {
             return false;
         }
-        previous = Some(timestamp);
     }
     true
 }
@@ -1082,6 +1101,23 @@ mod tests {
         let key = replay_object_key(7, "session-1", "window-1", Some("batch-1"), 3, 1234);
         assert!(key.starts_with("7/session-1/window-1/1234-"));
         assert!(key.ends_with(".json.zst"));
+    }
+
+    #[test]
+    fn replay_event_order_uses_sequential_id_for_matching_timestamps() {
+        let mut events = vec![
+            json!({ "type": 3, "timestamp": 1000, "_faststatsSeqId": 2, "data": {} }),
+            json!({ "type": 3, "timestamp": 1000, "_faststatsSeqId": 1, "data": {} }),
+            json!({ "type": 3, "timestamp": 1001, "_faststatsSeqId": 3, "data": {} }),
+        ];
+
+        assert!(!replay_events_are_ordered(&events));
+        events.sort_by(replay_event_order_cmp);
+
+        assert_eq!(replay_sequential_id(&events[0]), Some(1));
+        assert_eq!(replay_sequential_id(&events[1]), Some(2));
+        assert_eq!(replay_sequential_id(&events[2]), Some(3));
+        assert!(replay_events_are_ordered(&events));
     }
 
     #[test]

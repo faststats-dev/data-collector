@@ -1,9 +1,10 @@
 use super::{
-    EncodingQuery, check_ip_allowed, decompress_body, error_response, get_client_ip,
-    load_project_context, success_response,
+    EncodingQuery, ProjectContext, check_ip_allowed, decompress_body, error_response,
+    get_client_ip, load_project_context, success_response,
 };
 use crate::batch_queue::{FailedRequest, RequestType, TrackingContext};
 use crate::models::AppState;
+use crate::replay_storage::ReplayChunkInput;
 use axum::body::Bytes;
 use axum::extract::{Query, State};
 use axum::http::HeaderMap;
@@ -80,6 +81,92 @@ pub(crate) struct ReplayRequest {
     pub(crate) events: Vec<Value>,
 }
 
+pub(crate) struct BuiltReplayChunk {
+    pub(crate) session_id: String,
+    pub(crate) tracking: TrackingContext,
+    pub(crate) input: ReplayChunkInput,
+    pub(crate) dropped_event_count: usize,
+}
+
+pub(crate) fn build_replay_chunk_input(
+    context: &ProjectContext,
+    token: &str,
+    parsed: ReplayRequest,
+    replay_payload_bytes: usize,
+    client_ip: &str,
+    user_agent: &str,
+) -> Result<BuiltReplayChunk, String> {
+    let ReplayRequest {
+        session_id,
+        window_id,
+        view_id,
+        session_start,
+        is_final,
+        flush_reason,
+        batch_id,
+        sequence,
+        url,
+        identifier,
+        mut events,
+        ..
+    } = parsed;
+    let window_id = normalize_window_id(window_id, &session_id);
+    let sequence =
+        i64::try_from(sequence).map_err(|_| "sequence exceeds bigint range".to_string())?;
+
+    let server_id = match context.cookieless_mode {
+        Some(true) => crate::utils::cookieless_server_id(client_ip, user_agent, context.project_id),
+        Some(false) => {
+            let identifier = identifier.ok_or_else(|| "identifier is required".to_string())?;
+            crate::utils::hash_server_id(identifier, context.project_id)
+        }
+        None => identifier
+            .map(|identifier| crate::utils::hash_server_id(identifier, context.project_id))
+            .unwrap_or_else(|| {
+                crate::utils::cookieless_server_id(client_ip, user_agent, context.project_id)
+            }),
+    };
+
+    let received_event_count = events.len();
+    events.retain(is_valid_rrweb_event);
+    let dropped_event_count = received_event_count - events.len();
+
+    if events.is_empty() {
+        return Err("No valid events".to_string());
+    }
+
+    let tracking = TrackingContext {
+        owner_id: context.billing_customer_id.as_str().into(),
+        token: token.into(),
+        organization_id: context.organization_id.as_deref().map(Into::into),
+    };
+
+    Ok(BuiltReplayChunk {
+        session_id: session_id.clone(),
+        tracking,
+        dropped_event_count,
+        input: ReplayChunkInput {
+            project_id: context.project_id,
+            storage_generation: context.replay_storage_generation,
+            session_id,
+            window_id,
+            view_id,
+            session_start_ms: session_start.and_then(|value| i64::try_from(value).ok()),
+            is_final,
+            flush_reason,
+            batch_id,
+            sequence,
+            first_sequence: None,
+            last_sequence: None,
+            client_batch_count: 1,
+            approx_events_bytes: replay_payload_bytes,
+            identifier: Some(server_id.to_string()),
+            url: Some(url),
+            events,
+        },
+    })
+}
+
 pub async fn replay(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -103,25 +190,7 @@ pub async fn replay(
             return error_response(StatusCode::BAD_REQUEST, &format!("Invalid JSON: {}", e));
         }
     };
-    let ReplayRequest {
-        token,
-        session_id,
-        window_id,
-        view_id,
-        session_start,
-        is_final,
-        flush_reason,
-        batch_id,
-        sequence,
-        url,
-        identifier,
-        mut events,
-    } = parsed;
-    let window_id = normalize_window_id(window_id, &session_id);
-    let sequence = match i64::try_from(sequence) {
-        Ok(value) => value,
-        Err(_) => return error_response(StatusCode::BAD_REQUEST, "sequence exceeds bigint range"),
-    };
+    let token = parsed.token.clone();
 
     let context = match load_project_context(&state.pool, &token).await {
         Ok(ctx) => ctx,
@@ -169,29 +238,6 @@ pub async fn replay(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    let server_id = match context.cookieless_mode {
-        Some(true) => crate::utils::cookieless_server_id(client_ip, user_agent, context.project_id),
-        Some(false) => {
-            let Some(identifier) = identifier else {
-                return error_response(StatusCode::BAD_REQUEST, "identifier is required");
-            };
-            crate::utils::hash_server_id(identifier, context.project_id)
-        }
-        None => identifier
-            .map(|identifier| crate::utils::hash_server_id(identifier, context.project_id))
-            .unwrap_or_else(|| {
-                crate::utils::cookieless_server_id(client_ip, user_agent, context.project_id)
-            }),
-    };
-
-    let received_event_count = events.len();
-    events.retain(is_valid_rrweb_event);
-    let dropped_event_count = received_event_count - events.len();
-
-    if events.is_empty() {
-        return error_response(StatusCode::BAD_REQUEST, "No valid events");
-    }
-
     if !context.replay_storage_active {
         return error_response(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -206,38 +252,26 @@ pub async fn replay(
         );
     };
 
-    let tracking_ctx = TrackingContext {
-        owner_id: context.billing_customer_id.as_str().into(),
-        token: token.as_str().into(),
-        organization_id: context.organization_id.as_deref().map(Into::into),
+    let built = match build_replay_chunk_input(
+        &context,
+        &token,
+        parsed,
+        replay_payload_bytes,
+        client_ip,
+        user_agent,
+    ) {
+        Ok(value) => value,
+        Err(message) if message == "identifier is required" || message == "No valid events" => {
+            return error_response(StatusCode::BAD_REQUEST, &message);
+        }
+        Err(message) => return error_response(StatusCode::BAD_REQUEST, &message),
     };
 
-    match replay_coalescer
-        .ingest(crate::replay_storage::ReplayChunkInput {
-            project_id: context.project_id,
-            storage_generation: context.replay_storage_generation,
-            session_id: session_id.clone(),
-            window_id,
-            view_id,
-            session_start_ms: session_start.and_then(|value| i64::try_from(value).ok()),
-            is_final,
-            flush_reason,
-            batch_id,
-            sequence,
-            first_sequence: None,
-            last_sequence: None,
-            client_batch_count: 1,
-            approx_events_bytes: replay_payload_bytes,
-            identifier: Some(server_id.to_string()),
-            url: Some(url),
-            events,
-        })
-        .await
-    {
+    match replay_coalescer.ingest(built.input).await {
         Ok(()) => {
             state
                 .batch_queue
-                .track_replay_usage(&session_id, tracking_ctx);
+                .track_replay_usage(&built.session_id, built.tracking);
         }
         Err(error) => {
             error!("Failed to store replay: {}", error);
@@ -278,10 +312,13 @@ pub async fn replay(
     }
 
     let mut warnings = HashMap::new();
-    if dropped_event_count > 0 {
+    if built.dropped_event_count > 0 {
         warnings.insert(
             "droppedEvents".to_string(),
-            format!("{} invalid replay events were dropped", dropped_event_count),
+            format!(
+                "{} invalid replay events were dropped",
+                built.dropped_event_count
+            ),
         );
     }
     success_response(warnings)

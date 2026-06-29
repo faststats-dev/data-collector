@@ -188,6 +188,8 @@ impl ReplayCoalescerActor {
         &mut self,
         buffers: Vec<ReplayBuffer>,
     ) -> Result<(), ReplayStorageError> {
+        let mut first_error = None;
+
         for mut buffer in buffers {
             if buffer.chunks.is_empty() {
                 continue;
@@ -207,7 +209,10 @@ impl ReplayCoalescerActor {
                 self.buffers
                     .entry(buffer_key)
                     .or_insert_with(|| ReplayBuffer::from_input(bundle));
-                return Err(error);
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+                continue;
             }
 
             metrics::counter!("replay_coalescer_bundles_flushed_total").increment(1);
@@ -217,7 +222,11 @@ impl ReplayCoalescerActor {
                 .record(bundle.approx_events_bytes as f64);
         }
 
-        Ok(())
+        if let Some(error) = first_error {
+            Err(error)
+        } else {
+            Ok(())
+        }
     }
 
     fn oldest_key(&self) -> Option<ReplayCoalescerKey> {

@@ -963,22 +963,7 @@ async fn process_replay_request(
 
     let parsed: ReplayRequest =
         serde_json::from_slice(&request.body).map_err(|_| "Invalid JSON".to_string())?;
-    let ReplayRequest {
-        token,
-        session_id,
-        window_id,
-        view_id,
-        session_start,
-        is_final,
-        flush_reason,
-        batch_id,
-        sequence,
-        url,
-        identifier,
-        mut events,
-    } = parsed;
-    let window_id = crate::handler::replay::normalize_window_id(window_id, &session_id);
-    let sequence = i64::try_from(sequence).map_err(|_| "sequence exceeds bigint range")?;
+    let token = parsed.token.clone();
 
     let ctx = load_project_context(pool, &token)
         .await
@@ -989,61 +974,22 @@ async fn process_replay_request(
     if !ctx.replay_storage_active {
         return Err("Replay storage is resetting".to_string());
     }
-    let server_id = match ctx.cookieless_mode {
-        Some(true) => {
-            let ip = request.client_ip.as_deref().unwrap_or("");
-            let ua = request.user_agent.as_deref().unwrap_or("");
-            crate::utils::cookieless_server_id(ip, ua, ctx.project_id)
-        }
-        Some(false) => {
-            let identifier = identifier.ok_or_else(|| "identifier is required".to_string())?;
-            crate::utils::hash_server_id(identifier, ctx.project_id)
-        }
-        None => match identifier {
-            Some(identifier) => crate::utils::hash_server_id(identifier, ctx.project_id),
-            None => {
-                let ip = request.client_ip.as_deref().unwrap_or("");
-                let ua = request.user_agent.as_deref().unwrap_or("");
-                crate::utils::cookieless_server_id(ip, ua, ctx.project_id)
-            }
-        },
-    };
 
-    let tracking_ctx = TrackingContext {
-        owner_id: ctx.billing_customer_id.as_str().into(),
-        token: token.as_str().into(),
-        organization_id: ctx.organization_id.as_deref().map(Into::into),
-    };
-
-    events.retain(crate::handler::replay::is_valid_rrweb_event);
-    if events.is_empty() {
-        return Err("No valid events".to_string());
-    }
+    let built = crate::handler::replay::build_replay_chunk_input(
+        &ctx,
+        &token,
+        parsed,
+        request.body.len(),
+        request.client_ip.as_deref().unwrap_or(""),
+        request.user_agent.as_deref().unwrap_or(""),
+    )?;
 
     replay_coalescer
-        .ingest(crate::replay_storage::ReplayChunkInput {
-            project_id: ctx.project_id,
-            storage_generation: ctx.replay_storage_generation,
-            session_id: session_id.clone(),
-            window_id,
-            view_id,
-            session_start_ms: session_start.and_then(|value| i64::try_from(value).ok()),
-            is_final,
-            flush_reason,
-            batch_id,
-            sequence,
-            first_sequence: None,
-            last_sequence: None,
-            client_batch_count: 1,
-            approx_events_bytes: request.body.len(),
-            identifier: Some(server_id.to_string()),
-            url: Some(url),
-            events,
-        })
+        .ingest(built.input)
         .await
         .map_err(|error| error.to_string())?;
 
-    batch_queue.track_replay_usage(&session_id, tracking_ctx);
+    batch_queue.track_replay_usage(&built.session_id, built.tracking);
 
     Ok(())
 }

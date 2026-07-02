@@ -6,6 +6,7 @@ use super::{
 use crate::batch_queue::{FailedRequest, QueuedEvent, RequestType, TrackingContext};
 use crate::models::AppState;
 use crate::tinybird::WebVitalRow;
+use crate::ua_parser::UserAgentInfo;
 use axum::Json;
 use axum::body::Bytes;
 use axum::extract::{Query, State};
@@ -16,6 +17,10 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use tracing::{error, warn};
 use uuid::Uuid;
+
+const UNKNOWN_DIMENSION: &str = "Unknown";
+const MAX_WEB_VITAL_MS: f64 = 86_400_000.0;
+const MAX_CLS: f64 = 100.0;
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct WebVitalsMetadata {
@@ -45,6 +50,50 @@ pub(crate) struct WebVitalRequest {
     pub(crate) session_id: Option<String>,
     #[serde(default)]
     pub(crate) window_id: Option<String>,
+}
+
+struct WebVitalDimensions<'a> {
+    device: &'a str,
+    os: &'a str,
+    os_version: Option<String>,
+    browser: &'a str,
+    browser_version: Option<String>,
+    url: &'a str,
+}
+
+fn non_empty_owned(value: &str) -> Option<String> {
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_owned())
+    }
+}
+
+fn resolve_dimensions<'a>(
+    metadata: Option<&'a WebVitalsMetadata>,
+    ua_info: Option<&'a UserAgentInfo>,
+) -> WebVitalDimensions<'a> {
+    let device = metadata
+        .and_then(|m| m.device.as_deref())
+        .or_else(|| ua_info.map(|info| info.device))
+        .unwrap_or(UNKNOWN_DIMENSION);
+    let os = metadata
+        .and_then(|m| m.os.as_deref())
+        .or_else(|| ua_info.map(|info| info.os.as_str()))
+        .unwrap_or(UNKNOWN_DIMENSION);
+    let browser = metadata
+        .and_then(|m| m.browser.as_deref())
+        .or_else(|| ua_info.map(|info| info.browser.as_str()))
+        .unwrap_or(UNKNOWN_DIMENSION);
+
+    WebVitalDimensions {
+        device,
+        os,
+        os_version: ua_info.and_then(|info| non_empty_owned(&info.os_version)),
+        browser,
+        browser_version: ua_info.and_then(|info| non_empty_owned(&info.browser_version)),
+        url: metadata.and_then(|m| m.url.as_deref()).unwrap_or(""),
+    }
 }
 
 pub async fn vitals(
@@ -140,27 +189,15 @@ pub async fn vitals(
         .get("User-Agent")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let ua_info = match crate::ua_parser::parse(user_agent) {
-        Some(info) => info,
-        None => return (StatusCode::OK, Json(json!({ "status": "success" }))),
-    };
-
-    let metadata = metadata.as_ref();
-    let device = metadata
-        .and_then(|m| m.device.as_deref())
-        .unwrap_or(ua_info.device);
-    let os = metadata
-        .and_then(|m| m.os.as_deref())
-        .unwrap_or(ua_info.os.as_str());
-    let browser = metadata
-        .and_then(|m| m.browser.as_deref())
-        .unwrap_or(ua_info.browser.as_str());
-    let browser_version = ua_info.browser_version.as_str();
-    let os_version = ua_info.os_version.as_str();
-    let url = metadata.and_then(|m| m.url.as_deref()).unwrap_or("");
+    let ua_info = crate::ua_parser::parse(user_agent);
+    let dimensions = resolve_dimensions(metadata.as_ref(), ua_info.as_ref());
     let now = chrono::Utc::now();
 
     for vital in &vitals {
+        if !is_valid_web_vital(&vital.metric, vital.value) {
+            return error_response(StatusCode::BAD_REQUEST, "Invalid web vital metric");
+        }
+
         let attributes = vital
             .attributes
             .as_ref()
@@ -172,21 +209,13 @@ pub async fn vitals(
             project_id: ctx.project_id,
             metric: vital.metric.clone(),
             value: vital.value,
-            device: Some(device.to_owned()),
+            device: Some(dimensions.device.to_owned()),
             country: country.clone(),
-            os: Some(os.to_owned()),
-            os_version: if os_version.is_empty() {
-                None
-            } else {
-                Some(os_version.to_owned())
-            },
-            browser: Some(browser.to_owned()),
-            browser_version: if browser_version.is_empty() {
-                None
-            } else {
-                Some(browser_version.to_owned())
-            },
-            url: url.to_owned(),
+            os: Some(dimensions.os.to_owned()),
+            os_version: dimensions.os_version.clone(),
+            browser: Some(dimensions.browser.to_owned()),
+            browser_version: dimensions.browser_version.clone(),
+            url: dimensions.url.to_owned(),
             attributes,
             session_id: session_id.clone(),
             created_at: now,
@@ -234,6 +263,18 @@ pub(crate) fn is_poor_web_vital(metric: &str, value: f64) -> bool {
     }
 }
 
+pub(crate) fn is_valid_web_vital(metric: &str, value: f64) -> bool {
+    if !value.is_finite() || value < 0.0 {
+        return false;
+    }
+
+    match metric {
+        "CLS" => value <= MAX_CLS,
+        "LCP" | "FCP" | "INP" | "TTFB" | "FID" => value <= MAX_WEB_VITAL_MS,
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::WebVitalRequest;
@@ -252,5 +293,15 @@ mod tests {
         assert_eq!(req.token.as_deref(), Some("site_test"));
         assert_eq!(req.session_id.as_deref(), Some("session-1"));
         assert_eq!(req.vitals.len(), 1);
+    }
+
+    #[test]
+    fn validates_known_finite_web_vitals() {
+        assert!(super::is_valid_web_vital("LCP", 2500.0));
+        assert!(super::is_valid_web_vital("CLS", 0.12));
+        assert!(!super::is_valid_web_vital("CUSTOM", 1.0));
+        assert!(!super::is_valid_web_vital("INP", f64::NAN));
+        assert!(!super::is_valid_web_vital("TTFB", -1.0));
+        assert!(!super::is_valid_web_vital("CLS", 101.0));
     }
 }

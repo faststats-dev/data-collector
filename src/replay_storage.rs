@@ -184,10 +184,6 @@ impl ReplayStorage {
         pool: &sqlx::PgPool,
         input: &mut ReplayChunkInput,
     ) -> Result<(), ReplayStorageError> {
-        if replay_chunk_exists(pool, input).await? {
-            return Ok(());
-        }
-
         if !replay_events_are_ordered(&input.events) {
             input.events.sort_by(replay_event_order_cmp);
         }
@@ -992,58 +988,6 @@ fn replay_event_route(event: &Value) -> Option<String> {
         .or_else(|| data.get("url"))
         .and_then(Value::as_str)
         .map(|url| normalize_route(Some(url)))
-}
-
-async fn replay_chunk_exists(
-    pool: &sqlx::PgPool,
-    input: &ReplayChunkInput,
-) -> Result<bool, sqlx::Error> {
-    if let Some(batch_id) = input.batch_id.as_deref() {
-        let exists: bool = sqlx::query_scalar(
-            r#"
-            SELECT EXISTS (
-                SELECT 1
-                FROM replay_snapshots
-                WHERE project_id = $1
-                  AND session_id = $2
-                  AND batch_id = $3
-                  AND window_id = $4
-                  AND storage_generation = $5
-            )
-            "#,
-        )
-        .bind(input.project_id)
-        .bind(&input.session_id)
-        .bind(batch_id)
-        .bind(&input.window_id)
-        .bind(input.storage_generation)
-        .fetch_one(pool)
-        .await?;
-        if exists {
-            return Ok(true);
-        }
-    }
-
-    sqlx::query_scalar(
-        r#"
-        SELECT EXISTS (
-            SELECT 1
-            FROM replay_snapshots
-            WHERE project_id = $1
-              AND session_id = $2
-              AND window_id = $3
-              AND storage_generation = $5
-              AND (sequence = $4 OR $4 BETWEEN first_sequence AND last_sequence)
-        )
-        "#,
-    )
-    .bind(input.project_id)
-    .bind(&input.session_id)
-    .bind(&input.window_id)
-    .bind(input.sequence)
-    .bind(input.storage_generation)
-    .fetch_one(pool)
-    .await
 }
 
 fn normalize_route(url: Option<&str>) -> String {

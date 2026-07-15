@@ -24,7 +24,7 @@ struct MethodMapping {
 }
 
 impl ProguardMapping {
-    pub fn parse(input: &str) -> Result<Self, ()> {
+    pub fn parse(input: &str) -> Self {
         let mut classes = HashMap::new();
         let mut current_class: Option<(String, ClassMapping)> = None;
 
@@ -71,7 +71,7 @@ impl ProguardMapping {
             classes.insert(obfuscated, class);
         }
 
-        Ok(Self { classes })
+        Self { classes }
     }
 
     pub fn parse_many_bytes(parts: &[Vec<u8>]) -> Result<Self, ()> {
@@ -79,7 +79,7 @@ impl ProguardMapping {
 
         for part in parts {
             let input = std::str::from_utf8(part).map_err(|_| ())?;
-            let mapping = Self::parse(input)?;
+            let mapping = Self::parse(input);
             for (obfuscated_name, class) in mapping.classes {
                 match classes.entry(obfuscated_name) {
                     Entry::Occupied(mut occupied) => occupied.get_mut().merge(class),
@@ -411,8 +411,7 @@ mod tests {
 # {"fileName":"FileIO.java","id":"sourceFile"}
     92:92:core.file.FileIO reload() -> c
 "#,
-        )
-        .unwrap();
+        );
         let input = "\
 java.lang.RuntimeException: oops
 \tat a.a.a.c(SourceFile:92)";

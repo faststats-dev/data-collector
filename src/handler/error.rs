@@ -107,9 +107,7 @@ pub async fn error(
             occurrence,
             language,
             Some(tracking_ctx.clone()),
-        )
-        .await
-        {
+        ) {
             return e;
         }
 

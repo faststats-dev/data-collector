@@ -12,7 +12,9 @@ pub use replay::replay;
 pub use vitals::vitals;
 pub use web::web;
 
-use crate::batch_queue::{BatchQueue, FailedRequest, QueuedEvent, RequestType, TrackingContext};
+use crate::batch_queue::{
+    BatchQueue, FailedRequest, QueueError, QueuedEvent, RequestType, TrackingContext,
+};
 use crate::models::DataSource;
 use crate::tinybird::{ErrorOccurrenceV3Row, ModsEventRow, WebEventRow};
 use axum::Json;
@@ -106,16 +108,13 @@ pub fn error_response(status: StatusCode, message: &str) -> HandlerResponse {
     (status, Json(serde_json::json!({ "error": message })))
 }
 
-pub fn queue_error_response(
-    error: tokio::sync::mpsc::error::TrySendError<QueuedEvent>,
-    item: &str,
-) -> HandlerResponse {
+pub fn queue_error_response(error: QueueError, item: &str) -> HandlerResponse {
     match error {
-        tokio::sync::mpsc::error::TrySendError::Full(_) => {
+        QueueError::Full => {
             warn!("Ingestion queue full while queueing {}", item);
             error_response(StatusCode::SERVICE_UNAVAILABLE, "Ingestion queue is full")
         }
-        tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+        QueueError::Closed => {
             error!("Ingestion queue closed while queueing {}", item);
             error_response(StatusCode::INTERNAL_SERVER_ERROR, "Failed to queue event")
         }
@@ -136,13 +135,12 @@ pub fn success_response(warnings: HashMap<String, String>) -> HandlerResponse {
     }
 }
 
-#[derive(Clone, sqlx::FromRow)]
+#[derive(sqlx::FromRow)]
 pub struct IpRule {
     pub ip_address: String,
     pub allowed: bool,
 }
 
-#[derive(Clone)]
 pub struct ProjectContext {
     pub project_id: Uuid,
     pub replay_storage_generation: i32,
@@ -172,7 +170,7 @@ pub async fn load_project_context(
                p.replay_storage_generation, p.replay_storage_state::text AS replay_storage_state,
                o.id AS organization_id,
                m.user_id AS org_owner_user_id,
-               d.reference_id, d.name, d.data_type::text, d.regex, d.allow_negative,
+               d.reference_id, d.data_type::text, d.regex, d.allow_negative,
                d.allow_float, d.min_value, d.max_value, d.metric_shape::text
         FROM project p
         LEFT JOIN data_sources d ON d.project_id = p.id
@@ -198,12 +196,6 @@ pub async fn load_project_context(
             datasources.insert(
                 ref_id.clone(),
                 DataSource {
-                    reference_id: ref_id,
-                    name: row
-                        .try_get::<Option<String>, _>("name")
-                        .ok()
-                        .flatten()
-                        .unwrap_or_default(),
                     data_type: row.try_get::<String, _>("data_type").unwrap_or_default(),
                     regex: row.try_get("regex").ok(),
                     allow_negative: row.try_get("allow_negative").ok(),
@@ -252,18 +244,14 @@ pub async fn load_project_context(
 }
 
 pub fn get_request_origin(headers: &HeaderMap) -> Option<String> {
-    if let Some(origin) = headers.get("Origin").and_then(|v| v.to_str().ok())
-        && let Ok(url) = url::Url::parse(origin)
-    {
-        return url.host_str().map(|h| h.to_string());
+    for name in ["Origin", "Referer"] {
+        if let Some(value) = headers.get(name).and_then(|value| value.to_str().ok())
+            && let Ok(url) = url::Url::parse(value)
+            && let Some(host) = url.host_str()
+        {
+            return Some(host.to_owned());
+        }
     }
-
-    if let Some(referer) = headers.get("Referer").and_then(|v| v.to_str().ok())
-        && let Ok(url) = url::Url::parse(referer)
-    {
-        return url.host_str().map(|h| h.to_string());
-    }
-
     None
 }
 
@@ -394,11 +382,7 @@ fn extract_optional_bool(data: &mut HashMap<String, Value>, key: &str) -> Option
 }
 
 fn to_custom_json(data: &HashMap<String, Value>) -> String {
-    if data.is_empty() {
-        "{}".to_string()
-    } else {
-        serde_json::to_string(data).unwrap_or_else(|_| "{}".to_string())
-    }
+    serde_json::to_string(data).expect("JSON values are serializable")
 }
 
 /// Known internal fields for web_events row. These are extracted before
@@ -492,20 +476,18 @@ pub fn build_web_event_row(
     }
 }
 
-pub async fn insert_web_event(
+pub fn insert_web_event(
     batch_queue: &BatchQueue,
     row: WebEventRow,
     tracking: Option<TrackingContext>,
-) -> Result<Uuid, HandlerResponse> {
-    let event_id = row.id;
+) -> Result<(), HandlerResponse> {
     batch_queue
         .queue_event(QueuedEvent::WebEvent {
             row: Box::new(row),
             tracking,
         })
-        .await
         .map_err(|e| queue_error_response(e, "web event"))?;
-    Ok(event_id)
+    Ok(())
 }
 
 pub fn build_mods_event_row(
@@ -536,20 +518,18 @@ pub fn build_mods_event_row(
     }
 }
 
-pub async fn insert_mods_event(
+pub fn insert_mods_event(
     batch_queue: &BatchQueue,
     row: ModsEventRow,
     tracking: Option<TrackingContext>,
-) -> Result<Uuid, HandlerResponse> {
-    let event_id = row.id;
+) -> Result<(), HandlerResponse> {
     batch_queue
         .queue_event(QueuedEvent::ModsEvent { row, tracking })
-        .await
         .map_err(|e| queue_error_response(e, "mods event"))?;
-    Ok(event_id)
+    Ok(())
 }
 
-pub async fn insert_error_occurrence_v3(
+pub fn insert_error_occurrence_v3(
     batch_queue: &BatchQueue,
     row: ErrorOccurrenceV3Row,
     language: crate::error_tracking::v3::ErrorLanguage,
@@ -561,7 +541,6 @@ pub async fn insert_error_occurrence_v3(
             language,
             tracking,
         })
-        .await
         .map_err(|e| queue_error_response(e, "error occurrence"))?;
     Ok(())
 }
@@ -594,78 +573,27 @@ async fn process_collect_request(
         .await
         .map_err(|_| "Unauthorized or database error")?;
 
-    let req: crate::models::Request =
+    let request_body: crate::models::Request =
         serde_json::from_slice(&request.body).map_err(|_| "Invalid JSON")?;
-    let crate::models::Request {
-        id,
-        mut data,
-        errors,
-        context,
-        project_name: _,
-    } = req;
-
-    let server_id = id
-        .value()
-        .parse::<Uuid>()
-        .map(|id| crate::utils::hash_server_id(id, ctx.project_id))
-        .map_err(|_| "Invalid server_id".to_string())?;
-
-    let mut known = extract_known_fields(&mut data, MODS_EVENT_FIELDS);
-    let (valid_custom, _) = crate::validation::validate_and_filter_payload(data, &ctx.datasources);
-
-    let tracking_ctx = TrackingContext {
-        owner_id: ctx.billing_customer_id.as_str().into(),
-        token: request.token.as_str().into(),
-        organization_id: ctx.organization_id.as_deref().map(Into::into),
-    };
-
-    let event_row = build_mods_event_row(
-        ctx.project_id,
-        server_id,
+    let built = collect::build_collect_events(
+        &ctx,
+        &request.token,
+        request_body,
         request.country.as_deref(),
-        &mut known,
-        &valid_custom,
-    );
+    )
+    .map_err(str::to_owned)?;
 
-    let error_v3_context = ctx.error_tracking_enabled.then(|| {
-        crate::error_tracking::v3::request_context(context, || {
-            crate::error_tracking::v3::mods_context(&event_row, &valid_custom)
-        })
-    });
-
-    insert_mods_event(batch_queue, event_row.clone(), Some(tracking_ctx.clone()))
-        .await
+    insert_mods_event(batch_queue, built.event, Some(built.tracking.clone()))
         .map_err(|_| "Failed to queue event".to_string())?;
 
-    if let (true, Some(errors), Some(error_v3_context)) = (
-        ctx.error_tracking_enabled,
-        errors,
-        error_v3_context.as_ref(),
-    ) && !errors.is_empty()
-    {
-        let fallback_identity = server_id.to_string();
-        let sdk_version = event_row.plugin_version.as_deref();
-        for error in errors {
-            let occurrence = crate::error_tracking::v3::build_mods_occurrence(
-                &crate::error_tracking::v3::ModsOccurrenceInput {
-                    project_id: ctx.project_id,
-                    release: error.build_id.as_deref(),
-                    server_id: fallback_identity.as_str(),
-                    session_id: None,
-                    sdk_version,
-                    context: error_v3_context,
-                },
-                &error,
-            );
-            insert_error_occurrence_v3(
-                batch_queue,
-                occurrence,
-                crate::error_tracking::v3::ErrorLanguage::Java,
-                Some(tracking_ctx.clone()),
-            )
-            .await
-            .map_err(|_| "Failed to queue error".to_string())?;
-        }
+    for occurrence in built.errors {
+        insert_error_occurrence_v3(
+            batch_queue,
+            occurrence,
+            crate::error_tracking::v3::ErrorLanguage::Java,
+            Some(built.tracking.clone()),
+        )
+        .map_err(|_| "Failed to queue error".to_string())?;
     }
 
     Ok(())
@@ -815,7 +743,6 @@ async fn process_web_request(
     }
 
     insert_web_event(batch_queue, event_row, Some(tracking_ctx.clone()))
-        .await
         .map_err(|_| "Failed to queue event".to_string())?;
 
     if let (true, Some(errors), Some(error_v3_context)) = (
@@ -848,7 +775,6 @@ async fn process_web_request(
                 crate::error_tracking::v3::ErrorLanguage::Javascript,
                 Some(tracking_ctx.clone()),
             )
-            .await
             .map_err(|_| "Failed to queue error occurrence".to_string())?;
         }
 
@@ -885,58 +811,34 @@ async fn process_vitals_request(
     let req: WebVitalRequest =
         serde_json::from_slice(&request.body).map_err(|_| "Invalid JSON".to_string())?;
 
-    if req.vitals.is_empty() {
-        return Err("No vitals provided".to_string());
-    }
-
-    let now = chrono::Utc::now();
-    let metadata = req.metadata.as_ref();
-    let device = metadata.and_then(|m| m.device.as_deref());
-    let os = metadata.and_then(|m| m.os.as_deref());
-    let browser = metadata.and_then(|m| m.browser.as_deref());
-    let url = metadata.and_then(|m| m.url.as_deref()).unwrap_or("");
-
     let tracking_ctx = TrackingContext {
         owner_id: ctx.billing_customer_id.as_str().into(),
         token: request.token.as_str().into(),
         organization_id: ctx.organization_id.as_deref().map(Into::into),
     };
 
-    for vital in &req.vitals {
-        let attributes = vital
-            .attributes
-            .as_ref()
-            .map(|attrs| serde_json::to_string(attrs).unwrap_or_else(|_| "{}".to_string()))
-            .unwrap_or_else(|| "{}".to_string());
+    let ua_info = crate::ua_parser::parse(request.user_agent.as_deref().unwrap_or(""));
+    let rows = vitals::build_web_vital_rows(
+        ctx.project_id,
+        &req,
+        request.country.as_deref(),
+        ua_info.as_ref(),
+    )
+    .map_err(str::to_owned)?;
 
-        let row = crate::tinybird::WebVitalRow {
-            id: Uuid::new_v4(),
-            project_id: ctx.project_id,
-            metric: vital.metric.clone(),
-            value: vital.value,
-            device: device.map(str::to_owned),
-            country: request.country.clone(),
-            os: os.map(str::to_owned),
-            os_version: None,
-            browser: browser.map(str::to_owned),
-            browser_version: None,
-            url: url.to_owned(),
-            attributes,
-            session_id: req.session_id.clone(),
-            created_at: now,
-        };
+    for row in rows {
+        let is_poor = vitals::is_poor_web_vital(&row.metric, row.value);
 
         batch_queue
             .queue_event(QueuedEvent::WebVital {
                 row,
                 tracking: Some(tracking_ctx.clone()),
             })
-            .await
             .map_err(|_| "Failed to queue web vital".to_string())?;
 
         if let Some(session_id) = req.session_id.as_deref()
             && let Some(replay_storage) = replay_storage
-            && crate::handler::vitals::is_poor_web_vital(&vital.metric, vital.value)
+            && is_poor
             && let Err(error) = replay_storage
                 .mark_session_poor_vital(
                     pool,
@@ -986,10 +888,9 @@ async fn process_replay_request(
 
     replay_coalescer
         .ingest(built.input)
-        .await
         .map_err(|error| error.to_string())?;
 
-    batch_queue.track_replay_usage(&built.session_id, built.tracking);
+    batch_queue.track_replay_usage(&built.session_id, &built.tracking);
 
     Ok(())
 }

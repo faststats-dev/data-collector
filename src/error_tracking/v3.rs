@@ -304,7 +304,6 @@ mod tests {
                 stack: Some(vec![
                     "\tat plugin-1.2.3.jar//com.example.Plugin.handle(Plugin.java:42)".to_string(),
                 ]),
-                cause: None,
             },
             count: Some(3),
             session_id: None,

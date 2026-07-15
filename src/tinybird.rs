@@ -7,14 +7,13 @@ use std::io::Write;
 use tracing::debug;
 use uuid::Uuid;
 
-#[derive(Clone)]
 pub struct TinybirdClient {
     client: Client,
     base_url: String,
     bearer_token: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct WebEventRow {
     pub id: Uuid,
     pub project_id: Uuid,
@@ -45,7 +44,7 @@ pub struct WebEventRow {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ModsEventRow {
     pub id: Uuid,
     pub project_id: Uuid,
@@ -67,7 +66,7 @@ pub struct ModsEventRow {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ErrorOccurrenceV3Row {
     #[serde(with = "chrono::serde::ts_milliseconds")]
     pub timestamp: DateTime<Utc>,
@@ -93,7 +92,7 @@ pub struct ErrorOccurrenceV3Row {
     pub context: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct WebVitalRow {
     pub id: Uuid,
     pub project_id: Uuid,

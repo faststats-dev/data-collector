@@ -1,19 +1,18 @@
 use super::{
     EncodingQuery, check_ip_allowed, decompress_body, error_response, get_authorization,
-    get_client_ip, get_request_origin, load_project_context, queue_error_response,
-    validate_hostname,
+    get_client_ip, get_country, get_request_origin, load_project_context, queue_error_response,
+    success_response, validate_hostname,
 };
 use crate::batch_queue::{FailedRequest, QueuedEvent, RequestType, TrackingContext};
 use crate::models::AppState;
 use crate::tinybird::WebVitalRow;
 use crate::ua_parser::UserAgentInfo;
-use axum::Json;
 use axum::body::Bytes;
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::collections::HashMap;
 use tracing::{error, warn};
 use uuid::Uuid;
@@ -96,6 +95,53 @@ fn resolve_dimensions<'a>(
     }
 }
 
+pub(crate) fn build_web_vital_rows(
+    project_id: Uuid,
+    request: &WebVitalRequest,
+    country: Option<&str>,
+    ua_info: Option<&UserAgentInfo>,
+) -> Result<Vec<WebVitalRow>, &'static str> {
+    if request.vitals.is_empty() {
+        return Err("No vitals provided");
+    }
+    if request
+        .vitals
+        .iter()
+        .any(|vital| !is_valid_web_vital(&vital.metric, vital.value))
+    {
+        return Err("Invalid web vital metric");
+    }
+
+    let dimensions = resolve_dimensions(request.metadata.as_ref(), ua_info);
+    let now = chrono::Utc::now();
+    Ok(request
+        .vitals
+        .iter()
+        .map(|vital| WebVitalRow {
+            id: Uuid::new_v4(),
+            project_id,
+            metric: vital.metric.clone(),
+            value: vital.value,
+            device: Some(dimensions.device.to_owned()),
+            country: country.map(str::to_owned),
+            os: Some(dimensions.os.to_owned()),
+            os_version: dimensions.os_version.clone(),
+            browser: Some(dimensions.browser.to_owned()),
+            browser_version: dimensions.browser_version.clone(),
+            url: dimensions.url.to_owned(),
+            attributes: vital
+                .attributes
+                .as_ref()
+                .map(|attributes| {
+                    serde_json::to_string(attributes).expect("JSON values are serializable")
+                })
+                .unwrap_or_else(|| "{}".to_owned()),
+            session_id: request.session_id.clone(),
+            created_at: now,
+        })
+        .collect())
+}
+
 pub async fn vitals(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -107,18 +153,12 @@ pub async fn vitals(
         Err(e) => return error_response(StatusCode::BAD_REQUEST, &e),
     };
 
-    let WebVitalRequest {
-        token: body_token,
-        vitals,
-        metadata,
-        session_id,
-        window_id,
-    } = match serde_json::from_slice(&body) {
+    let mut request: WebVitalRequest = match serde_json::from_slice(&body) {
         Ok(req) => req,
         Err(_) => return error_response(StatusCode::BAD_REQUEST, "Invalid JSON"),
     };
 
-    let token = match body_token.or_else(|| get_authorization(&headers)) {
+    let token = match request.token.take().or_else(|| get_authorization(&headers)) {
         Some(t) => t,
         None => return error_response(StatusCode::UNAUTHORIZED, "Unauthorized"),
     };
@@ -155,7 +195,7 @@ pub async fn vitals(
                         "Service temporarily unavailable",
                     );
                 }
-                return (StatusCode::OK, Json(json!({ "status": "success" })));
+                return success_response(HashMap::new());
             }
             return err;
         }
@@ -170,77 +210,46 @@ pub async fn vitals(
         return error_response(StatusCode::FORBIDDEN, msg);
     }
 
-    if vitals.is_empty() {
-        return error_response(StatusCode::BAD_REQUEST, "No vitals provided");
-    }
-
     let tracking_ctx = TrackingContext {
         owner_id: ctx.billing_customer_id.as_str().into(),
         token: token.into(),
         organization_id: ctx.organization_id.as_deref().map(Into::into),
     };
 
-    let country = headers
-        .get("CF-IPCountry")
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_owned);
-
     let user_agent = headers
         .get("User-Agent")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     let ua_info = crate::ua_parser::parse(user_agent);
-    let dimensions = resolve_dimensions(metadata.as_ref(), ua_info.as_ref());
-    let now = chrono::Utc::now();
+    let rows = match build_web_vital_rows(
+        ctx.project_id,
+        &request,
+        get_country(&headers).as_deref(),
+        ua_info.as_ref(),
+    ) {
+        Ok(rows) => rows,
+        Err(message) => return error_response(StatusCode::BAD_REQUEST, message),
+    };
 
-    for vital in &vitals {
-        if !is_valid_web_vital(&vital.metric, vital.value) {
-            return error_response(StatusCode::BAD_REQUEST, "Invalid web vital metric");
-        }
+    for row in rows {
+        let is_poor = is_poor_web_vital(&row.metric, row.value);
 
-        let attributes = vital
-            .attributes
-            .as_ref()
-            .map(|attrs| serde_json::to_string(attrs).unwrap_or_else(|_| "{}".to_string()))
-            .unwrap_or_else(|| "{}".to_string());
-
-        let row = WebVitalRow {
-            id: Uuid::new_v4(),
-            project_id: ctx.project_id,
-            metric: vital.metric.clone(),
-            value: vital.value,
-            device: Some(dimensions.device.to_owned()),
-            country: country.clone(),
-            os: Some(dimensions.os.to_owned()),
-            os_version: dimensions.os_version.clone(),
-            browser: Some(dimensions.browser.to_owned()),
-            browser_version: dimensions.browser_version.clone(),
-            url: dimensions.url.to_owned(),
-            attributes,
-            session_id: session_id.clone(),
-            created_at: now,
-        };
-
-        if let Err(e) = state
-            .batch_queue
-            .queue_event(QueuedEvent::WebVital {
-                row,
-                tracking: Some(tracking_ctx.clone()),
-            })
-            .await
-        {
+        if let Err(e) = state.batch_queue.queue_event(QueuedEvent::WebVital {
+            row,
+            tracking: Some(tracking_ctx.clone()),
+        }) {
             return queue_error_response(e, "web vital");
         }
 
-        if let Some(session_id) = session_id.as_deref()
+        if let Some(session_id) = request.session_id.as_deref()
             && let Some(replay_storage) = state.replay_storage.as_deref()
-            && is_poor_web_vital(&vital.metric, vital.value)
+            && is_poor
             && let Err(error) = replay_storage
                 .mark_session_poor_vital(
                     &state.pool,
                     ctx.project_id,
                     session_id,
-                    window_id.as_deref().unwrap_or(session_id),
+                    request.window_id.as_deref().unwrap_or(session_id),
                 )
                 .await
         {
@@ -248,7 +257,7 @@ pub async fn vitals(
         }
     }
 
-    (StatusCode::OK, Json(json!({ "status": "success" })))
+    success_response(HashMap::new())
 }
 
 pub(crate) fn is_poor_web_vital(metric: &str, value: f64) -> bool {

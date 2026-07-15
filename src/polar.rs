@@ -12,13 +12,12 @@ const POLAR_API_URL: &str = "https://api.polar.sh";
 
 const MAX_EVENTS_PER_REQUEST: usize = 500;
 
-#[derive(Clone)]
 pub struct PolarClient {
     client: Client,
     bearer_token: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Serialize)]
 struct EventMetadata {
     count: u64,
     token: Arc<str>,
@@ -28,14 +27,12 @@ struct EventMetadata {
     session_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Serialize)]
 struct EventCreateExternalCustomer {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    timestamp: Option<DateTime<Utc>>,
+    timestamp: DateTime<Utc>,
     name: &'static str,
     external_customer_id: Arc<str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    metadata: Option<EventMetadata>,
+    metadata: EventMetadata,
 }
 
 #[derive(Debug, Serialize)]
@@ -78,7 +75,6 @@ pub struct UsageCounts {
     pub events: u64,
     pub error_tracking: u64,
     pub web_vitals: u64,
-    pub session_replays: u64,
     pub session_replay_ids: HashSet<String>,
 }
 
@@ -118,31 +114,29 @@ impl PolarClient {
                 }
 
                 events.push(EventCreateExternalCustomer {
-                    timestamp: Some(base_timestamp + chrono::Duration::microseconds(i as i64)),
+                    timestamp: base_timestamp + chrono::Duration::microseconds(i as i64),
                     name,
                     external_customer_id: Arc::clone(owner_id),
-                    metadata: Some(EventMetadata {
+                    metadata: EventMetadata {
                         count,
                         token: Arc::clone(&owner_usage.token),
                         organization_id: owner_usage.org.as_ref().map(Arc::clone),
                         session_id: None,
-                    }),
+                    },
                 });
             }
 
             for (i, session_id) in owner_usage.counts.session_replay_ids.iter().enumerate() {
                 events.push(EventCreateExternalCustomer {
-                    timestamp: Some(
-                        base_timestamp + chrono::Duration::microseconds((3 + i) as i64),
-                    ),
+                    timestamp: base_timestamp + chrono::Duration::microseconds((3 + i) as i64),
                     name: "session_replays",
                     external_customer_id: Arc::clone(owner_id),
-                    metadata: Some(EventMetadata {
+                    metadata: EventMetadata {
                         count: 1,
                         token: Arc::clone(&owner_usage.token),
                         organization_id: owner_usage.org.as_ref().map(Arc::clone),
                         session_id: Some(session_id.clone()),
-                    }),
+                    },
                 });
             }
         }

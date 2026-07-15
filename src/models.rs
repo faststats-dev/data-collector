@@ -1,7 +1,7 @@
 use crate::batch_queue::BatchQueue;
 use crate::replay_coalescer::ReplayCoalescer;
 use crate::replay_storage::ReplayStorage;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::Value;
 use sqlx::PgPool;
 use std::collections::HashMap;
@@ -15,10 +15,7 @@ pub struct AppState {
     pub replay_coalescer: Option<Arc<ReplayCoalescer>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DataSource {
-    pub reference_id: String,
-    pub name: String,
     pub data_type: String,
     pub regex: Option<String>,
     pub allow_negative: Option<bool>,
@@ -28,16 +25,14 @@ pub struct DataSource {
     pub metric_shape: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct Error {
     pub error: String,
     pub message: Option<String>,
     pub stack: Option<Vec<String>>,
-    #[serde(default)]
-    pub cause: Option<Box<Error>>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct ErrorTracking {
     #[serde(flatten)]
     pub error: Error,
@@ -54,36 +49,17 @@ pub struct ErrorTracking {
     pub handled: Option<bool>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
-    #[serde(flatten)]
-    pub id: RequestIdentifier,
+    #[serde(alias = "identifier")]
+    pub server_id: String,
     pub data: HashMap<String, Value>,
     pub errors: Option<Vec<ErrorTracking>>,
     #[serde(default)]
     pub context: Option<Value>,
-    // TODO: handle project_name once project-level routing is supported.
-    #[serde(default)]
-    pub project_name: Option<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub enum RequestIdentifier {
-    #[serde(rename = "server_id")]
-    ServerId(String),
-    #[serde(rename = "identifier")]
-    Identifier(String),
-}
-
-impl RequestIdentifier {
-    pub fn value(&self) -> &str {
-        match self {
-            RequestIdentifier::ServerId(s) => s,
-            RequestIdentifier::Identifier(s) => s,
-        }
-    }
+    #[serde(default, rename = "project_name")]
+    pub _project_name: Option<String>,
 }
 
 #[cfg(test)]
@@ -118,7 +94,6 @@ mod tests {
         }"#;
 
         let result = serde_json::from_str::<WebRequest>(json);
-        println!("Parse result: {:?}", result);
         assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
 
         let req = result.unwrap();

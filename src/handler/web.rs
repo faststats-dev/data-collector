@@ -246,7 +246,7 @@ pub async fn web(
     }
 
     if !is_debounced {
-        match insert_web_event(&state.batch_queue, event_row, Some(tracking_ctx.clone())).await {
+        match insert_web_event(&state.batch_queue, event_row, Some(tracking_ctx.clone())) {
             Ok(_) => {}
             Err(e) => return e,
         }
@@ -282,9 +282,7 @@ pub async fn web(
                 occurrence,
                 crate::error_tracking::v3::ErrorLanguage::Javascript,
                 Some(tracking_ctx.clone()),
-            )
-            .await
-            {
+            ) {
                 return e;
             }
         }

@@ -222,8 +222,6 @@ mod tests {
 
     fn make_data_source(data_type: &str) -> DataSource {
         DataSource {
-            reference_id: "test".to_string(),
-            name: "Test Field".to_string(),
             data_type: data_type.to_string(),
             regex: None,
             allow_negative: None,
@@ -688,8 +686,6 @@ mod tests {
 
         fn make_array_data_source(data_type: &str) -> DataSource {
             DataSource {
-                reference_id: "test_array".to_string(),
-                name: "Test Array Field".to_string(),
                 data_type: data_type.to_string(),
                 regex: None,
                 allow_negative: None,
@@ -1155,8 +1151,7 @@ mod tests {
 
         #[test]
         fn handles_empty_reference_id() {
-            let mut ds = make_data_source("string");
-            ds.reference_id = "".to_string();
+            let ds = make_data_source("string");
             let mut ds_map = HashMap::new();
             ds_map.insert("".to_string(), ds);
 
@@ -1191,8 +1186,6 @@ mod tests {
 
         fn make_map_data_source(data_type: &str) -> DataSource {
             let mut ds = make_data_source(data_type);
-            ds.reference_id = "test_map".to_string();
-            ds.name = "Test Map Field".to_string();
             ds.metric_shape = Some("map".to_string());
             ds
         }

@@ -261,17 +261,14 @@ pub async fn replay(
         user_agent,
     ) {
         Ok(value) => value,
-        Err(message) if message == "identifier is required" || message == "No valid events" => {
-            return error_response(StatusCode::BAD_REQUEST, &message);
-        }
         Err(message) => return error_response(StatusCode::BAD_REQUEST, &message),
     };
 
-    match replay_coalescer.ingest(built.input).await {
+    match replay_coalescer.ingest(built.input) {
         Ok(()) => {
             state
                 .batch_queue
-                .track_replay_usage(&built.session_id, built.tracking);
+                .track_replay_usage(&built.session_id, &built.tracking);
         }
         Err(error) => {
             error!("Failed to store replay: {}", error);

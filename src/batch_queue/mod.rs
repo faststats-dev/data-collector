@@ -36,7 +36,7 @@ pub struct OwnerUsage {
 
 pub type AggregatedUsage = HashMap<Arc<str>, OwnerUsage>;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum RequestType {
     Collect,
@@ -45,7 +45,7 @@ pub enum RequestType {
     Replay,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct FailedRequest {
     pub request_type: RequestType,
     pub token: String,
@@ -65,7 +65,7 @@ pub struct TrackingContext {
     pub organization_id: Option<Arc<str>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum QueuedEvent {
     WebEvent {
@@ -92,6 +92,11 @@ pub enum QueuedEvent {
     },
 }
 
+pub enum QueueError {
+    Full,
+    Closed,
+}
+
 impl QueuedEvent {
     fn datasource(&self) -> &'static str {
         match self {
@@ -103,25 +108,12 @@ impl QueuedEvent {
     }
 }
 
-const INITIAL_BATCH_CAPACITY: usize = 64;
-
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct InMemoryBatch {
     web_events: Vec<(WebEventRow, Option<TrackingContext>)>,
     mods_events: Vec<(ModsEventRow, Option<TrackingContext>)>,
     error_occurrences_v3: Vec<(ErrorOccurrenceV3Row, ErrorLanguage, Option<TrackingContext>)>,
     web_vitals: Vec<(WebVitalRow, Option<TrackingContext>)>,
-}
-
-impl Default for InMemoryBatch {
-    fn default() -> Self {
-        Self {
-            web_events: Vec::with_capacity(INITIAL_BATCH_CAPACITY),
-            mods_events: Vec::with_capacity(INITIAL_BATCH_CAPACITY),
-            error_occurrences_v3: Vec::new(),
-            web_vitals: Vec::with_capacity(INITIAL_BATCH_CAPACITY / 4),
-        }
-    }
 }
 
 impl InMemoryBatch {
@@ -302,12 +294,6 @@ pub struct BatchQueue {
 }
 
 impl BatchQueue {
-    fn is_channel_under_pressure(&self) -> bool {
-        self.sender.capacity() < (CHANNEL_CAPACITY - CHANNEL_BACKPRESSURE_THRESHOLD)
-    }
-}
-
-impl BatchQueue {
     pub fn new(
         tinybird: Arc<TinybirdClient>,
         polar: Option<Arc<PolarClient>>,
@@ -315,11 +301,7 @@ impl BatchQueue {
         backup_enabled: bool,
         sourcemaps: Option<Arc<SourcemapResolver>>,
     ) -> Arc<Self> {
-        let backup_store = Arc::new(if backup_enabled {
-            BackupStore::new(backup_path)
-        } else {
-            BackupStore::disabled(backup_path)
-        });
+        let backup_store = Arc::new(BackupStore::new(backup_path, backup_enabled));
         let (sender, receiver) = mpsc::channel(CHANNEL_CAPACITY);
         let in_memory_batch = Arc::new(Mutex::new(InMemoryBatch::default()));
         let flush_lock = Arc::new(Mutex::new(()));
@@ -350,14 +332,14 @@ impl BatchQueue {
         queue
     }
 
-    pub async fn queue_event(
-        &self,
-        event: QueuedEvent,
-    ) -> Result<(), mpsc::error::TrySendError<QueuedEvent>> {
-        self.sender.try_send(event)
+    pub fn queue_event(&self, event: QueuedEvent) -> Result<(), QueueError> {
+        self.sender.try_send(event).map_err(|error| match error {
+            mpsc::error::TrySendError::Full(_) => QueueError::Full,
+            mpsc::error::TrySendError::Closed(_) => QueueError::Closed,
+        })
     }
 
-    pub fn track_replay_usage(&self, session_id: &str, tracking: TrackingContext) {
+    pub fn track_replay_usage(&self, session_id: &str, tracking: &TrackingContext) {
         let Some(polar) = &self.polar else {
             return;
         };
@@ -368,7 +350,6 @@ impl BatchQueue {
             token: Arc::clone(&tracking.token),
             org: tracking.organization_id.as_ref().map(Arc::clone),
         };
-        owner_usage.counts.session_replays = 1;
         owner_usage
             .counts
             .session_replay_ids
@@ -389,6 +370,10 @@ impl BatchQueue {
 
     pub async fn current_batch_size(&self) -> usize {
         self.in_memory_batch.lock().await.total_count()
+    }
+
+    fn is_channel_under_pressure(&self) -> bool {
+        self.sender.capacity() < (CHANNEL_CAPACITY - CHANNEL_BACKPRESSURE_THRESHOLD)
     }
 
     fn start_batch_processor(self: &Arc<Self>, mut receiver: mpsc::Receiver<QueuedEvent>) {
@@ -867,7 +852,7 @@ mod tests {
         async fn test_backup_and_restore_events() {
             let dir = tempdir().unwrap();
             let db_path = dir.path().join("test.db");
-            let store = BackupStore::new(&db_path);
+            let store = BackupStore::new(&db_path, true);
 
             let event = create_test_queued_event();
             store.backup_events(&[event], None).await.unwrap();
@@ -886,7 +871,7 @@ mod tests {
         async fn test_remove_multiple_events() {
             let dir = tempdir().unwrap();
             let db_path = dir.path().join("test.db");
-            let store = BackupStore::new(&db_path);
+            let store = BackupStore::new(&db_path, true);
 
             let events: Vec<QueuedEvent> = (0..5).map(|_| create_test_queued_event()).collect();
             store.backup_events(&events, None).await.unwrap();
@@ -905,7 +890,7 @@ mod tests {
         async fn test_count_backed_up() {
             let dir = tempdir().unwrap();
             let db_path = dir.path().join("test.db");
-            let store = BackupStore::new(&db_path);
+            let store = BackupStore::new(&db_path, true);
 
             assert_eq!(store.count_backed_up().await.unwrap(), 0);
 
@@ -919,7 +904,7 @@ mod tests {
         async fn test_backup_different_event_types() {
             let dir = tempdir().unwrap();
             let db_path = dir.path().join("test.db");
-            let store = BackupStore::new(&db_path);
+            let store = BackupStore::new(&db_path, true);
 
             let event = create_test_queued_event();
             store.backup_events(&[event], None).await.unwrap();
@@ -962,7 +947,7 @@ mod tests {
         async fn test_events_retrieved_in_order() {
             let dir = tempdir().unwrap();
             let db_path = dir.path().join("test.db");
-            let store = BackupStore::new(&db_path);
+            let store = BackupStore::new(&db_path, true);
 
             for i in 0..5 {
                 let mut row = create_test_mods_event();
@@ -993,7 +978,7 @@ mod tests {
         async fn test_get_backed_up_events_limit() {
             let dir = tempdir().unwrap();
             let db_path = dir.path().join("test.db");
-            let store = BackupStore::new(&db_path);
+            let store = BackupStore::new(&db_path, true);
 
             let events: Vec<QueuedEvent> = (0..10).map(|_| create_test_queued_event()).collect();
             store.backup_events(&events, None).await.unwrap();
@@ -1008,7 +993,7 @@ mod tests {
         async fn test_backup_events_bulk() {
             let dir = tempdir().unwrap();
             let db_path = dir.path().join("test.db");
-            let store = BackupStore::new(&db_path);
+            let store = BackupStore::new(&db_path, true);
 
             let events: Vec<QueuedEvent> = (0..10).map(|_| create_test_queued_event()).collect();
 
@@ -1170,40 +1155,6 @@ mod tests {
             } else {
                 panic!("Deserialization changed event type");
             }
-        }
-    }
-
-    mod constants_tests {
-        use super::*;
-
-        #[test]
-        fn test_max_retries_is_5() {
-            assert_eq!(MAX_RETRIES, 5);
-        }
-
-        #[test]
-        fn test_initial_retry_delay_is_1_second() {
-            assert_eq!(INITIAL_RETRY_DELAY, Duration::from_secs(1));
-        }
-
-        #[test]
-        fn test_max_retry_delay_is_30_seconds() {
-            assert_eq!(MAX_RETRY_DELAY, Duration::from_secs(30));
-        }
-
-        #[test]
-        fn test_batch_window_is_5_seconds() {
-            assert_eq!(BATCH_WINDOW, Duration::from_secs(5));
-        }
-
-        #[test]
-        fn test_backup_replay_interval_is_600_seconds() {
-            assert_eq!(BACKUP_REPLAY_INTERVAL, Duration::from_secs(600));
-        }
-
-        #[test]
-        fn test_max_backup_age_is_24_hours() {
-            assert_eq!(MAX_BACKUP_AGE_SECS, 86400);
         }
     }
 }

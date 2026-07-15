@@ -12,7 +12,6 @@ const DEFAULT_MAX_BYTES: usize = 1024 * 1024;
 const DEFAULT_MAX_CHUNKS_PER_WINDOW: usize = 64;
 const DEFAULT_MAX_WINDOWS: usize = 10_000;
 
-#[derive(Clone)]
 pub struct ReplayCoalescer {
     tx: mpsc::Sender<ReplayCommand>,
 }
@@ -72,7 +71,7 @@ impl ReplayCoalescer {
         Arc::new(Self { tx })
     }
 
-    pub async fn ingest(&self, input: ReplayChunkInput) -> Result<(), ReplayStorageError> {
+    pub fn ingest(&self, input: ReplayChunkInput) -> Result<(), ReplayStorageError> {
         self.tx
             .try_send(ReplayCommand::Ingest(Box::new(input)))
             .map_err(|error| {

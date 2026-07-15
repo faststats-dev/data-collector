@@ -14,18 +14,10 @@ pub struct BackupStore {
 }
 
 impl BackupStore {
-    pub fn new(path: &Path) -> Self {
+    pub fn new(path: &Path, enabled: bool) -> Self {
         Self {
             path: path.to_path_buf(),
-            enabled: true,
-            pool: OnceCell::new(),
-        }
-    }
-
-    pub fn disabled(path: &Path) -> Self {
-        Self {
-            path: path.to_path_buf(),
-            enabled: false,
+            enabled,
             pool: OnceCell::new(),
         }
     }
@@ -114,7 +106,7 @@ impl BackupStore {
             .await
     }
 
-    pub fn is_connected(&self) -> bool {
+    fn is_connected(&self) -> bool {
         self.pool.initialized()
     }
 

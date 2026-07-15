@@ -11,8 +11,8 @@ use uuid::Uuid;
 
 const NONCE_LEN: usize = 12;
 const TAG_LEN: usize = 16;
-const JS_MAP_CACHE_CAPACITY: u64 = 64;
-const PROGUARD_MAP_CACHE_CAPACITY: u64 = 16;
+const JS_MAP_CACHE_CAPACITY: u64 = 16;
+const PROGUARD_MAP_CACHE_CAPACITY: u64 = 4;
 const MAP_CACHE_TTL: Duration = Duration::from_secs(600);
 const BUILD_CACHE_CAPACITY: u64 = 2048;
 
@@ -277,11 +277,13 @@ impl SourcemapResolver {
                 warn!(key, "Failed to decrypt sourcemap");
             })
             .ok()?;
+        drop(encrypted);
         let data = zstd::stream::decode_all(compressed.as_slice())
             .map_err(|error| {
                 warn!(key, %error, "Failed to decompress sourcemap");
             })
             .ok()?;
+        drop(compressed);
         let map = SourceMap::from_slice(&data)
             .map_err(|error| {
                 warn!(key, %error, "Failed to parse sourcemap");
@@ -388,6 +390,7 @@ impl SourcemapResolver {
                 warn!(key, "Failed to decrypt mapping object");
             })
             .ok()?;
+        drop(encrypted);
         zstd::stream::decode_all(compressed.as_slice())
             .map_err(|error| {
                 warn!(key, %error, "Failed to decompress mapping object");
@@ -419,8 +422,9 @@ impl SourcemapCrypto {
         payload.extend_from_slice(ciphertext);
         payload.extend_from_slice(tag);
 
+        let nonce = Nonce::try_from(nonce_bytes).map_err(|_| ())?;
         self.cipher
-            .decrypt(Nonce::from_slice(nonce_bytes), payload.as_slice())
+            .decrypt(&nonce, payload.as_slice())
             .map_err(|_| ())
     }
 }

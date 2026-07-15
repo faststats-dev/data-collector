@@ -174,26 +174,17 @@ impl BackupStore {
 
         let pool = self.get_pool().await?;
 
-        // Build placeholder string without allocating per-element
-        let mut placeholders = String::with_capacity(ids.len() * 3); // "?, " per element
-        for i in 0..ids.len() {
-            if i > 0 {
-                placeholders.push_str(", ");
+        let mut query =
+            sqlx::QueryBuilder::<sqlx::Sqlite>::new("DELETE FROM backed_up_events WHERE id IN (");
+        {
+            let mut values = query.separated(", ");
+            for id in ids {
+                values.push_bind(id);
             }
-            placeholders.push('?');
         }
+        query.push(")");
 
-        let query = format!(
-            "DELETE FROM backed_up_events WHERE id IN ({})",
-            placeholders
-        );
-
-        let mut q = sqlx::query(&query);
-        for id in ids {
-            q = q.bind(id);
-        }
-
-        q.execute(pool).await?;
+        query.build().execute(pool).await?;
         Ok(())
     }
 

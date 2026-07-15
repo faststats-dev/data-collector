@@ -24,7 +24,7 @@ moka = { version = "0.12.12", features = ["sync", "future"] }
 reqwest = { version = "0.13", features = ["json"] }
 uuid = { version = "1.19.0", features = ["serde", "v4"] }
 ua-parser = "0.2.1"
-serde_yaml = "0.9.34"
+yaml_serde = "0.10.4"
 metrics = "0.24"
 metrics-exporter-prometheus = "0.18"
 tracing = "0.1"

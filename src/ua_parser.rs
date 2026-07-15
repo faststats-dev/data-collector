@@ -14,7 +14,7 @@ pub struct UserAgentInfo {
 pub fn init() -> Result<(), String> {
     let path = std::env::var("UA_REGEXES_PATH").unwrap_or_else(|_| "regexes.yaml".into());
     let file = std::fs::File::open(&path).map_err(|e| format!("Failed to open {}: {}", path, e))?;
-    let regexes: ua_parser::Regexes = serde_yaml::from_reader(file)
+    let regexes: ua_parser::Regexes = yaml_serde::from_reader(file)
         .map_err(|e| format!("Failed to parse regexes.yaml: {}", e))?;
     let extractor = Extractor::try_from(regexes)
         .map_err(|e| format!("Failed to create UA extractor: {}", e))?;

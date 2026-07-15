@@ -1,5 +1,6 @@
 use aws_sdk_s3::Client;
 use aws_sdk_s3::config::{Builder as S3ConfigBuilder, Credentials, Region};
+use aws_sdk_s3::error::DisplayErrorContext;
 use aws_sdk_s3::primitives::ByteStream;
 use serde::Serialize;
 use serde_json::Value;
@@ -659,7 +660,12 @@ impl ReplayStorage {
             .body(ByteStream::from(body))
             .send()
             .await
-            .map_err(|error| ReplayStorageError::Upload(error.to_string()))?;
+            .map_err(|error| {
+                ReplayStorageError::Upload(format!(
+                    "PutObject to bucket {bucket} failed: {}",
+                    DisplayErrorContext(error)
+                ))
+            })?;
 
         Ok(())
     }
@@ -671,7 +677,12 @@ impl ReplayStorage {
             .key(key)
             .send()
             .await
-            .map_err(|error| ReplayStorageError::Upload(error.to_string()))?;
+            .map_err(|error| {
+                ReplayStorageError::Upload(format!(
+                    "DeleteObject from bucket {bucket} failed: {}",
+                    DisplayErrorContext(error)
+                ))
+            })?;
         Ok(())
     }
 }

@@ -3,9 +3,9 @@ use super::{
     load_project_context, success_response,
 };
 use crate::batch_queue::TrackingContext;
+use crate::error_tracking::ErrorLanguage;
 use crate::error_tracking::v3::{
-    ErrorLanguage, ErrorOnlyOccurrenceInput, build_error_only_occurrence, empty_context,
-    request_context,
+    ErrorOnlyOccurrenceInput, build_error_only_occurrence, empty_context, request_context,
 };
 use crate::models::{AppState, ErrorTracking};
 use axum::body::Bytes;

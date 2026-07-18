@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::str::Utf8Error;
 
 pub struct ProguardMapping {
     classes: HashMap<String, ClassMapping>,
@@ -16,11 +17,6 @@ struct MethodMapping {
     obfuscated_name: String,
     start_line: Option<u32>,
     end_line: Option<u32>,
-}
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum ProguardParseError {
-    InvalidUtf8,
 }
 
 impl ProguardMapping {
@@ -73,11 +69,11 @@ impl ProguardMapping {
         Self { classes }
     }
 
-    pub fn parse_many_bytes(parts: &[Vec<u8>]) -> Result<Self, ProguardParseError> {
+    pub fn parse_many_bytes(parts: &[Vec<u8>]) -> Result<Self, Utf8Error> {
         let mut classes: HashMap<String, ClassMapping> = HashMap::new();
 
         for part in parts {
-            let input = std::str::from_utf8(part).map_err(|_| ProguardParseError::InvalidUtf8)?;
+            let input = std::str::from_utf8(part)?;
             let mapping = Self::parse(input);
             for (obfuscated_name, class) in mapping.classes {
                 match classes.entry(obfuscated_name) {
@@ -225,30 +221,23 @@ impl ProguardMapping {
         obf_method: &str,
         line: Option<u32>,
     ) -> Option<&'a MethodMapping> {
-        if let Some(line_num) = line {
-            class
-                .methods
-                .iter()
-                .find(|m| {
-                    m.obfuscated_name == obf_method
-                        && matches!(
-                            (m.start_line, m.end_line),
-                            (Some(start), Some(end))
-                                if line_num >= start && line_num <= end
-                        )
-                })
-                .or_else(|| {
-                    class
-                        .methods
-                        .iter()
-                        .find(|m| m.obfuscated_name == obf_method)
-                })
-        } else {
-            class
-                .methods
-                .iter()
-                .find(|m| m.obfuscated_name == obf_method)
+        let mut fallback = None;
+
+        for method in &class.methods {
+            if method.obfuscated_name != obf_method {
+                continue;
+            }
+            fallback.get_or_insert(method);
+
+            if matches!(
+                (line, method.start_line, method.end_line),
+                (Some(line), Some(start), Some(end)) if (start..=end).contains(&line)
+            ) {
+                return Some(method);
+            }
         }
+
+        fallback
     }
 }
 
@@ -371,7 +360,7 @@ fn push_u32(out: &mut String, value: u32) {
 
 #[cfg(test)]
 mod tests {
-    use super::{ProguardMapping, ProguardParseError};
+    use super::ProguardMapping;
 
     #[test]
     fn retraces_r8_stacktrace() {
@@ -414,10 +403,25 @@ java.lang.RuntimeException: oops
 
     #[test]
     fn parse_many_bytes_rejects_invalid_utf8() {
-        let error = ProguardMapping::parse_many_bytes(&[vec![0xff]])
-            .err()
-            .expect("invalid utf8 should fail");
+        assert!(ProguardMapping::parse_many_bytes(&[vec![0xff]]).is_err());
+    }
 
-        assert_eq!(error, ProguardParseError::InvalidUtf8);
+    #[test]
+    fn resolves_overloaded_method_by_line_in_one_pass() {
+        let mapping = ProguardMapping::parse(
+            r#"com.example.Service -> a:
+    10:20:void first() -> b
+    30:40:void second() -> b
+"#,
+        );
+
+        assert_eq!(
+            mapping.retrace("\tat a.b(SourceFile:35)"),
+            "\tat com.example.Service.second(Unknown Source:35)"
+        );
+        assert_eq!(
+            mapping.retrace("\tat a.b(Unknown Source)"),
+            "\tat com.example.Service.first(Unknown Source)"
+        );
     }
 }

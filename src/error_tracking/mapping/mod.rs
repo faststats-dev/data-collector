@@ -1,21 +1,21 @@
-use crate::error_tracking::language::ErrorLanguage;
+use crate::error_tracking::language::{ErrorLanguage, MappingKind};
 use crate::error_tracking::proguard::ProguardMapping;
-use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
+use ::sourcemap::SourceMap;
+use aes_gcm::{Aes256Gcm, KeyInit, Nonce, Tag, aead::AeadInOut};
 use aws_sdk_s3::Client;
 use moka::future::Cache;
-use sourcemap::SourceMap;
 use sqlx::PgPool;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::warn;
 use uuid::Uuid;
 
-pub mod java;
-pub mod javascript;
+mod proguard;
+mod sourcemap;
 
 const NONCE_LEN: usize = 12;
 const TAG_LEN: usize = 16;
-const JS_MAP_CACHE_CAPACITY: u64 = 64;
+const SOURCEMAP_CACHE_CAPACITY: u64 = 64;
 const PROGUARD_MAP_CACHE_CAPACITY: u64 = 16;
 const MAP_CACHE_TTL: Duration = Duration::from_secs(600);
 const BUILD_CACHE_CAPACITY: u64 = 2048;
@@ -26,22 +26,29 @@ pub struct MappingResolver {
     db: PgPool,
     bucket: Arc<str>,
     crypto: Arc<MappingCrypto>,
-    javascript_maps: Cache<String, Option<Arc<SourceMap>>>,
+    sourcemaps: Cache<String, Option<Arc<SourceMap>>>,
     proguard_maps: Cache<String, Option<Arc<ProguardMapping>>>,
     known_builds: Cache<String, bool>,
 }
 
-#[derive(Debug, Clone)]
 pub struct MappedStacktrace {
     pub stacktrace: String,
     pub mapping_used: String,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct MappingRequest<'a> {
-    pub project_id: Uuid,
-    pub build_id: &'a str,
-    pub stacktrace: &'a str,
+impl MappedStacktrace {
+    fn new(stacktrace: String, kind: MappingKind, build_id: &str) -> Self {
+        Self {
+            stacktrace,
+            mapping_used: format!("{}:{build_id}", kind.label()),
+        }
+    }
+}
+
+struct MappingRequest<'a> {
+    project_id: Uuid,
+    build_id: &'a str,
+    stacktrace: &'a str,
 }
 
 struct MappingCrypto {
@@ -88,8 +95,8 @@ impl MappingResolver {
             db,
             bucket: bucket.into(),
             crypto,
-            javascript_maps: Cache::builder()
-                .max_capacity(JS_MAP_CACHE_CAPACITY)
+            sourcemaps: Cache::builder()
+                .max_capacity(SOURCEMAP_CACHE_CAPACITY)
                 .time_to_idle(MAP_CACHE_TTL)
                 .build(),
             proguard_maps: Cache::builder()
@@ -114,20 +121,26 @@ impl MappingResolver {
             return None;
         }
 
+        let kind = language.mapping_kind()?;
+        if !self.build_exists(project_id, build_id).await {
+            return None;
+        }
+
         let request = MappingRequest {
             project_id,
             build_id,
             stacktrace,
         };
 
-        match language {
-            ErrorLanguage::Java => java::apply(self, request).await,
-            ErrorLanguage::Javascript => javascript::apply(self, request).await,
-            ErrorLanguage::Php => None,
-        }
+        let stacktrace = match kind {
+            MappingKind::Proguard => proguard::apply(self, request).await,
+            MappingKind::SourceMap => sourcemap::apply(self, request).await,
+        }?;
+
+        Some(MappedStacktrace::new(stacktrace, kind, build_id))
     }
 
-    pub(super) async fn build_exists(&self, project_id: Uuid, build_id: &str) -> bool {
+    async fn build_exists(&self, project_id: Uuid, build_id: &str) -> bool {
         let key = build_cache_key(project_id, build_id);
         self.known_builds
             .get_with(key, async move {
@@ -152,19 +165,16 @@ impl MappingResolver {
             .await
     }
 
-    pub(super) async fn load_javascript_map(
+    pub(super) async fn load_sourcemap(
         &self,
         project_id: Uuid,
         build_id: &str,
         file_name: &str,
     ) -> Option<Arc<SourceMap>> {
-        let key = javascript::s3_key(project_id, build_id, file_name);
+        let key = sourcemap::s3_key(project_id, build_id, file_name);
         if let Some(map) = self
-            .javascript_maps
-            .get_with(
-                key.clone(),
-                async move { self.fetch_javascript_map(&key).await },
-            )
+            .sourcemaps
+            .get_with(key.clone(), async move { self.fetch_sourcemap(&key).await })
             .await
         {
             return Some(map);
@@ -175,10 +185,10 @@ impl MappingResolver {
             return None;
         }
 
-        let fallback_key = javascript::s3_key(project_id, build_id, basename);
-        self.javascript_maps
+        let fallback_key = sourcemap::s3_key(project_id, build_id, basename);
+        self.sourcemaps
             .get_with(fallback_key.clone(), async move {
-                self.fetch_javascript_map(&fallback_key).await
+                self.fetch_sourcemap(&fallback_key).await
             })
             .await
     }
@@ -188,7 +198,7 @@ impl MappingResolver {
         project_id: Uuid,
         build_id: &str,
     ) -> Option<Arc<ProguardMapping>> {
-        let prefix = java::proguard_s3_prefix(project_id, build_id);
+        let prefix = proguard::s3_prefix(project_id, build_id);
         self.proguard_maps
             .get_with(prefix.clone(), async move {
                 self.fetch_proguard_mapping(&prefix).await
@@ -196,7 +206,7 @@ impl MappingResolver {
             .await
     }
 
-    async fn fetch_javascript_map(&self, key: &str) -> Option<Arc<SourceMap>> {
+    async fn fetch_sourcemap(&self, key: &str) -> Option<Arc<SourceMap>> {
         let data = self.fetch_mapping_bytes(key).await?;
         let map = SourceMap::from_slice(&data)
             .map_err(|error| {
@@ -227,8 +237,7 @@ impl MappingResolver {
         ProguardMapping::parse_many_bytes(&contents)
             .map(Arc::new)
             .map_err(|error| {
-                let _ = error;
-                warn!(prefix, "Failed to parse proguard mappings");
+                warn!(prefix, ?error, "Failed to parse proguard mappings");
             })
             .ok()
     }
@@ -315,20 +324,48 @@ impl MappingCrypto {
             return Err(());
         }
 
-        let nonce_bytes = &data[..NONCE_LEN];
-        let tag = &data[NONCE_LEN..NONCE_LEN + TAG_LEN];
-        let ciphertext = &data[NONCE_LEN + TAG_LEN..];
-
-        let mut payload = Vec::with_capacity(ciphertext.len() + TAG_LEN);
-        payload.extend_from_slice(ciphertext);
-        payload.extend_from_slice(tag);
-
+        let nonce = Nonce::try_from(&data[..NONCE_LEN]).map_err(|_| ())?;
+        let tag = Tag::try_from(&data[NONCE_LEN..NONCE_LEN + TAG_LEN]).map_err(|_| ())?;
+        let mut plaintext = data[NONCE_LEN + TAG_LEN..].to_vec();
         self.cipher
-            .decrypt(Nonce::from_slice(nonce_bytes), payload.as_slice())
-            .map_err(|_| ())
+            .decrypt_inout_detached(&nonce, b"", plaintext.as_mut_slice().into(), &tag)
+            .map_err(|_| ())?;
+        Ok(plaintext)
     }
 }
 
 fn build_cache_key(project_id: Uuid, build_id: &str) -> String {
     format!("{project_id}/{build_id}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MappingCrypto;
+    use aes_gcm::{Nonce, aead::AeadInOut};
+
+    #[test]
+    fn decrypts_nonce_tag_ciphertext_layout() {
+        let crypto = MappingCrypto::new(&"00".repeat(32)).unwrap();
+        let nonce_bytes = [7; 12];
+        let nonce = Nonce::try_from(nonce_bytes.as_slice()).unwrap();
+        let mut ciphertext = b"mapping contents".to_vec();
+        let tag = crypto
+            .cipher
+            .encrypt_inout_detached(&nonce, b"", ciphertext.as_mut_slice().into())
+            .unwrap();
+
+        let mut encrypted = Vec::with_capacity(nonce_bytes.len() + tag.len() + ciphertext.len());
+        encrypted.extend_from_slice(&nonce_bytes);
+        encrypted.extend_from_slice(&tag);
+        encrypted.extend_from_slice(&ciphertext);
+
+        assert_eq!(crypto.decrypt(&encrypted).unwrap(), b"mapping contents");
+    }
+
+    #[test]
+    fn rejects_truncated_ciphertext() {
+        let crypto = MappingCrypto::new(&"00".repeat(32)).unwrap();
+
+        assert!(crypto.decrypt(&[0; 27]).is_err());
+    }
 }

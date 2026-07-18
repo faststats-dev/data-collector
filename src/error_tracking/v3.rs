@@ -1,19 +1,14 @@
+use crate::error_tracking::exact_hash;
 use crate::error_tracking::mapping::MappingResolver;
-use crate::error_tracking::{exact_hash, group_hash};
 use crate::models::ErrorTracking;
 use crate::tinybird::{ErrorOccurrenceV3Row, ModsEventRow, WebEventRow};
 use chrono::Utc;
+use serde::Serialize;
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 use uuid::Uuid;
 
-pub use crate::error_tracking::language::ErrorLanguage;
-
-impl ErrorLanguage {
-    fn group_hash(self, error_type: &str, stacktrace: &str) -> String {
-        group_hash::group_hash(self, error_type, stacktrace)
-    }
-}
+use crate::error_tracking::ErrorLanguage;
 
 pub struct WebOccurrenceInput<'a> {
     pub project_id: Uuid,
@@ -187,27 +182,21 @@ pub async fn enrich_with_mapping(
 }
 
 pub fn web_context(row: &WebEventRow, properties: &HashMap<String, Value>) -> Value {
-    let mut context = match serde_json::to_value(row) {
-        Ok(Value::Object(context)) => context,
-        _ => serde_json::Map::new(),
-    };
-    context.remove("properties");
-
-    for (key, value) in properties {
-        context.insert(key.clone(), value.clone());
-    }
-
-    Value::Object(context)
+    row_context(row, "properties", properties)
 }
 
 pub fn mods_context(row: &ModsEventRow, custom: &HashMap<String, Value>) -> Value {
+    row_context(row, "custom", custom)
+}
+
+fn row_context(row: &impl Serialize, nested_field: &str, extra: &HashMap<String, Value>) -> Value {
     let mut context = match serde_json::to_value(row) {
         Ok(Value::Object(context)) => context,
-        _ => serde_json::Map::new(),
+        _ => Map::new(),
     };
-    context.remove("custom");
+    context.remove(nested_field);
 
-    for (key, value) in custom {
+    for (key, value) in extra {
         context.insert(key.clone(), value.clone());
     }
 

@@ -1,8 +1,6 @@
-use super::{MappedStacktrace, MappingRequest, MappingResolver};
-use sourcemap::SourceMap;
+use super::{MappingRequest, MappingResolver};
+use ::sourcemap::SourceMap;
 use uuid::Uuid;
-
-const MAPPING_KIND: &str = "javascript";
 
 #[derive(Debug, Clone, Copy)]
 struct JavaScriptFrame<'a> {
@@ -13,24 +11,17 @@ struct JavaScriptFrame<'a> {
     suffix: &'static str,
 }
 
-struct OriginalPosition {
-    source: String,
+struct OriginalPosition<'a> {
+    source: &'a str,
     line: u32,
     column: u32,
-    name: Option<String>,
+    name: Option<&'a str>,
 }
 
-pub async fn apply(
+pub(super) async fn apply(
     resolver: &MappingResolver,
     request: MappingRequest<'_>,
-) -> Option<MappedStacktrace> {
-    if !resolver
-        .build_exists(request.project_id, request.build_id)
-        .await
-    {
-        return None;
-    }
-
+) -> Option<String> {
     let mut mapped_any = false;
     let mut mapped_stacktrace = String::with_capacity(request.stacktrace.len());
 
@@ -44,19 +35,22 @@ pub async fn apply(
             continue;
         };
 
-        match apply_frame(resolver, request.project_id, request.build_id, &frame).await {
-            Some(mapped) => {
-                mapped_any = true;
-                mapped_stacktrace.push_str(&mapped);
-            }
-            None => mapped_stacktrace.push_str(line),
+        if apply_frame(
+            resolver,
+            request.project_id,
+            request.build_id,
+            &frame,
+            &mut mapped_stacktrace,
+        )
+        .await
+        {
+            mapped_any = true;
+        } else {
+            mapped_stacktrace.push_str(line);
         }
     }
 
-    mapped_any.then(|| MappedStacktrace {
-        stacktrace: mapped_stacktrace,
-        mapping_used: format!("{MAPPING_KIND}:{}", request.build_id),
-    })
+    mapped_any.then_some(mapped_stacktrace)
 }
 
 async fn apply_frame(
@@ -64,26 +58,32 @@ async fn apply_frame(
     project_id: Uuid,
     build_id: &str,
     frame: &JavaScriptFrame<'_>,
-) -> Option<String> {
+    out: &mut String,
+) -> bool {
     let map = resolver
-        .load_javascript_map(project_id, build_id, frame.file_name)
-        .await?;
-    let original = apply_source_map(&map, frame.line, frame.column)?;
+        .load_sourcemap(project_id, build_id, frame.file_name)
+        .await;
+    let Some(map) = map else {
+        return false;
+    };
+    let Some(original) = apply_source_map(&map, frame.line, frame.column) else {
+        return false;
+    };
 
-    let mut out = String::with_capacity(
+    out.reserve(
         frame.prefix.len()
             + frame.suffix.len()
             + original.source.len()
-            + original.name.as_ref().map(String::len).unwrap_or(0)
+            + original.name.map(str::len).unwrap_or(0)
             + 32,
     );
     out.push_str(frame.prefix);
-    push_original_position(&mut out, &original);
+    push_original_position(out, &original);
     out.push_str(frame.suffix);
-    Some(out)
+    true
 }
 
-fn apply_source_map(map: &SourceMap, line: u32, column: u32) -> Option<OriginalPosition> {
+fn apply_source_map(map: &SourceMap, line: u32, column: u32) -> Option<OriginalPosition<'_>> {
     let token = map.lookup_token(line.saturating_sub(1), column.saturating_sub(1))?;
     let source = token.get_source()?;
     let src_line = token.get_src_line();
@@ -94,25 +94,25 @@ fn apply_source_map(map: &SourceMap, line: u32, column: u32) -> Option<OriginalP
     }
 
     Some(OriginalPosition {
-        source: source.to_string(),
+        source,
         line: src_line.saturating_add(1),
         column: src_col.saturating_add(1),
-        name: token.get_name().map(ToString::to_string),
+        name: token.get_name(),
     })
 }
 
-fn push_original_position(out: &mut String, original: &OriginalPosition) {
-    if let Some(name) = original.name.as_deref().filter(|name| !name.is_empty()) {
+fn push_original_position(out: &mut String, original: &OriginalPosition<'_>) {
+    if let Some(name) = original.name.filter(|name| !name.is_empty()) {
         out.push_str(name);
         out.push_str(" (");
-        out.push_str(&original.source);
+        out.push_str(original.source);
         out.push(':');
         push_u32(out, original.line);
         out.push(':');
         push_u32(out, original.column);
         out.push(')');
     } else {
-        out.push_str(&original.source);
+        out.push_str(original.source);
         out.push(':');
         push_u32(out, original.line);
         out.push(':');

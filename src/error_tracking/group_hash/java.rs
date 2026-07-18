@@ -1,6 +1,6 @@
 use super::{
-    HASHISH_RE, HEX_RE, NUMBER_RE, QUOTED_RE, UUID_RE, WHITESPACE_RE, hash_normalized,
-    lowercase_trimmed, push_normalized_frames, replace_matches,
+    HASHISH_RE, HEX_RE, NUMBER_RE, QUOTED_RE, UUID_RE, WHITESPACE_RE, hash_frames,
+    lowercase_trimmed, replace_matches,
 };
 use regex::Regex;
 use std::sync::LazyLock;
@@ -17,19 +17,9 @@ static LAMBDA_RE: LazyLock<Regex> = LazyLock::new(|| {
 const JAVA_INTERNAL_FRAME_PREFIXES: &[&str] = &["java.", "javax.", "sun.", "com.sun.", "jdk."];
 
 pub fn group_hash(error_type: &str, stacktrace: &str) -> String {
-    let normalized = normalize_for_grouping(error_type, stacktrace);
-    hash_normalized(&normalized)
-}
-
-fn normalize_for_grouping(error_type: &str, stacktrace: &str) -> String {
-    let mut out = String::new();
-    out.push_str(&normalize_piece(error_type));
-    push_normalized_frames(&mut out, stacktrace, 80, |line| {
-        let normalized = normalize_piece(line);
-        (!should_ignore_frame(&normalized)).then_some(normalized)
-    });
-
-    out
+    hash_frames(error_type, stacktrace, 80, normalize_piece, |line| {
+        !should_ignore_frame(line)
+    })
 }
 
 fn normalize_piece(input: &str) -> String {

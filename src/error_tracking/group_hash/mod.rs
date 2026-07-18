@@ -1,4 +1,3 @@
-use crate::error_tracking::language::ErrorLanguage;
 use crate::utils::sha256_hex;
 use regex::Regex;
 use std::{borrow::Cow, sync::LazyLock};
@@ -6,18 +5,6 @@ use std::{borrow::Cow, sync::LazyLock};
 pub mod java;
 pub mod javascript;
 pub mod php;
-
-pub fn group_hash(language: ErrorLanguage, error_type: &str, stacktrace: &str) -> String {
-    match language {
-        ErrorLanguage::Java => java::group_hash(error_type, stacktrace),
-        ErrorLanguage::Javascript => javascript::group_hash(error_type, stacktrace),
-        ErrorLanguage::Php => php::group_hash(error_type, stacktrace),
-    }
-}
-
-pub(crate) fn hash_normalized(normalized: &str) -> String {
-    sha256_hex(&[normalized.as_bytes()])
-}
 
 pub(crate) static UUID_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b")
@@ -54,67 +41,26 @@ pub(crate) fn replace_matches(value: &mut Cow<'_, str>, regex: &Regex, replaceme
     }
 }
 
-pub(crate) fn push_normalized_frames<F>(
-    out: &mut String,
+pub(crate) fn hash_frames<N, I>(
+    error_type: &str,
     stacktrace: &str,
     max_lines: usize,
-    mut normalize: F,
-) where
-    F: FnMut(&str) -> Option<String>,
+    mut normalize: N,
+    include: I,
+) -> String
+where
+    N: FnMut(&str) -> String,
+    I: Fn(&str) -> bool,
 {
+    let mut out = normalize(error_type);
     for line in stacktrace.lines().take(max_lines) {
-        let Some(normalized) = normalize(line) else {
-            continue;
-        };
-        if normalized.is_empty() {
+        let normalized = normalize(line);
+        if normalized.is_empty() || !include(&normalized) {
             continue;
         }
         out.push('\n');
         out.push_str(&normalized);
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::{ErrorLanguage, group_hash};
-
-    #[test]
-    fn dispatches_supported_languages() {
-        assert_eq!(
-            group_hash(
-                ErrorLanguage::Java,
-                "Error",
-                "at com.test.App.run(App.java:1)"
-            ),
-            super::java::group_hash("Error", "at com.test.App.run(App.java:1)")
-        );
-        assert_eq!(
-            group_hash(
-                ErrorLanguage::Javascript,
-                "TypeError",
-                " at render (/app/a.js:10:20)"
-            ),
-            super::javascript::group_hash("TypeError", " at render (/app/a.js:10:20)")
-        );
-        assert_eq!(
-            group_hash(
-                ErrorLanguage::Php,
-                "RuntimeException",
-                "#0 /app/a.php(1): run()"
-            ),
-            super::php::group_hash("RuntimeException", "#0 /app/a.php(1): run()")
-        );
-    }
-
-    #[test]
-    fn creates_group_hash_through_abstraction() {
-        let direct = super::javascript::group_hash("TypeError", " at render (/app/a.js:10:20)");
-        let dispatched = group_hash(
-            ErrorLanguage::Javascript,
-            "TypeError",
-            " at render (/app/a.js:10:20)",
-        );
-
-        assert_eq!(direct, dispatched);
-    }
+    sha256_hex(&[out.as_bytes()])
 }

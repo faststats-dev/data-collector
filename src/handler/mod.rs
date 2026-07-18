@@ -532,7 +532,7 @@ pub fn insert_mods_event(
 pub fn insert_error_occurrence_v3(
     batch_queue: &BatchQueue,
     row: ErrorOccurrenceV3Row,
-    language: crate::error_tracking::v3::ErrorLanguage,
+    language: crate::error_tracking::ErrorLanguage,
     tracking: Option<TrackingContext>,
 ) -> Result<(), HandlerResponse> {
     batch_queue
@@ -590,7 +590,7 @@ async fn process_collect_request(
         insert_error_occurrence_v3(
             batch_queue,
             occurrence,
-            crate::error_tracking::v3::ErrorLanguage::Java,
+            crate::error_tracking::ErrorLanguage::Java,
             Some(built.tracking.clone()),
         )
         .map_err(|_| "Failed to queue error".to_string())?;
@@ -772,7 +772,7 @@ async fn process_web_request(
             insert_error_occurrence_v3(
                 batch_queue,
                 occurrence,
-                crate::error_tracking::v3::ErrorLanguage::Javascript,
+                crate::error_tracking::ErrorLanguage::Javascript,
                 Some(tracking_ctx.clone()),
             )
             .map_err(|_| "Failed to queue error occurrence".to_string())?;

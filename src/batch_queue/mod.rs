@@ -1,8 +1,8 @@
 mod backup_store;
 pub use backup_store::BackupStore;
 
+use crate::error_tracking::ErrorLanguage;
 use crate::error_tracking::mapping::MappingResolver;
-use crate::error_tracking::v3::ErrorLanguage;
 use crate::polar::{PolarClient, UsageCounts};
 use crate::tinybird::{
     ErrorOccurrenceV3Row, ModsEventRow, TinybirdClient, WebEventRow, WebVitalRow,

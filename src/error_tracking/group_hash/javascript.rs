@@ -1,20 +1,11 @@
 use super::{
-    HASHISH_RE, HEX_RE, NUMBER_RE, QUOTED_RE, URL_OR_PATH_RE, UUID_RE, WHITESPACE_RE,
-    hash_normalized, lowercase_trimmed, push_normalized_frames, replace_matches,
+    HASHISH_RE, HEX_RE, NUMBER_RE, QUOTED_RE, URL_OR_PATH_RE, UUID_RE, WHITESPACE_RE, hash_frames,
+    lowercase_trimmed, replace_matches,
 };
 use std::borrow::Cow;
 
 pub fn group_hash(error_type: &str, stacktrace: &str) -> String {
-    let normalized = normalize_for_grouping(error_type, stacktrace);
-    hash_normalized(&normalized)
-}
-
-fn normalize_for_grouping(error_type: &str, stacktrace: &str) -> String {
-    let mut out = String::new();
-    out.push_str(&normalize_piece(error_type));
-    push_normalized_frames(&mut out, stacktrace, 50, |line| Some(normalize_piece(line)));
-
-    out
+    hash_frames(error_type, stacktrace, 50, normalize_piece, |_| true)
 }
 
 fn normalize_piece(input: &str) -> String {

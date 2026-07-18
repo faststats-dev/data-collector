@@ -1,6 +1,8 @@
-pub mod exact_hash;
-pub mod group_hash;
-pub mod language;
+mod exact_hash;
+mod group_hash;
+mod language;
 pub mod mapping;
-pub mod proguard;
+mod proguard;
 pub mod v3;
+
+pub use language::ErrorLanguage;

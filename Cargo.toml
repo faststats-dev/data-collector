@@ -18,7 +18,7 @@ sourcemap = "9.3.2"
 sqlx = { version = "0.9.0", features = ["runtime-tokio", "tls-rustls", "postgres", "sqlite", "macros", "uuid", "time"] }
 tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread", "signal"] }
 zstd = "0.13.3"
-tower-http = { version = "0.6.11", features = ["cors", "decompression-gzip", "decompression-zstd", "decompression-deflate", "decompression-br"] }
+tower-http = { version = "0.7.0", features = ["cors", "decompression-gzip", "decompression-zstd", "decompression-deflate", "decompression-br"] }
 url = "2"
 moka = { version = "0.12.12", features = ["sync", "future"] }
 reqwest = { version = "0.13", features = ["json"] }

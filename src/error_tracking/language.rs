@@ -1,7 +1,7 @@
 use crate::error_tracking::group_hash;
 
 pub const UNSUPPORTED_LANGUAGE_MESSAGE: &str =
-    "Unsupported language. Expected java, javascript, or php";
+    "Unsupported language. Expected java, javascript, php, or rust";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize, Default)]
 pub enum ErrorLanguage {
@@ -9,6 +9,7 @@ pub enum ErrorLanguage {
     Java,
     Javascript,
     Php,
+    Rust,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -35,6 +36,8 @@ impl ErrorLanguage {
             Ok(Self::Javascript)
         } else if value.eq_ignore_ascii_case("php") {
             Ok(Self::Php)
+        } else if value.eq_ignore_ascii_case("rust") || value.eq_ignore_ascii_case("rs") {
+            Ok(Self::Rust)
         } else {
             Err(UnsupportedLanguage(value.to_ascii_lowercase()))
         }
@@ -52,6 +55,7 @@ impl ErrorLanguage {
             Self::Java => group_hash::java::group_hash(error_type, stacktrace),
             Self::Javascript => group_hash::javascript::group_hash(error_type, stacktrace),
             Self::Php => group_hash::php::group_hash(error_type, stacktrace),
+            Self::Rust => group_hash::rust::group_hash(error_type, stacktrace),
         }
     }
 
@@ -60,6 +64,7 @@ impl ErrorLanguage {
             Self::Java => Some(MappingKind::Proguard),
             Self::Javascript => Some(MappingKind::SourceMap),
             Self::Php => None,
+            Self::Rust => None,
         }
     }
 }
@@ -83,6 +88,8 @@ mod tests {
             ErrorLanguage::Javascript
         );
         assert_eq!(ErrorLanguage::parse("PHP").unwrap(), ErrorLanguage::Php);
+        assert_eq!(ErrorLanguage::parse("Rust").unwrap(), ErrorLanguage::Rust);
+        assert_eq!(ErrorLanguage::parse("rs").unwrap(), ErrorLanguage::Rust);
     }
 
     #[test]
@@ -115,10 +122,12 @@ mod tests {
                 ErrorLanguage::Java.mapping_kind(),
                 ErrorLanguage::Javascript.mapping_kind(),
                 ErrorLanguage::Php.mapping_kind(),
+                ErrorLanguage::Rust.mapping_kind(),
             ],
             [
                 Some(MappingKind::Proguard),
                 Some(MappingKind::SourceMap),
+                None,
                 None,
             ]
         );

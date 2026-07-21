@@ -351,6 +351,44 @@ mod tests {
         );
     }
 
+    #[test]
+    fn error_only_occurrences_can_use_rust_group_hash() {
+        let stacktrace =
+            "0: my_app::worker::run::h0123456789abcdef\n   at /srv/my-app/src/worker.rs:42:17";
+        let error = ErrorTracking {
+            error: Error {
+                error: "panic".to_string(),
+                message: Some("worker failed".to_string()),
+                stack: Some(stacktrace.lines().map(str::to_string).collect()),
+            },
+            count: None,
+            session_id: None,
+            build_id: None,
+            context: None,
+            handled: None,
+            sdk_version: None,
+        };
+
+        let row = build_error_only_occurrence(
+            &ErrorOnlyOccurrenceInput {
+                project_id: Uuid::new_v4(),
+                release: None,
+                identifier: None,
+                session_id: None,
+                sdk_name: None,
+                sdk_version: None,
+                language: ErrorLanguage::Rust,
+                context: &empty_context(),
+            },
+            &error,
+        );
+
+        assert_eq!(
+            row.group_hash,
+            group_hash::rust::group_hash("panic", stacktrace)
+        );
+    }
+
     #[tokio::test]
     async fn php_mapping_without_provider_leaves_row_unchanged() {
         let error = ErrorTracking {

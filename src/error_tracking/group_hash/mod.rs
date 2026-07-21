@@ -5,6 +5,7 @@ use std::{borrow::Cow, sync::LazyLock};
 pub mod java;
 pub mod javascript;
 pub mod php;
+pub mod rust;
 
 pub(crate) static UUID_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b")

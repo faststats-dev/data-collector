@@ -412,6 +412,7 @@ const MODS_EVENT_FIELDS: &[&str] = &[
     "online_mode",
     "plugin_version",
     "minecraft_version",
+    "game_version",
     "server_type",
     "java_version",
     "java_vendor",
@@ -504,7 +505,8 @@ pub fn build_mods_event_row(
         player_count: extract_optional_f64(known, "player_count"),
         online_mode: extract_optional_bool(known, "online_mode"),
         plugin_version: extract_optional_string(known, "plugin_version"),
-        minecraft_version: extract_optional_string(known, "minecraft_version"),
+        minecraft_version: extract_optional_string(known, "minecraft_version")
+            .or_else(|| extract_optional_string(known, "game_version")),
         server_type: extract_optional_string(known, "server_type"),
         java_version: extract_optional_string(known, "java_version"),
         java_vendor: extract_optional_string(known, "java_vendor"),

@@ -54,13 +54,9 @@ pub fn should_debounce(visitor_id: Uuid, url: &str, event: Option<&str>) -> bool
 mod tests {
     use super::*;
 
-    fn random_uuid() -> Uuid {
-        Uuid::new_v4()
-    }
-
     #[test]
     fn test_first_request_not_debounced() {
-        let unique_id = random_uuid();
+        let unique_id = Uuid::new_v4();
         assert!(!should_debounce(
             unique_id,
             "https://example.com/page1",
@@ -70,7 +66,7 @@ mod tests {
 
     #[test]
     fn test_duplicate_request_debounced() {
-        let unique_id = random_uuid();
+        let unique_id = Uuid::new_v4();
         let url = "https://example.com/page2";
 
         assert!(!should_debounce(unique_id, url, Some("pageview")));
@@ -79,7 +75,7 @@ mod tests {
 
     #[test]
     fn test_different_urls_not_debounced() {
-        let unique_id = random_uuid();
+        let unique_id = Uuid::new_v4();
 
         assert!(!should_debounce(
             unique_id,
@@ -96,8 +92,8 @@ mod tests {
     #[test]
     fn test_different_visitors_not_debounced() {
         let url = "https://example.com/shared-page";
-        let id1 = random_uuid();
-        let id2 = random_uuid();
+        let id1 = Uuid::new_v4();
+        let id2 = Uuid::new_v4();
 
         assert!(!should_debounce(id1, url, Some("pageview")));
         assert!(!should_debounce(id2, url, Some("pageview")));
@@ -105,7 +101,7 @@ mod tests {
 
     #[test]
     fn test_non_page_events_are_never_debounced() {
-        let unique_id = random_uuid();
+        let unique_id = Uuid::new_v4();
         let url = "https://example.com/page3";
 
         assert!(!should_debounce(unique_id, url, Some("processImage")));
@@ -114,7 +110,7 @@ mod tests {
 
     #[test]
     fn test_page_leave_is_debounced() {
-        let unique_id = random_uuid();
+        let unique_id = Uuid::new_v4();
         let url = "https://example.com/page4";
 
         assert!(!should_debounce(unique_id, url, Some("page_leave")));
@@ -123,7 +119,7 @@ mod tests {
 
     #[test]
     fn test_missing_event_is_not_debounced() {
-        let unique_id = random_uuid();
+        let unique_id = Uuid::new_v4();
         let url = "https://example.com/page5";
 
         assert!(!should_debounce(unique_id, url, None));

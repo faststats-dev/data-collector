@@ -1,7 +1,7 @@
-use crate::error_tracking::exact_hash;
 use crate::error_tracking::mapping::MappingResolver;
-use crate::models::ErrorTracking;
+use crate::models::{Error, ErrorTracking};
 use crate::tinybird::{ErrorOccurrenceV3Row, ModsEventRow, WebEventRow};
+use crate::utils::sha256_hex;
 use chrono::Utc;
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -10,10 +10,11 @@ use uuid::Uuid;
 
 use crate::error_tracking::ErrorLanguage;
 
-pub struct WebOccurrenceInput<'a> {
+pub struct OccurrenceInput<'a> {
     pub project_id: Uuid,
+    pub language: ErrorLanguage,
     pub release: Option<&'a str>,
-    pub user_id: Option<&'a str>,
+    pub identifier: Option<&'a str>,
     pub session_id: Option<&'a str>,
     pub window_id: Option<&'a str>,
     pub sdk_name: Option<&'a str>,
@@ -21,107 +22,27 @@ pub struct WebOccurrenceInput<'a> {
     pub context: &'a Value,
 }
 
-pub struct ModsOccurrenceInput<'a> {
-    pub project_id: Uuid,
-    pub release: Option<&'a str>,
-    pub server_id: &'a str,
-    pub session_id: Option<&'a str>,
-    pub sdk_version: Option<&'a str>,
-    pub context: &'a Value,
-}
-
-pub struct ErrorOnlyOccurrenceInput<'a> {
-    pub project_id: Uuid,
-    pub release: Option<&'a str>,
-    pub identifier: Option<&'a str>,
-    pub session_id: Option<&'a str>,
-    pub sdk_name: Option<&'a str>,
-    pub sdk_version: Option<&'a str>,
-    pub language: ErrorLanguage,
-    pub context: &'a Value,
-}
-
-pub fn build_web_occurrence(
-    input: &WebOccurrenceInput<'_>,
-    error: &ErrorTracking,
-) -> ErrorOccurrenceV3Row {
-    build_occurrence(
-        OccurrenceInput {
-            project_id: input.project_id,
-            release: input.release,
-            user_id: input.user_id,
-            session_id: input.session_id,
-            window_id: input.window_id,
-            sdk_name: input.sdk_name,
-            sdk_version: input.sdk_version,
-            context: input.context,
-            language: ErrorLanguage::Javascript,
-        },
-        error,
-    )
-}
-
-pub fn build_mods_occurrence(
-    input: &ModsOccurrenceInput<'_>,
-    error: &ErrorTracking,
-) -> ErrorOccurrenceV3Row {
-    build_occurrence(
-        OccurrenceInput {
-            project_id: input.project_id,
-            release: input.release,
-            user_id: Some(input.server_id),
-            session_id: input.session_id,
-            window_id: None,
-            sdk_name: Some("minecraft-plugin"),
-            sdk_version: input.sdk_version,
-            context: input.context,
-            language: ErrorLanguage::Java,
-        },
-        error,
-    )
-}
-
-pub fn build_error_only_occurrence(
-    input: &ErrorOnlyOccurrenceInput<'_>,
-    error: &ErrorTracking,
-) -> ErrorOccurrenceV3Row {
-    build_occurrence(
-        OccurrenceInput {
-            project_id: input.project_id,
-            release: input.release,
-            user_id: input.identifier,
-            session_id: input.session_id,
-            window_id: None,
-            sdk_name: input.sdk_name,
-            sdk_version: input.sdk_version,
-            context: input.context,
-            language: input.language,
-        },
-        error,
-    )
-}
-
-struct OccurrenceInput<'a> {
-    project_id: Uuid,
-    release: Option<&'a str>,
-    user_id: Option<&'a str>,
-    session_id: Option<&'a str>,
-    window_id: Option<&'a str>,
-    sdk_name: Option<&'a str>,
-    sdk_version: Option<&'a str>,
-    context: &'a Value,
-    language: ErrorLanguage,
-}
-
-fn build_occurrence(input: OccurrenceInput<'_>, error: &ErrorTracking) -> ErrorOccurrenceV3Row {
-    let stacktrace = error
-        .error
-        .stack
-        .as_ref()
-        .map(|stack| stack.join("\n"))
-        .unwrap_or_default();
-    let error_type = error.error.error.clone();
-    let error_message = error.error.message.clone().unwrap_or_default();
+pub fn build_occurrence(input: OccurrenceInput<'_>, error: ErrorTracking) -> ErrorOccurrenceV3Row {
+    let ErrorTracking {
+        error:
+            Error {
+                error: error_type,
+                message,
+                stack,
+            },
+        count,
+        build_id,
+        context,
+        sdk_version,
+        session_id,
+        handled,
+    } = error;
+    let stacktrace = match stack {
+        Some(mut stack) if stack.len() == 1 => stack.pop().unwrap(),
+        Some(stack) => stack.join("\n"),
+        None => String::new(),
+    };
+    let error_message = message.unwrap_or_default();
     let source_stack = stacktrace.as_str();
 
     ErrorOccurrenceV3Row {
@@ -131,54 +52,53 @@ fn build_occurrence(input: OccurrenceInput<'_>, error: &ErrorTracking) -> ErrorO
         // Replace this with the SDK/request-provided environment once grouping and
         // release behavior are verified in production data.
         environment: "prod".to_string(),
-        release: input.release.unwrap_or_default().to_string(),
+        release: build_id.unwrap_or_else(|| input.release.unwrap_or_default().to_owned()),
         group_hash: input.language.group_hash(&error_type, source_stack),
-        exact_hash: exact_hash::exact_hash(&error_type, &error_message, source_stack),
+        exact_hash: exact_hash(&error_type, &error_message, source_stack),
         error_type,
         error_message,
-        handled: error.handled.unwrap_or(false),
+        handled: handled.unwrap_or(false),
         stacktrace,
         mapped_stacktrace: None,
         mapping_used: None,
-        identifier: input.user_id.unwrap_or_default().to_string(),
-        session_id: input.session_id.unwrap_or_default().to_string(),
-        window_id: input.window_id.unwrap_or_default().to_string(),
-        sdk_name: input.sdk_name.unwrap_or_default().to_string(),
-        sdk_version: input.sdk_version.unwrap_or_default().to_string(),
-        count: error
-            .count
-            .and_then(|count| count.try_into().ok())
-            .unwrap_or(1),
-        context: occurrence_context(input.context, error.context.as_ref()),
+        identifier: input.identifier.unwrap_or_default().to_owned(),
+        session_id: session_id.unwrap_or_else(|| input.session_id.unwrap_or_default().to_owned()),
+        window_id: input.window_id.unwrap_or_default().to_owned(),
+        sdk_name: input.sdk_name.unwrap_or_default().to_owned(),
+        sdk_version: sdk_version
+            .unwrap_or_else(|| input.sdk_version.unwrap_or_default().to_owned()),
+        count: count.and_then(|count| count.try_into().ok()).unwrap_or(1),
+        context: occurrence_context(input.context, context),
     }
 }
 
 pub async fn enrich_with_mapping(
-    resolver: Option<&MappingResolver>,
+    resolver: &MappingResolver,
     mut row: ErrorOccurrenceV3Row,
     language: ErrorLanguage,
 ) -> ErrorOccurrenceV3Row {
-    let Some(resolver) = resolver else {
-        return row;
-    };
-    let build_id = row.release.as_str();
-    if build_id.is_empty() || row.stacktrace.is_empty() {
-        return row;
-    }
-
     let mapped = resolver
-        .apply(language, row.project_id, build_id, &row.stacktrace)
+        .apply(language, row.project_id, &row.release, &row.stacktrace)
         .await;
 
     if let Some(mapped) = mapped {
         row.group_hash = language.group_hash(&row.error_type, &mapped.stacktrace);
-        row.exact_hash =
-            exact_hash::exact_hash(&row.error_type, &row.error_message, &mapped.stacktrace);
+        row.exact_hash = exact_hash(&row.error_type, &row.error_message, &mapped.stacktrace);
         row.mapped_stacktrace = Some(mapped.stacktrace);
         row.mapping_used = Some(mapped.mapping_used);
     }
 
     row
+}
+
+fn exact_hash(error_type: &str, message: &str, stacktrace: &str) -> String {
+    sha256_hex(&[
+        error_type.as_bytes(),
+        b"\x1f",
+        message.as_bytes(),
+        b"\x1f",
+        stacktrace.as_bytes(),
+    ])
 }
 
 pub fn web_context(row: &WebEventRow, properties: &HashMap<String, Value>) -> Value {
@@ -207,16 +127,12 @@ pub fn empty_context() -> Value {
     Value::Object(Map::new())
 }
 
-pub fn request_context(provided: Option<Value>, fallback: impl FnOnce() -> Value) -> Value {
-    provided.unwrap_or_else(fallback)
-}
-
-pub fn occurrence_context(base_context: &Value, error_context: Option<&Value>) -> String {
+fn occurrence_context(base_context: &Value, error_context: Option<Value>) -> String {
     let Some(error_context) = error_context else {
         return serialize_context(base_context);
     };
 
-    let merged = merge_context_values(base_context.clone(), error_context.clone());
+    let merged = merge_context_values(base_context.clone(), error_context);
     serialize_context(&merged)
 }
 
@@ -254,8 +170,7 @@ fn merge_context_values(base_context: Value, error_context: Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::{
-        ErrorLanguage, ErrorOnlyOccurrenceInput, ModsOccurrenceInput, build_error_only_occurrence,
-        build_mods_occurrence, empty_context, occurrence_context,
+        ErrorLanguage, OccurrenceInput, build_occurrence, empty_context, occurrence_context,
     };
     use crate::error_tracking::group_hash;
     use crate::models::{Error, ErrorTracking};
@@ -280,16 +195,20 @@ mod tests {
             sdk_version: None,
         };
 
-        let row = build_mods_occurrence(
-            &ModsOccurrenceInput {
+        let context = empty_context();
+        let row = build_occurrence(
+            OccurrenceInput {
                 project_id: Uuid::new_v4(),
+                language: ErrorLanguage::Java,
                 release: None,
-                server_id: "server-id",
+                identifier: Some("server-id"),
                 session_id: None,
+                window_id: None,
+                sdk_name: Some("minecraft-plugin"),
                 sdk_version: None,
-                context: &empty_context(),
+                context: &context,
             },
-            &error,
+            error,
         );
 
         assert_eq!(
@@ -300,6 +219,76 @@ mod tests {
             )
         );
         assert_eq!(row.count, 3);
+    }
+
+    #[test]
+    fn occurrence_uses_error_metadata_before_request_fallbacks() {
+        let context = empty_context();
+        let row = build_occurrence(
+            OccurrenceInput {
+                project_id: Uuid::new_v4(),
+                language: ErrorLanguage::Java,
+                release: Some("request-release"),
+                identifier: None,
+                session_id: Some("request-session"),
+                window_id: None,
+                sdk_name: None,
+                sdk_version: Some("request-sdk"),
+                context: &context,
+            },
+            ErrorTracking {
+                error: Error {
+                    error: "Error".to_owned(),
+                    message: None,
+                    stack: None,
+                },
+                count: None,
+                session_id: Some("error-session".to_owned()),
+                build_id: Some("error-release".to_owned()),
+                context: None,
+                handled: None,
+                sdk_version: Some("error-sdk".to_owned()),
+            },
+        );
+
+        assert_eq!(row.release, "error-release");
+        assert_eq!(row.session_id, "error-session");
+        assert_eq!(row.sdk_version, "error-sdk");
+    }
+
+    #[test]
+    fn occurrence_uses_request_metadata_as_fallback() {
+        let context = empty_context();
+        let row = build_occurrence(
+            OccurrenceInput {
+                project_id: Uuid::new_v4(),
+                language: ErrorLanguage::Java,
+                release: Some("request-release"),
+                identifier: None,
+                session_id: Some("request-session"),
+                window_id: None,
+                sdk_name: None,
+                sdk_version: Some("request-sdk"),
+                context: &context,
+            },
+            ErrorTracking {
+                error: Error {
+                    error: "Error".to_owned(),
+                    message: None,
+                    stack: None,
+                },
+                count: None,
+                session_id: None,
+                build_id: None,
+                context: None,
+                handled: None,
+                sdk_version: None,
+            },
+        );
+
+        assert_eq!(row.release, "request-release");
+        assert_eq!(row.session_id, "request-session");
+        assert_eq!(row.sdk_version, "request-sdk");
     }
 
     #[test]
@@ -328,18 +317,20 @@ mod tests {
             sdk_version: None,
         };
 
-        let row = build_error_only_occurrence(
-            &ErrorOnlyOccurrenceInput {
+        let context = empty_context();
+        let row = build_occurrence(
+            OccurrenceInput {
                 project_id: Uuid::new_v4(),
+                language: ErrorLanguage::Php,
                 release: None,
                 identifier: None,
                 session_id: None,
+                window_id: None,
                 sdk_name: None,
                 sdk_version: None,
-                language: ErrorLanguage::Php,
-                context: &empty_context(),
+                context: &context,
             },
-            &error,
+            error,
         );
 
         assert_eq!(
@@ -369,18 +360,20 @@ mod tests {
             sdk_version: None,
         };
 
-        let row = build_error_only_occurrence(
-            &ErrorOnlyOccurrenceInput {
+        let context = empty_context();
+        let row = build_occurrence(
+            OccurrenceInput {
                 project_id: Uuid::new_v4(),
+                language: ErrorLanguage::Rust,
                 release: None,
                 identifier: None,
                 session_id: None,
+                window_id: None,
                 sdk_name: None,
                 sdk_version: None,
-                language: ErrorLanguage::Rust,
-                context: &empty_context(),
+                context: &context,
             },
-            &error,
+            error,
         );
 
         assert_eq!(
@@ -389,52 +382,11 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn php_mapping_without_provider_leaves_row_unchanged() {
-        let error = ErrorTracking {
-            error: Error {
-                error: "RuntimeException".to_string(),
-                message: Some("Failed for user 123".to_string()),
-                stack: Some(vec![
-                    "#0 /var/www/app/src/UserService.php(42): App\\Service\\UserService->find('abc', 123)".to_string(),
-                ]),
-            },
-            count: None,
-            session_id: None,
-            build_id: Some("build-1".to_string()),
-            context: None,
-            handled: None,
-            sdk_version: None,
-        };
-        let row = build_error_only_occurrence(
-            &ErrorOnlyOccurrenceInput {
-                project_id: Uuid::new_v4(),
-                release: Some("build-1"),
-                identifier: None,
-                session_id: None,
-                sdk_name: None,
-                sdk_version: None,
-                language: ErrorLanguage::Php,
-                context: &empty_context(),
-            },
-            &error,
-        );
-
-        let group_hash = row.group_hash.clone();
-        let exact_hash = row.exact_hash.clone();
-        let enriched = super::enrich_with_mapping(None, row, ErrorLanguage::Php).await;
-
-        assert_eq!(enriched.group_hash, group_hash);
-        assert_eq!(enriched.exact_hash, exact_hash);
-        assert_eq!(enriched.mapped_stacktrace, None);
-        assert_eq!(enriched.mapping_used, None);
-    }
-
     #[test]
     fn occurrence_context_merges_error_context_over_base_context() {
         let context = occurrence_context(
             &json!({"page":"/checkout","plan":"pro"}),
-            Some(&json!({"plan":"enterprise","component":"pay-button"})),
+            Some(json!({"plan":"enterprise","component":"pay-button"})),
         );
 
         let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();

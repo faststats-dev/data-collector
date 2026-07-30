@@ -3,6 +3,7 @@ use super::{
     hash_frames, lowercase_trimmed, replace_matches,
 };
 use regex::Regex;
+use std::borrow::Cow;
 use std::sync::LazyLock;
 
 static PHP_FRAME_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -20,10 +21,10 @@ pub fn group_hash(error_type: &str, stacktrace: &str) -> String {
     })
 }
 
-fn normalize_piece(input: &str) -> String {
+fn normalize_piece(input: &str) -> Cow<'_, str> {
     let trimmed = input.trim();
     if let Some(normalized) = normalize_php_frame(trimmed) {
-        return normalized;
+        return Cow::Owned(normalized);
     }
 
     normalize_common(trimmed)
@@ -39,7 +40,7 @@ fn normalize_php_frame(input: &str) -> Option<String> {
     Some(format!("# <php-frame> {file}: {call}"))
 }
 
-fn normalize_call(call: &str) -> String {
+fn normalize_call(call: &str) -> Cow<'_, str> {
     let mut value = lowercase_trimmed(call);
     replace_matches(&mut value, &PHP_QUOTED_RE, "<quoted>");
     replace_matches(&mut value, &UUID_RE, "<uuid>");
@@ -48,10 +49,10 @@ fn normalize_call(call: &str) -> String {
     replace_matches(&mut value, &ARGS_RE, "(<args>)");
     replace_matches(&mut value, &NUMBER_RE, "<num>");
     replace_matches(&mut value, &WHITESPACE_RE, " ");
-    value.into_owned()
+    value
 }
 
-fn normalize_common(input: &str) -> String {
+fn normalize_common(input: &str) -> Cow<'_, str> {
     let mut value = lowercase_trimmed(input);
     replace_matches(&mut value, &UUID_RE, "<uuid>");
     replace_matches(&mut value, &HEX_RE, "<hex>");
@@ -60,7 +61,7 @@ fn normalize_common(input: &str) -> String {
     replace_matches(&mut value, &URL_OR_PATH_RE, "$3");
     replace_matches(&mut value, &NUMBER_RE, "<num>");
     replace_matches(&mut value, &WHITESPACE_RE, " ");
-    value.into_owned()
+    value
 }
 
 fn basename(path: &str) -> &str {

@@ -8,7 +8,7 @@ pub fn group_hash(error_type: &str, stacktrace: &str) -> String {
     hash_frames(error_type, stacktrace, 50, normalize_piece, |_| true)
 }
 
-fn normalize_piece(input: &str) -> String {
+fn normalize_piece(input: &str) -> Cow<'_, str> {
     let mut value = lowercase_trimmed(input);
     replace_matches(&mut value, &UUID_RE, "<uuid>");
     replace_matches(&mut value, &HEX_RE, "<hex>");
@@ -18,7 +18,7 @@ fn normalize_piece(input: &str) -> String {
     replace_matches(&mut value, &URL_OR_PATH_RE, "$3");
     replace_matches(&mut value, &NUMBER_RE, "<num>");
     replace_matches(&mut value, &WHITESPACE_RE, " ");
-    value.into_owned()
+    value
 }
 
 fn remove_frame_line_columns(value: &mut Cow<'_, str>) {

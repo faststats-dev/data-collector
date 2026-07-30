@@ -1,9 +1,9 @@
 use super::{
-    HASHISH_RE, HEX_RE, NUMBER_RE, QUOTED_RE, UUID_RE, WHITESPACE_RE, lowercase_trimmed,
-    replace_matches,
+    HASHISH_RE, HEX_RE, NUMBER_RE, QUOTED_RE, UUID_RE, WHITESPACE_RE, hash_frames,
+    lowercase_trimmed, replace_matches,
 };
-use crate::utils::sha256_hex;
 use regex::Regex;
+use std::borrow::Cow;
 use std::sync::LazyLock;
 
 const MAX_LINES: usize = 120;
@@ -20,29 +20,20 @@ static FRAME_ADDRESS_RE: LazyLock<Regex> = LazyLock::new(|| {
 /// Builds a stable fingerprint from Rust panic, `std::backtrace`, and
 /// `anyhow`/`eyre` style reports.
 pub fn group_hash(error_type: &str, stacktrace: &str) -> String {
-    let mut out = normalize_piece(error_type);
-
-    for line in stacktrace.lines().take(MAX_LINES) {
-        let normalized = normalize_piece(line);
-        if normalized.is_empty() || should_ignore_line(&normalized) {
-            continue;
-        }
-        out.push('\n');
-        out.push_str(&normalized);
-    }
-
-    sha256_hex(&[out.as_bytes()])
+    hash_frames(error_type, stacktrace, MAX_LINES, normalize_piece, |line| {
+        !should_ignore_line(line)
+    })
 }
 
-fn normalize_piece(input: &str) -> String {
+fn normalize_piece(input: &str) -> Cow<'_, str> {
     let without_ansi = ANSI_ESCAPE_RE.replace_all(input, "");
     let trimmed = without_ansi.trim();
     if trimmed.is_empty() || is_report_metadata(trimmed) {
-        return String::new();
+        return Cow::Borrowed("");
     }
 
     if let Some(location) = trimmed.strip_prefix("at ") {
-        return normalize_location(location);
+        return Cow::Owned(normalize_location(location));
     }
 
     let frame = strip_frame_number(trimmed);
@@ -55,7 +46,7 @@ fn normalize_piece(input: &str) -> String {
     replace_matches(&mut value, &QUOTED_RE, "<quoted>");
     replace_matches(&mut value, &NUMBER_RE, "<num>");
     replace_matches(&mut value, &WHITESPACE_RE, " ");
-    value.into_owned()
+    Cow::Owned(value.into_owned())
 }
 
 fn strip_frame_number(input: &str) -> &str {

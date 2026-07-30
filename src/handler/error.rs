@@ -4,9 +4,7 @@ use super::{
 };
 use crate::batch_queue::TrackingContext;
 use crate::error_tracking::ErrorLanguage;
-use crate::error_tracking::v3::{
-    ErrorOnlyOccurrenceInput, build_error_only_occurrence, empty_context, request_context,
-};
+use crate::error_tracking::v3::{OccurrenceInput, build_occurrence, empty_context};
 use crate::models::{AppState, ErrorTracking};
 use axum::body::Bytes;
 use axum::extract::State;
@@ -79,28 +77,27 @@ pub async fn error(
         organization_id: ctx.organization_id.as_deref().map(Into::into),
     };
 
-    let context = request_context(payload.context, empty_context);
+    let context = payload.context.unwrap_or_else(empty_context);
 
-    for mut error in payload.errors {
-        if error.session_id.is_none() {
-            error.session_id = payload.session_id.clone();
-        }
-        if error.build_id.is_none() {
-            error.build_id = payload.build_id.clone();
-        }
-        let replay_session_id = error.session_id.clone();
-        let occurrence = build_error_only_occurrence(
-            &ErrorOnlyOccurrenceInput {
+    for error in payload.errors {
+        let replay_session_id = error
+            .session_id
+            .as_deref()
+            .or(payload.session_id.as_deref())
+            .map(str::to_owned);
+        let occurrence = build_occurrence(
+            OccurrenceInput {
                 project_id: ctx.project_id,
-                release: error.build_id.as_deref(),
+                language,
+                release: payload.build_id.as_deref(),
                 identifier: payload.identifier.as_deref(),
-                session_id: error.session_id.as_deref(),
+                session_id: payload.session_id.as_deref(),
+                window_id: None,
                 sdk_name: payload.sdk_name.as_deref(),
                 sdk_version: payload.sdk_version.as_deref(),
-                language,
                 context: &context,
             },
-            &error,
+            error,
         );
         if let Err(e) = insert_error_occurrence_v3(
             &state.batch_queue,

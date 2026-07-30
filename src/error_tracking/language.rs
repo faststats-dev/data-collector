@@ -12,21 +12,6 @@ pub enum ErrorLanguage {
     Rust,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum MappingKind {
-    Proguard,
-    SourceMap,
-}
-
-impl MappingKind {
-    pub(crate) const fn label(self) -> &'static str {
-        match self {
-            Self::Proguard => "r8",
-            Self::SourceMap => "javascript",
-        }
-    }
-}
-
 impl ErrorLanguage {
     pub fn parse(value: &str) -> Result<Self, UnsupportedLanguage> {
         let value = value.trim();
@@ -58,15 +43,6 @@ impl ErrorLanguage {
             Self::Rust => group_hash::rust::group_hash(error_type, stacktrace),
         }
     }
-
-    pub(crate) const fn mapping_kind(self) -> Option<MappingKind> {
-        match self {
-            Self::Java => Some(MappingKind::Proguard),
-            Self::Javascript => Some(MappingKind::SourceMap),
-            Self::Php => None,
-            Self::Rust => None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -74,7 +50,7 @@ pub struct UnsupportedLanguage(String);
 
 #[cfg(test)]
 mod tests {
-    use super::{ErrorLanguage, MappingKind, UNSUPPORTED_LANGUAGE_MESSAGE};
+    use super::{ErrorLanguage, UNSUPPORTED_LANGUAGE_MESSAGE};
 
     #[test]
     fn parses_supported_languages_and_aliases() {
@@ -112,24 +88,6 @@ mod tests {
         assert_eq!(
             ErrorLanguage::parse_optional(Some("ruby")).unwrap_err(),
             UNSUPPORTED_LANGUAGE_MESSAGE
-        );
-    }
-
-    #[test]
-    fn declares_language_capabilities_in_one_place() {
-        assert_eq!(
-            [
-                ErrorLanguage::Java.mapping_kind(),
-                ErrorLanguage::Javascript.mapping_kind(),
-                ErrorLanguage::Php.mapping_kind(),
-                ErrorLanguage::Rust.mapping_kind(),
-            ],
-            [
-                Some(MappingKind::Proguard),
-                Some(MappingKind::SourceMap),
-                None,
-                None,
-            ]
         );
     }
 }

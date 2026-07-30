@@ -713,9 +713,9 @@ async fn process_web_request(
     );
     let should_process_errors = ctx.error_tracking_enabled && has_errors;
     let error_v3_context = should_process_errors.then(|| {
-        crate::error_tracking::v3::request_context(parsed.context, || {
-            crate::error_tracking::v3::web_context(&event_row, &properties)
-        })
+        parsed
+            .context
+            .unwrap_or_else(|| crate::error_tracking::v3::web_context(&event_row, &properties))
     });
 
     if ctx.replay_storage_active
@@ -750,24 +750,21 @@ async fn process_web_request(
         parsed.errors,
         error_v3_context.as_ref(),
     ) {
-        // The browser SDK sends this as `buildId`; the Tinybird v3 schema stores it as `release`.
-        let release = parsed.build_id.as_deref();
-        for mut error in errors {
-            if error.session_id.is_none() {
-                error.session_id = parsed.session_id.clone();
-            }
-            let occurrence = crate::error_tracking::v3::build_web_occurrence(
-                &crate::error_tracking::v3::WebOccurrenceInput {
+        for error in errors {
+            let occurrence = crate::error_tracking::v3::build_occurrence(
+                crate::error_tracking::v3::OccurrenceInput {
                     project_id: ctx.project_id,
-                    release,
-                    user_id: Some(fallback_identity.as_str()),
-                    session_id: error.session_id.as_deref(),
+                    language: crate::error_tracking::ErrorLanguage::Javascript,
+                    // The browser SDK sends this as `buildId`; Tinybird stores it as `release`.
+                    release: parsed.build_id.as_deref(),
+                    identifier: Some(&fallback_identity),
+                    session_id: parsed.session_id.as_deref(),
                     window_id: parsed.window_id.as_deref(),
                     sdk_name: parsed.sdk_name.as_deref(),
                     sdk_version: parsed.sdk_version.as_deref(),
                     context: error_v3_context,
                 },
-                &error,
+                error,
             );
             insert_error_occurrence_v3(
                 batch_queue,

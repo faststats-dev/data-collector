@@ -5,9 +5,8 @@ use super::{
     validate_hostname,
 };
 use crate::batch_queue::{FailedRequest, RequestType, TrackingContext};
-use crate::error_tracking::v3::{
-    WebOccurrenceInput, build_web_occurrence, request_context, web_context,
-};
+use crate::error_tracking::ErrorLanguage;
+use crate::error_tracking::v3::{OccurrenceInput, build_occurrence, web_context};
 use crate::identity::resolve_person_for_distinct_id;
 use crate::models::{AppState, ErrorTracking};
 use crate::utils::debounce::should_debounce;
@@ -219,7 +218,7 @@ pub async fn web(
     );
     let should_process_errors = ctx.error_tracking_enabled && has_errors;
     let error_v3_context = should_process_errors
-        .then(|| request_context(context, || web_context(&event_row, &properties)));
+        .then(|| context.unwrap_or_else(|| web_context(&event_row, &properties)));
 
     if ctx.replay_storage_active
         && let Some(session_id) = session_id.as_deref()
@@ -255,32 +254,26 @@ pub async fn web(
     if let (true, Some(error_list), Some(error_v3_context)) =
         (should_process_errors, errors, error_v3_context.as_ref())
     {
-        for mut error in error_list {
-            if error.session_id.is_none() {
-                error.session_id.clone_from(&session_id);
-            }
-            if error.build_id.is_none() {
-                error.build_id.clone_from(&build_id);
-            }
-            // The browser SDK sends this as `buildId`; the Tinybird v3 schema stores it as `release`.
-            let release = error.build_id.as_deref();
-            let occurrence = build_web_occurrence(
-                &WebOccurrenceInput {
+        for error in error_list {
+            let occurrence = build_occurrence(
+                OccurrenceInput {
                     project_id: ctx.project_id,
-                    release,
-                    user_id: Some(fallback_identity.as_str()),
-                    session_id: error.session_id.as_deref(),
+                    language: ErrorLanguage::Javascript,
+                    // The browser SDK sends this as `buildId`; Tinybird stores it as `release`.
+                    release: build_id.as_deref(),
+                    identifier: Some(&fallback_identity),
+                    session_id: session_id.as_deref(),
                     window_id: window_id.as_deref(),
                     sdk_name: sdk_name.as_deref(),
                     sdk_version: sdk_version.as_deref(),
                     context: error_v3_context,
                 },
-                &error,
+                error,
             );
             if let Err(e) = insert_error_occurrence_v3(
                 &state.batch_queue,
                 occurrence,
-                crate::error_tracking::ErrorLanguage::Javascript,
+                ErrorLanguage::Javascript,
                 Some(tracking_ctx.clone()),
             ) {
                 return e;

@@ -3,6 +3,7 @@ use super::{
     lowercase_trimmed, replace_matches,
 };
 use regex::Regex;
+use std::borrow::Cow;
 use std::sync::LazyLock;
 
 static JAR_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -22,7 +23,7 @@ pub fn group_hash(error_type: &str, stacktrace: &str) -> String {
     })
 }
 
-fn normalize_piece(input: &str) -> String {
+fn normalize_piece(input: &str) -> Cow<'_, str> {
     let mut value = lowercase_trimmed(input);
     replace_matches(&mut value, &UUID_RE, "<uuid>");
     replace_matches(&mut value, &HEX_RE, "<hex>");
@@ -33,7 +34,7 @@ fn normalize_piece(input: &str) -> String {
     replace_matches(&mut value, &LAMBDA_RE, "$$Lambda");
     replace_matches(&mut value, &NUMBER_RE, "<num>");
     replace_matches(&mut value, &WHITESPACE_RE, " ");
-    value.into_owned()
+    value
 }
 
 fn should_ignore_frame(line: &str) -> bool {
@@ -50,7 +51,21 @@ fn is_java_internal_frame(line: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{group_hash, normalize_piece};
+    use super::{group_hash, normalize_piece, should_ignore_frame};
+    use crate::utils::sha256_hex;
+
+    fn concatenated_hash(error_type: &str, stacktrace: &str) -> String {
+        let mut normalized_stack = normalize_piece(error_type).into_owned();
+        for line in stacktrace.lines().take(80) {
+            let normalized = normalize_piece(line);
+            if normalized.is_empty() || should_ignore_frame(&normalized) {
+                continue;
+            }
+            normalized_stack.push('\n');
+            normalized_stack.push_str(&normalized);
+        }
+        sha256_hex(&[normalized_stack.as_bytes()])
+    }
 
     #[test]
     fn normalizes_java_frame_noise() {
@@ -106,5 +121,22 @@ mod tests {
         let b = group_hash("RuntimeException", &with_elision);
 
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn streaming_hash_matches_concatenated_hash() {
+        let stacktrace = (0..30)
+            .map(|line| {
+                format!(
+                    "\tat plugin-1.2.3.jar//com.example.Service{line}.run(Service{line}.java:{line})"
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(
+            group_hash("java.lang.RuntimeException", &stacktrace),
+            concatenated_hash("java.lang.RuntimeException", &stacktrace)
+        );
     }
 }

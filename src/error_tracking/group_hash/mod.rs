@@ -1,5 +1,5 @@
-use crate::utils::sha256_hex;
 use regex::Regex;
+use sha2::{Digest, Sha256};
 use std::{borrow::Cow, sync::LazyLock};
 
 pub mod java;
@@ -42,26 +42,28 @@ pub(crate) fn replace_matches(value: &mut Cow<'_, str>, regex: &Regex, replaceme
     }
 }
 
-pub(crate) fn hash_frames<N, I>(
+pub(crate) fn hash_frames<I>(
     error_type: &str,
     stacktrace: &str,
     max_lines: usize,
-    mut normalize: N,
+    mut normalize: impl for<'a> FnMut(&'a str) -> Cow<'a, str>,
     include: I,
 ) -> String
 where
-    N: FnMut(&str) -> String,
     I: Fn(&str) -> bool,
 {
-    let mut out = normalize(error_type);
+    let mut hash = Sha256::new();
+    hash.update(normalize(error_type).as_ref().as_bytes());
+
     for line in stacktrace.lines().take(max_lines) {
         let normalized = normalize(line);
-        if normalized.is_empty() || !include(&normalized) {
+        let normalized = normalized.as_ref();
+        if normalized.is_empty() || !include(normalized) {
             continue;
         }
-        out.push('\n');
-        out.push_str(&normalized);
+        hash.update(b"\n");
+        hash.update(normalized.as_bytes());
     }
 
-    sha256_hex(&[out.as_bytes()])
+    hex::encode(hash.finalize())
 }

@@ -1,4 +1,4 @@
-use super::{MappingRequest, MappingResolver};
+use super::MappingResolver;
 use ::sourcemap::SourceMap;
 use uuid::Uuid;
 
@@ -20,12 +20,16 @@ struct OriginalPosition<'a> {
 
 pub(super) async fn apply(
     resolver: &MappingResolver,
-    request: MappingRequest<'_>,
+    project_id: Uuid,
+    build_id: &str,
+    stacktrace: &str,
 ) -> Option<String> {
     let mut mapped_any = false;
-    let mut mapped_stacktrace = String::with_capacity(request.stacktrace.len());
+    let mut mapped_stacktrace = String::with_capacity(stacktrace.len());
+    let mut loaded_file = None;
+    let mut loaded_map = None;
 
-    for (idx, line) in request.stacktrace.lines().enumerate() {
+    for (idx, line) in stacktrace.lines().enumerate() {
         if idx > 0 {
             mapped_stacktrace.push('\n');
         }
@@ -35,52 +39,34 @@ pub(super) async fn apply(
             continue;
         };
 
-        if apply_frame(
-            resolver,
-            request.project_id,
-            request.build_id,
-            &frame,
-            &mut mapped_stacktrace,
-        )
-        .await
-        {
-            mapped_any = true;
-        } else {
-            mapped_stacktrace.push_str(line);
+        if loaded_file != Some(frame.file_name) {
+            loaded_map = resolver
+                .load_sourcemap(project_id, build_id, frame.file_name)
+                .await;
+            loaded_file = Some(frame.file_name);
         }
+        let Some(original) = loaded_map
+            .as_deref()
+            .and_then(|map| apply_source_map(map, frame.line, frame.column))
+        else {
+            mapped_stacktrace.push_str(line);
+            continue;
+        };
+
+        mapped_stacktrace.reserve(
+            frame.prefix.len()
+                + frame.suffix.len()
+                + original.source.len()
+                + original.name.map(str::len).unwrap_or(0)
+                + 32,
+        );
+        mapped_stacktrace.push_str(frame.prefix);
+        push_original_position(&mut mapped_stacktrace, &original);
+        mapped_stacktrace.push_str(frame.suffix);
+        mapped_any = true;
     }
 
     mapped_any.then_some(mapped_stacktrace)
-}
-
-async fn apply_frame(
-    resolver: &MappingResolver,
-    project_id: Uuid,
-    build_id: &str,
-    frame: &JavaScriptFrame<'_>,
-    out: &mut String,
-) -> bool {
-    let map = resolver
-        .load_sourcemap(project_id, build_id, frame.file_name)
-        .await;
-    let Some(map) = map else {
-        return false;
-    };
-    let Some(original) = apply_source_map(&map, frame.line, frame.column) else {
-        return false;
-    };
-
-    out.reserve(
-        frame.prefix.len()
-            + frame.suffix.len()
-            + original.source.len()
-            + original.name.map(str::len).unwrap_or(0)
-            + 32,
-    );
-    out.push_str(frame.prefix);
-    push_original_position(out, &original);
-    out.push_str(frame.suffix);
-    true
 }
 
 fn apply_source_map(map: &SourceMap, line: u32, column: u32) -> Option<OriginalPosition<'_>> {

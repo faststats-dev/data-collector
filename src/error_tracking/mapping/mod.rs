@@ -1,5 +1,4 @@
-use crate::error_tracking::language::{ErrorLanguage, MappingKind};
-use crate::error_tracking::proguard::ProguardMapping;
+use crate::error_tracking::ErrorLanguage;
 use ::sourcemap::SourceMap;
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce, Tag, aead::AeadInOut};
 use aws_sdk_s3::Client;
@@ -13,19 +12,21 @@ use uuid::Uuid;
 mod proguard;
 mod sourcemap;
 
+use proguard::ProguardMapping;
+
 const NONCE_LEN: usize = 12;
 const TAG_LEN: usize = 16;
+const PROGUARD_DIR: &str = "proguard";
 const SOURCEMAP_CACHE_CAPACITY: u64 = 64;
 const PROGUARD_MAP_CACHE_CAPACITY: u64 = 16;
 const MAP_CACHE_TTL: Duration = Duration::from_secs(600);
 const BUILD_CACHE_CAPACITY: u64 = 2048;
 
-#[derive(Clone)]
 pub struct MappingResolver {
     client: Client,
     db: PgPool,
-    bucket: Arc<str>,
-    crypto: Arc<MappingCrypto>,
+    bucket: Box<str>,
+    crypto: MappingCrypto,
     sourcemaps: Cache<String, Option<Arc<SourceMap>>>,
     proguard_maps: Cache<String, Option<Arc<ProguardMapping>>>,
     known_builds: Cache<String, bool>,
@@ -34,21 +35,6 @@ pub struct MappingResolver {
 pub struct MappedStacktrace {
     pub stacktrace: String,
     pub mapping_used: String,
-}
-
-impl MappedStacktrace {
-    fn new(stacktrace: String, kind: MappingKind, build_id: &str) -> Self {
-        Self {
-            stacktrace,
-            mapping_used: format!("{}:{build_id}", kind.label()),
-        }
-    }
-}
-
-struct MappingRequest<'a> {
-    project_id: Uuid,
-    build_id: &'a str,
-    stacktrace: &'a str,
 }
 
 struct MappingCrypto {
@@ -66,7 +52,7 @@ impl MappingResolver {
             std::env::var("SOURCEMAPS_S3_REGION").unwrap_or_else(|_| "us-east-1".to_string());
 
         let crypto = match MappingCrypto::new(&file_key) {
-            Ok(crypto) => Arc::new(crypto),
+            Ok(crypto) => crypto,
             Err(()) => {
                 warn!("Mapping resolver disabled: invalid file encryption key");
                 return None;
@@ -120,24 +106,31 @@ impl MappingResolver {
         if build_id.is_empty() || stacktrace.is_empty() {
             return None;
         }
+        if matches!(language, ErrorLanguage::Php | ErrorLanguage::Rust) {
+            return None;
+        }
 
-        let kind = language.mapping_kind()?;
         if !self.build_exists(project_id, build_id).await {
             return None;
         }
 
-        let request = MappingRequest {
-            project_id,
-            build_id,
-            stacktrace,
+        let (stacktrace, mapper) = match language {
+            ErrorLanguage::Java => {
+                let mapping = self.load_proguard_mapping(project_id, build_id).await?;
+                let mapped = mapping.retrace(stacktrace);
+                (mapped != stacktrace).then_some((mapped, "r8"))?
+            }
+            ErrorLanguage::Javascript => (
+                sourcemap::apply(self, project_id, build_id, stacktrace).await?,
+                "javascript",
+            ),
+            ErrorLanguage::Php | ErrorLanguage::Rust => return None,
         };
 
-        let stacktrace = match kind {
-            MappingKind::Proguard => proguard::apply(self, request).await,
-            MappingKind::SourceMap => sourcemap::apply(self, request).await,
-        }?;
-
-        Some(MappedStacktrace::new(stacktrace, kind, build_id))
+        Some(MappedStacktrace {
+            stacktrace,
+            mapping_used: format!("{mapper}:{build_id}"),
+        })
     }
 
     async fn build_exists(&self, project_id: Uuid, build_id: &str) -> bool {
@@ -174,7 +167,7 @@ impl MappingResolver {
         let key = sourcemap::s3_key(project_id, build_id, file_name);
         if let Some(map) = self
             .sourcemaps
-            .get_with(key.clone(), async move { self.fetch_sourcemap(&key).await })
+            .get_with_by_ref(&key, self.fetch_sourcemap(&key))
             .await
         {
             return Some(map);
@@ -187,22 +180,18 @@ impl MappingResolver {
 
         let fallback_key = sourcemap::s3_key(project_id, build_id, basename);
         self.sourcemaps
-            .get_with(fallback_key.clone(), async move {
-                self.fetch_sourcemap(&fallback_key).await
-            })
+            .get_with_by_ref(&fallback_key, self.fetch_sourcemap(&fallback_key))
             .await
     }
 
-    pub(super) async fn load_proguard_mapping(
+    async fn load_proguard_mapping(
         &self,
         project_id: Uuid,
         build_id: &str,
     ) -> Option<Arc<ProguardMapping>> {
-        let prefix = proguard::s3_prefix(project_id, build_id);
+        let prefix = proguard_prefix(project_id, build_id);
         self.proguard_maps
-            .get_with(prefix.clone(), async move {
-                self.fetch_proguard_mapping(&prefix).await
-            })
+            .get_with_by_ref(&prefix, self.fetch_proguard_mapping(&prefix))
             .await
     }
 
@@ -338,10 +327,15 @@ fn build_cache_key(project_id: Uuid, build_id: &str) -> String {
     format!("{project_id}/{build_id}")
 }
 
+fn proguard_prefix(project_id: Uuid, build_id: &str) -> String {
+    format!("{project_id}/{build_id}/{PROGUARD_DIR}/")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::MappingCrypto;
+    use super::{MappingCrypto, proguard_prefix};
     use aes_gcm::{Nonce, aead::AeadInOut};
+    use uuid::Uuid;
 
     #[test]
     fn decrypts_nonce_tag_ciphertext_layout() {
@@ -367,5 +361,14 @@ mod tests {
         let crypto = MappingCrypto::new(&"00".repeat(32)).unwrap();
 
         assert!(crypto.decrypt(&[0; 27]).is_err());
+    }
+
+    #[test]
+    fn builds_proguard_prefix() {
+        let project_id = Uuid::parse_str("01954b9b-7b1d-72b8-8af3-f8d058f60b79").unwrap();
+        assert_eq!(
+            proguard_prefix(project_id, "build-1"),
+            "01954b9b-7b1d-72b8-8af3-f8d058f60b79/build-1/proguard/"
+        );
     }
 }

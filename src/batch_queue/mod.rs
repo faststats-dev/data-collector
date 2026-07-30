@@ -609,11 +609,13 @@ impl BatchQueue {
         &self,
         rows: Vec<(ErrorOccurrenceV3Row, ErrorLanguage, Option<TrackingContext>)>,
     ) -> Vec<(ErrorOccurrenceV3Row, ErrorLanguage, Option<TrackingContext>)> {
-        if rows.is_empty() || self.mappings.is_none() {
+        if rows.is_empty() {
             return rows;
         }
 
-        let resolver = self.mappings.as_deref();
+        let Some(resolver) = self.mappings.as_deref() else {
+            return rows;
+        };
         let mut enriched = Vec::with_capacity(rows.len());
         for (row, language, tracking) in rows {
             enriched.push((

@@ -1,19 +1,11 @@
-use crate::utils::sha256_hex;
+use super::{
+    HASHISH_RE, HEX_RE, NUMBER_RE, QUOTED_RE, UUID_RE, WHITESPACE_RE, hash_frames,
+    lowercase_trimmed, replace_matches,
+};
 use regex::Regex;
+use std::borrow::Cow;
 use std::sync::LazyLock;
 
-static UUID_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b")
-        .expect("valid uuid regex")
-});
-static HEX_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)\b0x[0-9a-f]+\b").expect("valid hex regex"));
-static QUOTED_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#""[^"]*"|'[^']*'|`[^`]*`"#).expect("valid quoted regex"));
-static HASHISH_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)\b[0-9a-f]{12,}\b").expect("valid hash regex"));
-static NUMBER_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\b\d+(?:\.\d+)?\b").expect("valid number regex"));
 static JAR_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b[A-Za-z0-9._+-]+(?:-\d+(?:\.\d+)*(?:[-+][A-Za-z0-9._-]+)?)?\.jar\b")
         .expect("valid jar regex")
@@ -23,43 +15,26 @@ static JAVA_FRAME_LINE_RE: LazyLock<Regex> =
 static LAMBDA_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\$\$Lambda(?:\$[0-9]+)?(?:/[0-9a-fx]+)?").expect("valid lambda regex")
 });
-static WHITESPACE_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\s+").expect("valid whitespace regex"));
 const JAVA_INTERNAL_FRAME_PREFIXES: &[&str] = &["java.", "javax.", "sun.", "com.sun.", "jdk."];
 
 pub fn group_hash(error_type: &str, stacktrace: &str) -> String {
-    let normalized = normalize_for_grouping(error_type, stacktrace);
-    sha256_hex(&[normalized.as_bytes()])
+    hash_frames(error_type, stacktrace, 80, normalize_piece, |line| {
+        !should_ignore_frame(line)
+    })
 }
 
-fn normalize_for_grouping(error_type: &str, stacktrace: &str) -> String {
-    let mut out = String::new();
-    out.push_str(&normalize_piece(error_type));
-
-    for line in stacktrace.lines().take(80) {
-        let normalized = normalize_piece(line);
-        if normalized.is_empty() || should_ignore_frame(&normalized) {
-            continue;
-        }
-        out.push('\n');
-        out.push_str(&normalized);
-    }
-
-    out
-}
-
-fn normalize_piece(input: &str) -> String {
-    let mut value = input.trim().to_ascii_lowercase();
-    value = UUID_RE.replace_all(&value, "<uuid>").into_owned();
-    value = HEX_RE.replace_all(&value, "<hex>").into_owned();
-    value = HASHISH_RE.replace_all(&value, "<hash>").into_owned();
-    value = QUOTED_RE.replace_all(&value, "<quoted>").into_owned();
-    value = JAR_RE.replace_all(&value, "<jar>").into_owned();
-    value = JAVA_FRAME_LINE_RE.replace_all(&value, "($1)").into_owned();
-    value = LAMBDA_RE.replace_all(&value, "$$Lambda").into_owned();
-    value = NUMBER_RE.replace_all(&value, "<num>").into_owned();
-    value = WHITESPACE_RE.replace_all(&value, " ").into_owned();
-    value.trim().to_string()
+fn normalize_piece(input: &str) -> Cow<'_, str> {
+    let mut value = lowercase_trimmed(input);
+    replace_matches(&mut value, &UUID_RE, "<uuid>");
+    replace_matches(&mut value, &HEX_RE, "<hex>");
+    replace_matches(&mut value, &HASHISH_RE, "<hash>");
+    replace_matches(&mut value, &QUOTED_RE, "<quoted>");
+    replace_matches(&mut value, &JAR_RE, "<jar>");
+    replace_matches(&mut value, &JAVA_FRAME_LINE_RE, "($1)");
+    replace_matches(&mut value, &LAMBDA_RE, "$$Lambda");
+    replace_matches(&mut value, &NUMBER_RE, "<num>");
+    replace_matches(&mut value, &WHITESPACE_RE, " ");
+    value
 }
 
 fn should_ignore_frame(line: &str) -> bool {
@@ -76,7 +51,21 @@ fn is_java_internal_frame(line: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{group_hash, normalize_piece};
+    use super::{group_hash, normalize_piece, should_ignore_frame};
+    use crate::utils::sha256_hex;
+
+    fn concatenated_hash(error_type: &str, stacktrace: &str) -> String {
+        let mut normalized_stack = normalize_piece(error_type).into_owned();
+        for line in stacktrace.lines().take(80) {
+            let normalized = normalize_piece(line);
+            if normalized.is_empty() || should_ignore_frame(&normalized) {
+                continue;
+            }
+            normalized_stack.push('\n');
+            normalized_stack.push_str(&normalized);
+        }
+        sha256_hex(&[normalized_stack.as_bytes()])
+    }
 
     #[test]
     fn normalizes_java_frame_noise() {
@@ -132,5 +121,33 @@ mod tests {
         let b = group_hash("RuntimeException", &with_elision);
 
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn streaming_hash_matches_concatenated_hash() {
+        let stacktrace = (0..30)
+            .map(|line| {
+                format!(
+                    "\tat plugin-1.2.3.jar//com.example.Service{line}.run(Service{line}.java:{line})"
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(
+            group_hash("java.lang.RuntimeException", &stacktrace),
+            concatenated_hash("java.lang.RuntimeException", &stacktrace)
+        );
+    }
+
+    #[test]
+    fn preserves_legacy_group_hash() {
+        assert_eq!(
+            group_hash(
+                "java.lang.RuntimeException",
+                "\tat plugin-1.2.3.jar//com.example.Plugin.handle(Plugin.java:42)"
+            ),
+            "f06e38f4eff0dc1f77c5408fa596935cd875fe0baea8672153c82d3362337219"
+        );
     }
 }

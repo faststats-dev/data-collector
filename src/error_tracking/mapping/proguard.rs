@@ -1,11 +1,8 @@
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::str::Utf8Error;
 
-use uuid::Uuid;
-
-const PROGUARD_DIR: &str = "proguard";
-
-pub struct ProguardMapping {
+pub(super) struct ProguardMapping {
     classes: HashMap<String, ClassMapping>,
 }
 
@@ -13,7 +10,6 @@ struct ClassMapping {
     original_name: String,
     file_name: Option<String>,
     methods: Vec<MethodMapping>,
-    fields: HashMap<String, String>,
 }
 
 struct MethodMapping {
@@ -23,77 +19,29 @@ struct MethodMapping {
     end_line: Option<u32>,
 }
 
+#[derive(serde::Deserialize)]
+struct MappingMetadata {
+    #[serde(rename = "fileName")]
+    file_name: Option<String>,
+}
+
 impl ProguardMapping {
-    pub fn parse(input: &str) -> Self {
+    #[cfg(test)]
+    fn parse(input: &str) -> Self {
         let mut classes = HashMap::new();
-        let mut current_class: Option<(String, ClassMapping)> = None;
-
-        for line in input.lines() {
-            let line = line.trim_end();
-            if line.is_empty() {
-                continue;
-            }
-
-            if line.starts_with('#') {
-                if let Some((_, class)) = current_class.as_mut()
-                    && let Some(file_name) = extract_file_name(line)
-                {
-                    class.file_name = Some(file_name);
-                }
-                continue;
-            }
-
-            if !line.starts_with(' ') && !line.starts_with('\t') {
-                if let Some((obfuscated, class)) = current_class.take() {
-                    classes.insert(obfuscated, class);
-                }
-
-                if let Some((original, obfuscated)) = parse_class_line(line) {
-                    current_class = Some((
-                        obfuscated.to_owned(),
-                        ClassMapping {
-                            original_name: original.to_owned(),
-                            file_name: None,
-                            methods: Vec::new(),
-                            fields: HashMap::new(),
-                        },
-                    ));
-                }
-                continue;
-            }
-
-            if let Some((_, class)) = current_class.as_mut() {
-                parse_member_line(line.trim(), class);
-            }
-        }
-
-        if let Some((obfuscated, class)) = current_class {
-            classes.insert(obfuscated, class);
-        }
-
+        parse_into(input, &mut classes);
         Self { classes }
     }
 
-    pub fn parse_many_bytes(parts: &[Vec<u8>]) -> Result<Self, ()> {
-        let mut classes: HashMap<String, ClassMapping> = HashMap::new();
-
+    pub(super) fn parse_many_bytes(parts: &[Vec<u8>]) -> Result<Self, Utf8Error> {
+        let mut classes = HashMap::new();
         for part in parts {
-            let input = std::str::from_utf8(part).map_err(|_| ())?;
-            let mapping = Self::parse(input);
-            for (obfuscated_name, class) in mapping.classes {
-                match classes.entry(obfuscated_name) {
-                    Entry::Occupied(mut occupied) => occupied.get_mut().merge(class),
-                    Entry::Vacant(vacant) => {
-                        vacant.insert(class);
-                    }
-                }
-            }
+            parse_into(std::str::from_utf8(part)?, &mut classes);
         }
-
-        Ok(ProguardMapping { classes })
+        Ok(Self { classes })
     }
 
-    pub fn retrace(&self, stacktrace: &str) -> String {
+    pub(super) fn retrace(&self, stacktrace: &str) -> String {
         let mut out = String::with_capacity(stacktrace.len());
 
         let mut first = true;
@@ -226,29 +174,78 @@ impl ProguardMapping {
         obf_method: &str,
         line: Option<u32>,
     ) -> Option<&'a MethodMapping> {
-        if let Some(line_num) = line {
-            class
-                .methods
-                .iter()
-                .find(|m| {
-                    m.obfuscated_name == obf_method
-                        && matches!(
-                            (m.start_line, m.end_line),
-                            (Some(start), Some(end))
-                                if line_num >= start && line_num <= end
-                        )
-                })
-                .or_else(|| {
-                    class
-                        .methods
-                        .iter()
-                        .find(|m| m.obfuscated_name == obf_method)
-                })
-        } else {
-            class
-                .methods
-                .iter()
-                .find(|m| m.obfuscated_name == obf_method)
+        let mut fallback = None;
+        for method in &class.methods {
+            if method.obfuscated_name != obf_method {
+                continue;
+            }
+            fallback.get_or_insert(method);
+            if matches!(
+                (line, method.start_line, method.end_line),
+                (Some(line), Some(start), Some(end)) if (start..=end).contains(&line)
+            ) {
+                return Some(method);
+            }
+        }
+        fallback
+    }
+}
+
+fn parse_into(input: &str, classes: &mut HashMap<String, ClassMapping>) {
+    let mut current_class: Option<(String, ClassMapping)> = None;
+
+    for line in input.lines() {
+        let line = line.trim_end();
+        if line.is_empty() {
+            continue;
+        }
+
+        if line.starts_with('#') {
+            if let Some((_, class)) = current_class.as_mut()
+                && let Some(file_name) = extract_file_name(line)
+            {
+                class.file_name = Some(file_name);
+            }
+            continue;
+        }
+
+        if !line.starts_with(' ') && !line.starts_with('\t') {
+            if let Some((obfuscated, class)) = current_class.take() {
+                insert_class(classes, obfuscated, class);
+            }
+
+            if let Some((original, obfuscated)) = parse_class_line(line) {
+                current_class = Some((
+                    obfuscated.to_owned(),
+                    ClassMapping {
+                        original_name: original.to_owned(),
+                        file_name: None,
+                        methods: Vec::new(),
+                    },
+                ));
+            }
+            continue;
+        }
+
+        if let Some((_, class)) = current_class.as_mut() {
+            parse_member_line(line.trim(), class);
+        }
+    }
+
+    if let Some((obfuscated, class)) = current_class {
+        insert_class(classes, obfuscated, class);
+    }
+}
+
+fn insert_class(
+    classes: &mut HashMap<String, ClassMapping>,
+    obfuscated_name: String,
+    class: ClassMapping,
+) {
+    match classes.entry(obfuscated_name) {
+        Entry::Occupied(mut occupied) => occupied.get_mut().merge(class),
+        Entry::Vacant(vacant) => {
+            vacant.insert(class);
         }
     }
 }
@@ -259,16 +256,14 @@ impl ClassMapping {
             self.file_name = other.file_name;
         }
         self.methods.extend(other.methods);
-        self.fields.extend(other.fields);
     }
 }
 
 fn extract_file_name(line: &str) -> Option<String> {
     let json_start = line.find('{')?;
-    let meta = serde_json::from_str::<serde_json::Value>(&line[json_start..]).ok()?;
-    meta.get("fileName")
-        .and_then(|v| v.as_str())
-        .map(str::to_owned)
+    serde_json::from_str::<MappingMetadata>(&line[json_start..])
+        .ok()?
+        .file_name
 }
 
 fn parse_class_line(line: &str) -> Option<(&str, &str)> {
@@ -310,22 +305,15 @@ fn parse_member_line(line: &str, class: &mut ClassMapping) {
         return;
     }
 
-    if original_part.contains('(') {
-        if let Some(method_name) = parse_method_name(original_part) {
-            class.methods.push(MethodMapping {
-                original_name: method_name,
-                obfuscated_name: obfuscated.to_owned(),
-                start_line: None,
-                end_line: None,
-            });
-        }
-        return;
-    }
-
-    if let Some(field_name) = original_part.split_whitespace().last() {
-        class
-            .fields
-            .insert(obfuscated.to_owned(), field_name.to_owned());
+    if original_part.contains('(')
+        && let Some(method_name) = parse_method_name(original_part)
+    {
+        class.methods.push(MethodMapping {
+            original_name: method_name,
+            obfuscated_name: obfuscated.to_owned(),
+            start_line: None,
+            end_line: None,
+        });
     }
 }
 
@@ -378,31 +366,9 @@ fn push_u32(out: &mut String, value: u32) {
     let _ = write!(out, "{value}");
 }
 
-pub fn s3_prefix(project_id: Uuid, build_id: &str) -> String {
-    let mut key = String::with_capacity(36 + 1 + build_id.len() + 1 + PROGUARD_DIR.len() + 1);
-    use std::fmt::Write;
-    let _ = write!(key, "{project_id}");
-    key.push('/');
-    key.push_str(build_id);
-    key.push('/');
-    key.push_str(PROGUARD_DIR);
-    key.push('/');
-    key
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{ProguardMapping, s3_prefix};
-    use uuid::Uuid;
-
-    #[test]
-    fn builds_s3_prefix_with_trailing_slash() {
-        let project_id = Uuid::parse_str("01954b9b-7b1d-72b8-8af3-f8d058f60b79").unwrap();
-        assert_eq!(
-            s3_prefix(project_id, "build-1"),
-            "01954b9b-7b1d-72b8-8af3-f8d058f60b79/build-1/proguard/"
-        );
-    }
+    use super::ProguardMapping;
 
     #[test]
     fn retraces_r8_stacktrace() {
@@ -440,6 +406,30 @@ java.lang.RuntimeException: oops
             "\
 \tat core.file.FileIO.reload(FileIO.java:92)
 \tat core.file.Validatable.validate(Validatable.java:26)"
+        );
+    }
+
+    #[test]
+    fn parse_many_bytes_rejects_invalid_utf8() {
+        assert!(ProguardMapping::parse_many_bytes(&[vec![0xff]]).is_err());
+    }
+
+    #[test]
+    fn resolves_overloaded_method_by_line_in_one_pass() {
+        let mapping = ProguardMapping::parse(
+            r#"com.example.Service -> a:
+    10:20:void first() -> b
+    30:40:void second() -> b
+"#,
+        );
+
+        assert_eq!(
+            mapping.retrace("\tat a.b(SourceFile:35)"),
+            "\tat com.example.Service.second(Unknown Source:35)"
+        );
+        assert_eq!(
+            mapping.retrace("\tat a.b(Unknown Source)"),
+            "\tat com.example.Service.first(Unknown Source)"
         );
     }
 }

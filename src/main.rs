@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 use axum::{
     Router,
     extract::{DefaultBodyLimit, MatchedPath, Request},
@@ -122,7 +124,7 @@ async fn main() {
         polar_client,
         &backup_path,
         backup_store_enabled,
-        error_tracking::sourcemaps::SourcemapResolver::from_env(pool.clone()).map(Arc::new),
+        error_tracking::mapping::MappingResolver::from_env(pool.clone()).map(Arc::new),
     );
     let replay_storage = match replay_storage::ReplayStorage::from_env() {
         Ok(Some(storage)) => {

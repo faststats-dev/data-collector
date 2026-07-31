@@ -4,9 +4,8 @@ use super::{
     insert_error_occurrence_v3, insert_mods_event, load_project_context, success_response,
 };
 use crate::batch_queue::{FailedRequest, RequestType, TrackingContext};
-use crate::error_tracking::v3::{
-    ModsOccurrenceInput, build_mods_occurrence, mods_context, request_context,
-};
+use crate::error_tracking::ErrorLanguage;
+use crate::error_tracking::v3::{OccurrenceInput, build_occurrence, mods_context};
 use crate::models::{AppState, Request};
 use crate::tinybird::{ErrorOccurrenceV3Row, ModsEventRow};
 use crate::validation::validate_and_filter_payload;
@@ -88,7 +87,7 @@ pub async fn collect(
         if let Err(e) = insert_error_occurrence_v3(
             &state.batch_queue,
             occurrence,
-            crate::error_tracking::v3::ErrorLanguage::Java,
+            ErrorLanguage::Java,
             Some(built.tracking.clone()),
         ) {
             return e;
@@ -144,19 +143,23 @@ pub(crate) fn build_collect_events(
         && let Some(errors) = errors
         && !errors.is_empty()
     {
-        let error_context = request_context(context, || mods_context(&event_row, &valid_custom));
+        let error_context = context.unwrap_or_else(|| mods_context(&event_row, &valid_custom));
         let fallback_identity = server_id.to_string();
-        for error in errors {
-            occurrences.push(build_mods_occurrence(
-                &ModsOccurrenceInput {
+        for mut error in errors {
+            let sdk_version = error.sdk_version.take();
+            occurrences.push(build_occurrence(
+                OccurrenceInput {
                     project_id: ctx.project_id,
-                    release: error.build_id.as_deref(),
-                    server_id: fallback_identity.as_str(),
-                    session_id: error.session_id.as_deref(),
-                    sdk_version: error.sdk_version.as_deref(),
+                    language: ErrorLanguage::Java,
+                    release: None,
+                    identifier: Some(&fallback_identity),
+                    session_id: None,
+                    window_id: None,
+                    sdk_name: Some("minecraft-plugin"),
+                    sdk_version: sdk_version.as_deref(),
                     context: &error_context,
                 },
-                &error,
+                error,
             ));
         }
     }

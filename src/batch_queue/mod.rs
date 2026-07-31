@@ -1,8 +1,8 @@
 mod backup_store;
 pub use backup_store::BackupStore;
 
-use crate::error_tracking::sourcemaps::SourcemapResolver;
-use crate::error_tracking::v3::ErrorLanguage;
+use crate::error_tracking::ErrorLanguage;
+use crate::error_tracking::mapping::MappingResolver;
 use crate::polar::{PolarClient, UsageCounts};
 use crate::tinybird::{
     ErrorOccurrenceV3Row, ModsEventRow, TinybirdClient, WebEventRow, WebVitalRow,
@@ -286,7 +286,7 @@ fn record_batch_error(
 pub struct BatchQueue {
     tinybird: Arc<TinybirdClient>,
     polar: Option<Arc<PolarClient>>,
-    sourcemaps: Option<Arc<SourcemapResolver>>,
+    mappings: Option<Arc<MappingResolver>>,
     pub(crate) backup_store: Arc<BackupStore>,
     sender: mpsc::Sender<QueuedEvent>,
     in_memory_batch: Arc<Mutex<InMemoryBatch>>,
@@ -299,7 +299,7 @@ impl BatchQueue {
         polar: Option<Arc<PolarClient>>,
         backup_path: &Path,
         backup_enabled: bool,
-        sourcemaps: Option<Arc<SourcemapResolver>>,
+        mappings: Option<Arc<MappingResolver>>,
     ) -> Arc<Self> {
         let backup_store = Arc::new(BackupStore::new(backup_path, backup_enabled));
         let (sender, receiver) = mpsc::channel(CHANNEL_CAPACITY);
@@ -309,7 +309,7 @@ impl BatchQueue {
         let queue = Arc::new(Self {
             tinybird,
             polar,
-            sourcemaps,
+            mappings,
             backup_store,
             sender,
             in_memory_batch,
@@ -609,15 +609,17 @@ impl BatchQueue {
         &self,
         rows: Vec<(ErrorOccurrenceV3Row, ErrorLanguage, Option<TrackingContext>)>,
     ) -> Vec<(ErrorOccurrenceV3Row, ErrorLanguage, Option<TrackingContext>)> {
-        if rows.is_empty() || self.sourcemaps.is_none() {
+        if rows.is_empty() {
             return rows;
         }
 
-        let resolver = self.sourcemaps.as_deref();
+        let Some(resolver) = self.mappings.as_deref() else {
+            return rows;
+        };
         let mut enriched = Vec::with_capacity(rows.len());
         for (row, language, tracking) in rows {
             enriched.push((
-                crate::error_tracking::v3::enrich_with_sourcemap(resolver, row, language).await,
+                crate::error_tracking::v3::enrich_with_mapping(resolver, row, language).await,
                 language,
                 tracking,
             ));

@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 use std::io::Write;
 use tracing::debug;
 use uuid::Uuid;
@@ -54,6 +54,7 @@ pub struct ModsEventRow {
     pub plugin_version: Option<String>,
     pub minecraft_version: Option<String>,
     pub server_type: Option<String>,
+    pub platform_version: Option<String>,
     pub java_version: Option<String>,
     pub java_vendor: Option<String>,
     pub os_name: Option<String>,
@@ -64,6 +65,64 @@ pub struct ModsEventRow {
     pub custom: String,
     #[serde(with = "chrono::serde::ts_milliseconds")]
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Serialize)]
+struct ModsEventV2Row<'a> {
+    id: Uuid,
+    project_id: Uuid,
+    server_id: Uuid,
+    player_count: Option<f64>,
+    online_mode: Option<bool>,
+    plugin_version: Option<&'a str>,
+    game_version: Option<&'a str>,
+    server_type: Option<&'a str>,
+    platform_version: Option<&'a str>,
+    java_version: Option<&'a str>,
+    java_vendor: Option<&'a str>,
+    os_name: Option<&'a str>,
+    os_arch: Option<&'a str>,
+    os_version: Option<&'a str>,
+    core_count: Option<u16>,
+    country: Option<&'a str>,
+    #[serde(serialize_with = "serialize_json_string")]
+    custom: &'a str,
+    #[serde(with = "chrono::serde::ts_milliseconds")]
+    created_at: DateTime<Utc>,
+}
+
+impl<'a> From<&'a ModsEventRow> for ModsEventV2Row<'a> {
+    fn from(row: &'a ModsEventRow) -> Self {
+        Self {
+            id: row.id,
+            project_id: row.project_id,
+            server_id: row.server_id,
+            player_count: row.player_count,
+            online_mode: row.online_mode,
+            plugin_version: row.plugin_version.as_deref(),
+            game_version: row.minecraft_version.as_deref(),
+            server_type: row.server_type.as_deref(),
+            platform_version: row.platform_version.as_deref(),
+            java_version: row.java_version.as_deref(),
+            java_vendor: row.java_vendor.as_deref(),
+            os_name: row.os_name.as_deref(),
+            os_arch: row.os_arch.as_deref(),
+            os_version: row.os_version.as_deref(),
+            core_count: row.core_count,
+            country: row.country.as_deref(),
+            custom: &row.custom,
+            created_at: row.created_at,
+        }
+    }
+}
+
+fn serialize_json_string<S>(value: &&str, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let parsed: serde_json::Value =
+        serde_json::from_str(value).map_err(serde::ser::Error::custom)?;
+    parsed.serialize(serializer)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -226,7 +285,16 @@ impl TinybirdClient {
     }
 
     pub async fn insert_mods_events(&self, events: &[&ModsEventRow]) -> Result<(), TinybirdError> {
-        self.send_batch("mods_events", events).await
+        let v2_events: Vec<_> = events
+            .iter()
+            .map(|event| ModsEventV2Row::from(*event))
+            .collect();
+        let (v1_result, v2_result) = tokio::join!(
+            self.send_batch("mods_events", events),
+            self.send_batch("mods_events_v2", &v2_events),
+        );
+
+        v1_result.and(v2_result)
     }
 
     pub async fn insert_error_occurrences_v3(
@@ -238,5 +306,42 @@ impl TinybirdClient {
 
     pub async fn insert_web_vitals(&self, rows: &[&WebVitalRow]) -> Result<(), TinybirdError> {
         self.send_batch("web_vitals", rows).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mods_event_v2_uses_v2_field_names_and_native_json() {
+        let row = ModsEventRow {
+            id: Uuid::new_v4(),
+            project_id: Uuid::new_v4(),
+            server_id: Uuid::new_v4(),
+            player_count: Some(12.0),
+            online_mode: Some(true),
+            plugin_version: Some("1.2.3".to_string()),
+            minecraft_version: Some("1.21.8".to_string()),
+            server_type: Some("paper".to_string()),
+            platform_version: Some("1.21.8-42".to_string()),
+            java_version: Some("21".to_string()),
+            java_vendor: Some("Temurin".to_string()),
+            os_name: Some("Linux".to_string()),
+            os_arch: Some("amd64".to_string()),
+            os_version: None,
+            core_count: Some(8),
+            country: Some("DE".to_string()),
+            custom: r#"{"nested":{"enabled":true},"count":2}"#.to_string(),
+            created_at: Utc::now(),
+        };
+
+        let value = serde_json::to_value(ModsEventV2Row::from(&row)).unwrap();
+
+        assert_eq!(value["game_version"], "1.21.8");
+        assert!(value.get("minecraft_version").is_none());
+        assert_eq!(value["platform_version"], "1.21.8-42");
+        assert_eq!(value["custom"]["nested"]["enabled"], true);
+        assert_eq!(value["custom"]["count"], 2);
     }
 }

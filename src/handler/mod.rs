@@ -414,6 +414,7 @@ const MODS_EVENT_FIELDS: &[&str] = &[
     "minecraft_version",
     "game_version",
     "server_type",
+    "platform_version",
     "java_version",
     "java_vendor",
     "os_name",
@@ -505,9 +506,10 @@ pub fn build_mods_event_row(
         player_count: extract_optional_f64(known, "player_count"),
         online_mode: extract_optional_bool(known, "online_mode"),
         plugin_version: extract_optional_string(known, "plugin_version"),
-        minecraft_version: extract_optional_string(known, "minecraft_version")
-            .or_else(|| extract_optional_string(known, "game_version")),
+        minecraft_version: extract_optional_string(known, "game_version")
+            .or_else(|| extract_optional_string(known, "minecraft_version")),
         server_type: extract_optional_string(known, "server_type"),
+        platform_version: extract_optional_string(known, "platform_version"),
         java_version: extract_optional_string(known, "java_version"),
         java_vendor: extract_optional_string(known, "java_vendor"),
         os_name: extract_optional_string(known, "os_name"),
@@ -898,6 +900,26 @@ async fn process_replay_request(
 mod tests {
     use super::*;
     use axum::http::HeaderValue;
+
+    #[test]
+    fn mods_event_accepts_version_aliases_and_platform_version() {
+        let mut known = HashMap::from([
+            ("minecraft_version".to_string(), Value::from("legacy")),
+            ("game_version".to_string(), Value::from("canonical")),
+            ("platform_version".to_string(), Value::from("platform")),
+        ]);
+
+        let row = build_mods_event_row(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            None,
+            &mut known,
+            &HashMap::new(),
+        );
+
+        assert_eq!(row.minecraft_version.as_deref(), Some("canonical"));
+        assert_eq!(row.platform_version.as_deref(), Some("platform"));
+    }
 
     mod hostname_validation {
         use super::*;

@@ -800,6 +800,7 @@ mod tests {
             plugin_version: None,
             minecraft_version: None,
             server_type: None,
+            platform_version: None,
             java_version: None,
             java_vendor: None,
             os_name: None,

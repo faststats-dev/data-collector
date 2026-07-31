@@ -145,7 +145,8 @@ pub(crate) fn build_collect_events(
     {
         let error_context = context.unwrap_or_else(|| mods_context(&event_row, &valid_custom));
         let fallback_identity = server_id.to_string();
-        for error in errors {
+        for mut error in errors {
+            let sdk_version = error.sdk_version.take();
             occurrences.push(build_occurrence(
                 OccurrenceInput {
                     project_id: ctx.project_id,
@@ -155,7 +156,7 @@ pub(crate) fn build_collect_events(
                     session_id: None,
                     window_id: None,
                     sdk_name: Some("minecraft-plugin"),
-                    sdk_version: None,
+                    sdk_version: sdk_version.as_deref(),
                     context: &error_context,
                 },
                 error,

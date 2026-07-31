@@ -33,7 +33,7 @@ pub fn build_occurrence(input: OccurrenceInput<'_>, error: ErrorTracking) -> Err
         count,
         build_id,
         context,
-        sdk_version,
+        sdk_version: _,
         session_id,
         handled,
     } = error;
@@ -65,8 +65,8 @@ pub fn build_occurrence(input: OccurrenceInput<'_>, error: ErrorTracking) -> Err
         session_id: session_id.unwrap_or_else(|| input.session_id.unwrap_or_default().to_owned()),
         window_id: input.window_id.unwrap_or_default().to_owned(),
         sdk_name: input.sdk_name.unwrap_or_default().to_owned(),
-        sdk_version: sdk_version
-            .unwrap_or_else(|| input.sdk_version.unwrap_or_default().to_owned()),
+        // Callers provide the endpoint-specific value to preserve the pre-refactor behavior.
+        sdk_version: input.sdk_version.unwrap_or_default().to_owned(),
         count: count.and_then(|count| count.try_into().ok()).unwrap_or(1),
         context: occurrence_context(input.context, context),
     }
@@ -222,7 +222,7 @@ mod tests {
     }
 
     #[test]
-    fn occurrence_uses_error_metadata_before_request_fallbacks() {
+    fn occurrence_preserves_request_sdk_version_while_using_error_metadata() {
         let context = empty_context();
         let row = build_occurrence(
             OccurrenceInput {
@@ -253,7 +253,7 @@ mod tests {
 
         assert_eq!(row.release, "error-release");
         assert_eq!(row.session_id, "error-session");
-        assert_eq!(row.sdk_version, "error-sdk");
+        assert_eq!(row.sdk_version, "request-sdk");
     }
 
     #[test]

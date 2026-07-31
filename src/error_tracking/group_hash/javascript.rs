@@ -127,4 +127,15 @@ mod tests {
 
         assert_eq!(a, b);
     }
+
+    #[test]
+    fn preserves_legacy_group_hash() {
+        assert_eq!(
+            group_hash(
+                "TypeError",
+                r#" at fn (https://cdn.example.com/assets/app.abc123.js:1742:19) id="u-42" 0xabc"#
+            ),
+            "cb29e8f23b97bb4d96a3226845d85225cd79c855b0611b9effa9baaebee1c415"
+        );
+    }
 }

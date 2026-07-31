@@ -139,4 +139,15 @@ mod tests {
             concatenated_hash("java.lang.RuntimeException", &stacktrace)
         );
     }
+
+    #[test]
+    fn preserves_legacy_group_hash() {
+        assert_eq!(
+            group_hash(
+                "java.lang.RuntimeException",
+                "\tat plugin-1.2.3.jar//com.example.Plugin.handle(Plugin.java:42)"
+            ),
+            "f06e38f4eff0dc1f77c5408fa596935cd875fe0baea8672153c82d3362337219"
+        );
+    }
 }

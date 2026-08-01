@@ -377,6 +377,23 @@ fn value_as_u16(v: &Value) -> Option<u16> {
     }
 }
 
+fn property_duration_ms(properties: &HashMap<String, Value>, key: &str) -> Option<u64> {
+    let value = properties.get(key)?;
+    value.as_u64().or_else(|| {
+        value.as_f64().and_then(|duration| {
+            if duration.is_finite()
+                && duration >= 0.0
+                && duration < u64::MAX as f64
+                && duration.fract() == 0.0
+            {
+                Some(duration as u64)
+            } else {
+                None
+            }
+        })
+    })
+}
+
 fn extract_optional_bool(data: &mut HashMap<String, Value>, key: &str) -> Option<bool> {
     data.remove(key).and_then(|v| v.as_bool())
 }
@@ -473,6 +490,8 @@ pub fn build_web_event_row(
         url: extract_optional_string(known, "url"),
         country,
         cookieless: known.remove("cookieless").and_then(|value| value.as_bool()),
+        time_on_page: property_duration_ms(properties, "time_on_page"),
+        session_duration: property_duration_ms(properties, "session_duration"),
         properties: to_custom_json(properties),
         created_at: chrono::Utc::now(),
     }
@@ -900,6 +919,29 @@ async fn process_replay_request(
 mod tests {
     use super::*;
     use axum::http::HeaderValue;
+
+    #[test]
+    fn web_event_promotes_valid_durations_without_removing_properties() {
+        let properties = HashMap::from([
+            ("time_on_page".to_string(), Value::from(3_000)),
+            ("session_duration".to_string(), Value::from(11_000)),
+        ]);
+        let mut known = HashMap::new();
+
+        let row = build_web_event_row(
+            Uuid::new_v4(),
+            &mut known,
+            Some("session".to_string()),
+            None,
+            &properties,
+        );
+
+        assert_eq!(row.time_on_page, Some(3_000));
+        assert_eq!(row.session_duration, Some(11_000));
+        let serialized: Value = serde_json::from_str(&row.properties).unwrap();
+        assert_eq!(serialized["time_on_page"], Value::from(3_000));
+        assert_eq!(serialized["session_duration"], Value::from(11_000));
+    }
 
     #[test]
     fn mods_event_accepts_version_aliases_and_platform_version() {

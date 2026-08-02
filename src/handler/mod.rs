@@ -427,6 +427,7 @@ const WEB_EVENT_FIELDS: &[&str] = &[
 const MODS_EVENT_FIELDS: &[&str] = &[
     "player_count",
     "online_mode",
+    "client",
     "plugin_version",
     "minecraft_version",
     "game_version",
@@ -524,6 +525,7 @@ pub fn build_mods_event_row(
         server_id,
         player_count: extract_optional_f64(known, "player_count"),
         online_mode: extract_optional_bool(known, "online_mode"),
+        client: extract_optional_bool(known, "client"),
         plugin_version: extract_optional_string(known, "plugin_version"),
         minecraft_version: extract_optional_string(known, "game_version")
             .or_else(|| extract_optional_string(known, "minecraft_version")),
@@ -944,11 +946,12 @@ mod tests {
     }
 
     #[test]
-    fn mods_event_accepts_version_aliases_and_platform_version() {
+    fn mods_event_accepts_version_aliases_platform_version_and_client() {
         let mut known = HashMap::from([
             ("minecraft_version".to_string(), Value::from("legacy")),
             ("game_version".to_string(), Value::from("canonical")),
             ("platform_version".to_string(), Value::from("platform")),
+            ("client".to_string(), Value::from(true)),
         ]);
 
         let row = build_mods_event_row(
@@ -961,6 +964,7 @@ mod tests {
 
         assert_eq!(row.minecraft_version.as_deref(), Some("canonical"));
         assert_eq!(row.platform_version.as_deref(), Some("platform"));
+        assert_eq!(row.client, Some(true));
     }
 
     mod hostname_validation {

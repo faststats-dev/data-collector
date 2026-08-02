@@ -797,6 +797,7 @@ mod tests {
             server_id: Uuid::new_v4(),
             player_count: None,
             online_mode: None,
+            client: None,
             plugin_version: None,
             minecraft_version: None,
             server_type: None,

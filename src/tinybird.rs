@@ -53,6 +53,7 @@ pub struct ModsEventRow {
     pub server_id: Uuid,
     pub player_count: Option<f64>,
     pub online_mode: Option<bool>,
+    pub client: Option<bool>,
     pub plugin_version: Option<String>,
     pub minecraft_version: Option<String>,
     pub server_type: Option<String>,
@@ -76,6 +77,7 @@ struct ModsEventV2Row<'a> {
     server_id: Uuid,
     player_count: Option<f64>,
     online_mode: Option<bool>,
+    client: Option<bool>,
     plugin_version: Option<&'a str>,
     game_version: Option<&'a str>,
     server_type: Option<&'a str>,
@@ -101,6 +103,7 @@ impl<'a> From<&'a ModsEventRow> for ModsEventV2Row<'a> {
             server_id: row.server_id,
             player_count: row.player_count,
             online_mode: row.online_mode,
+            client: row.client,
             plugin_version: row.plugin_version.as_deref(),
             game_version: row.minecraft_version.as_deref(),
             server_type: row.server_type.as_deref(),
@@ -323,6 +326,7 @@ mod tests {
             server_id: Uuid::new_v4(),
             player_count: Some(12.0),
             online_mode: Some(true),
+            client: Some(false),
             plugin_version: Some("1.2.3".to_string()),
             minecraft_version: Some("1.21.8".to_string()),
             server_type: Some("paper".to_string()),
@@ -341,6 +345,7 @@ mod tests {
         let value = serde_json::to_value(ModsEventV2Row::from(&row)).unwrap();
 
         assert_eq!(value["game_version"], "1.21.8");
+        assert_eq!(value["client"], false);
         assert!(value.get("minecraft_version").is_none());
         assert_eq!(value["platform_version"], "1.21.8-42");
         assert_eq!(value["custom"]["nested"]["enabled"], true);

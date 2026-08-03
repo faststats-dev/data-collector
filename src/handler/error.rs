@@ -92,7 +92,7 @@ pub async fn error(
                 release: payload.build_id.as_deref(),
                 identifier: payload.identifier.as_deref(),
                 session_id: payload.session_id.as_deref(),
-                window_id: None,
+                window_id: payload.window_id.as_deref(),
                 sdk_name: payload.sdk_name.as_deref(),
                 sdk_version: payload.sdk_version.as_deref(),
                 context: &context,

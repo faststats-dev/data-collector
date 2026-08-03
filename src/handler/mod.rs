@@ -152,6 +152,8 @@ pub struct ProjectContext {
     pub allowed_hostnames: Vec<String>,
     pub datasources: HashMap<String, DataSource>,
     pub error_tracking_enabled: bool,
+    pub web_vitals_enabled: bool,
+    pub session_replays_enabled: bool,
     pub cookieless_mode: Option<bool>,
     pub ip_rules: Vec<IpRule>,
 }
@@ -166,7 +168,8 @@ pub async fn load_project_context(
 
     let rows = sqlx::query(
         r#"
-        SELECT p.id, p.owner_id, p.allowed_hostnames, p.error_tracking_enabled, p.cookieless_mode,
+        SELECT p.id, p.owner_id, p.allowed_hostnames, p.error_tracking_enabled,
+               p.web_vitals_enabled, p.session_replays_enabled, p.cookieless_mode,
                p.replay_storage_generation, p.replay_storage_state::text AS replay_storage_state,
                o.id AS organization_id,
                m.user_id AS org_owner_user_id,
@@ -234,6 +237,8 @@ pub async fn load_project_context(
             .unwrap_or_default(),
         datasources,
         error_tracking_enabled: first.get("error_tracking_enabled"),
+        web_vitals_enabled: first.get("web_vitals_enabled"),
+        session_replays_enabled: first.get("session_replays_enabled"),
         cookieless_mode: first.get("cookieless_mode"),
         ip_rules,
     });

@@ -1,6 +1,6 @@
 use super::{
     EncodingQuery, ProjectContext, check_ip_allowed, decompress_body, error_response,
-    get_client_ip, load_project_context, success_response,
+    get_client_ip, get_request_origin, load_project_context, success_response, validate_hostname,
 };
 use crate::batch_queue::{FailedRequest, RequestType, TrackingContext};
 use crate::models::AppState;
@@ -55,6 +55,10 @@ pub(crate) fn normalize_window_id(window_id: Option<String>, session_id: &str) -
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| session_id.to_owned())
+}
+
+fn is_replay_origin_allowed(allowed_hostnames: &[String], request_origin: Option<&str>) -> bool {
+    validate_hostname(allowed_hostnames, request_origin)
 }
 
 #[derive(Debug, Deserialize)]
@@ -191,6 +195,7 @@ pub async fn replay(
         }
     };
     let token = parsed.token.clone();
+    let request_origin = get_request_origin(&headers);
 
     let context = match load_project_context(&state.pool, &token).await {
         Ok(ctx) => ctx,
@@ -214,7 +219,7 @@ pub async fn replay(
                     .get("User-Agent")
                     .and_then(|value| value.to_str().ok())
                     .map(str::to_string),
-                origin: None,
+                origin: request_origin.clone(),
             };
 
             if let Err(e) = state.batch_queue.backup_store.backup_request(&failed).await {
@@ -228,6 +233,17 @@ pub async fn replay(
             return success_response(HashMap::new());
         }
     };
+
+    if !is_replay_origin_allowed(&context.allowed_hostnames, request_origin.as_deref()) {
+        return error_response(StatusCode::FORBIDDEN, "Origin not allowed");
+    }
+
+    if !context.session_replays_enabled {
+        return success_response(HashMap::from([(
+            "disabled".to_string(),
+            "Session replays are not enabled".to_string(),
+        )]));
+    }
 
     let client_ip = get_client_ip(&headers);
     if let Err(msg) = check_ip_allowed(&context.ip_rules, client_ip) {
@@ -288,7 +304,7 @@ pub async fn replay(
                 country: None,
                 client_ip,
                 user_agent,
-                origin: None,
+                origin: request_origin,
             };
             if let Err(backup_error) = state
                 .batch_queue
@@ -323,7 +339,7 @@ pub async fn replay(
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_window_id;
+    use super::{is_replay_origin_allowed, normalize_window_id};
 
     #[test]
     fn normalize_window_id_trims_and_falls_back_to_session_id() {
@@ -336,5 +352,19 @@ mod tests {
             "session-1"
         );
         assert_eq!(normalize_window_id(None, "session-1"), "session-1");
+    }
+
+    #[test]
+    fn replay_origin_must_match_configured_hostname() {
+        let allowed = vec!["example.com".to_string()];
+
+        assert!(is_replay_origin_allowed(&allowed, Some("example.com")));
+        assert!(!is_replay_origin_allowed(&allowed, Some("attacker.test")));
+        assert!(!is_replay_origin_allowed(&allowed, None));
+    }
+
+    #[test]
+    fn replay_origin_is_unrestricted_without_configured_hostnames() {
+        assert!(is_replay_origin_allowed(&[], None));
     }
 }

@@ -205,6 +205,13 @@ pub async fn vitals(
         return error_response(StatusCode::FORBIDDEN, "Origin not allowed");
     }
 
+    if !ctx.web_vitals_enabled {
+        return success_response(HashMap::from([(
+            "disabled".to_string(),
+            "Web Vitals are not enabled".to_string(),
+        )]));
+    }
+
     let client_ip = get_client_ip(&headers);
     if let Err(msg) = check_ip_allowed(&ctx.ip_rules, client_ip) {
         return error_response(StatusCode::FORBIDDEN, msg);

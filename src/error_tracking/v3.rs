@@ -52,6 +52,7 @@ pub fn build_occurrence(input: OccurrenceInput<'_>, error: ErrorTracking) -> Err
         // Replace this with the SDK/request-provided environment once grouping and
         // release behavior are verified in production data.
         environment: "prod".to_string(),
+        language: input.language.as_str().to_owned(),
         release: build_id.unwrap_or_else(|| input.release.unwrap_or_default().to_owned()),
         group_hash: input.language.group_hash(&error_type, source_stack),
         exact_hash: exact_hash(&error_type, &error_message, source_stack),
@@ -219,6 +220,7 @@ mod tests {
             )
         );
         assert_eq!(row.count, 3);
+        assert_eq!(row.language, "java");
     }
 
     #[test]
@@ -340,6 +342,7 @@ mod tests {
                 "#0 /var/www/app/src/UserService.php(42): App\\Service\\UserService->find('abc', 123)"
             )
         );
+        assert_eq!(row.language, "php");
     }
 
     #[test]
@@ -380,6 +383,7 @@ mod tests {
             row.group_hash,
             group_hash::rust::group_hash("panic", stacktrace)
         );
+        assert_eq!(row.language, "rust");
     }
 
     #[test]

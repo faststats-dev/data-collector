@@ -136,6 +136,7 @@ pub struct ErrorOccurrenceV3Row {
     pub timestamp: DateTime<Utc>,
     pub project_id: Uuid,
     pub environment: String,
+    pub language: String,
     pub release: String,
     pub group_hash: String,
     pub exact_hash: String,

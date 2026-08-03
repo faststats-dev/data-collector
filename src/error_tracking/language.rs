@@ -13,6 +13,15 @@ pub enum ErrorLanguage {
 }
 
 impl ErrorLanguage {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Java => "java",
+            Self::Javascript => "javascript",
+            Self::Php => "php",
+            Self::Rust => "rust",
+        }
+    }
+
     pub fn parse(value: &str) -> Result<Self, UnsupportedLanguage> {
         let value = value.trim();
         if value.eq_ignore_ascii_case("java") {
@@ -66,6 +75,14 @@ mod tests {
         assert_eq!(ErrorLanguage::parse("PHP").unwrap(), ErrorLanguage::Php);
         assert_eq!(ErrorLanguage::parse("Rust").unwrap(), ErrorLanguage::Rust);
         assert_eq!(ErrorLanguage::parse("rs").unwrap(), ErrorLanguage::Rust);
+    }
+
+    #[test]
+    fn serializes_to_canonical_storage_values() {
+        assert_eq!(ErrorLanguage::Java.as_str(), "java");
+        assert_eq!(ErrorLanguage::Javascript.as_str(), "javascript");
+        assert_eq!(ErrorLanguage::Php.as_str(), "php");
+        assert_eq!(ErrorLanguage::Rust.as_str(), "rust");
     }
 
     #[test]

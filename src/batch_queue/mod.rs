@@ -827,6 +827,7 @@ mod tests {
                 timestamp: Utc::now(),
                 project_id: Uuid::new_v4(),
                 environment: "prod".to_string(),
+                language: "java".to_string(),
                 release: String::new(),
                 group_hash: "group".to_string(),
                 exact_hash: "exact".to_string(),

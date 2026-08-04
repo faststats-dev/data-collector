@@ -35,10 +35,14 @@ pub struct ReplayChunkInput {
     pub first_sequence: Option<i64>,
     pub last_sequence: Option<i64>,
     pub client_batch_count: i32,
-    pub approx_events_bytes: usize,
     pub identifier: Option<String>,
     pub url: Option<String>,
     pub events: Vec<Value>,
+}
+
+#[derive(Debug, Default)]
+pub struct ReplayStoreOutcome {
+    pub first_for_billing: bool,
 }
 
 pub struct ReplayFilterEventInput<'a> {
@@ -60,7 +64,6 @@ pub enum ReplayStorageError {
     Compression(std::io::Error),
     CompressionTimeout,
     CompressionTask(String),
-    Backpressure(String),
     Upload(String),
     Database(sqlx::Error),
 }
@@ -79,9 +82,6 @@ impl std::fmt::Display for ReplayStorageError {
             }
             ReplayStorageError::CompressionTask(error) => {
                 write!(f, "Replay compression task failed: {}", error)
-            }
-            ReplayStorageError::Backpressure(error) => {
-                write!(f, "Replay coalescer is overloaded: {}", error)
             }
             ReplayStorageError::Upload(error) => {
                 write!(f, "Failed to upload replay chunk: {}", error)
@@ -184,7 +184,7 @@ impl ReplayStorage {
         &self,
         pool: &sqlx::PgPool,
         input: &mut ReplayChunkInput,
-    ) -> Result<(), ReplayStorageError> {
+    ) -> Result<ReplayStoreOutcome, ReplayStorageError> {
         if !replay_events_are_ordered(&input.events) {
             input.events.sort_by(replay_event_order_cmp);
         }
@@ -196,6 +196,42 @@ impl ReplayStorage {
         let first_sequence = input.first_sequence.unwrap_or(input.sequence);
         let last_sequence = input.last_sequence.unwrap_or(input.sequence);
         let client_batch_count = input.client_batch_count.max(1);
+
+        if !replay_storage_generation_is_active(pool, input.project_id, input.storage_generation)
+            .await?
+        {
+            return Ok(ReplayStoreOutcome::default());
+        }
+
+        // Avoid object-store work for retries and for sequences already covered by a
+        // legacy coalesced row. The INSERT below remains the final race-safe guard.
+        let already_stored: bool = sqlx::query_scalar(
+            r#"
+            SELECT EXISTS (
+                SELECT 1 FROM replay_snapshots
+                WHERE project_id = $1
+                  AND session_id = $2
+                  AND window_id = $3
+                  AND storage_generation = $6
+                  AND (
+                      ($4::text IS NOT NULL AND batch_id = $4)
+                      OR ($4::text IS NULL AND sequence = $5)
+                      OR ($5 BETWEEN first_sequence AND last_sequence)
+                  )
+            )
+            "#,
+        )
+        .bind(input.project_id)
+        .bind(&input.session_id)
+        .bind(&input.window_id)
+        .bind(&input.batch_id)
+        .bind(input.sequence)
+        .bind(input.storage_generation)
+        .fetch_one(pool)
+        .await?;
+        if already_stored {
+            return Ok(ReplayStoreOutcome::default());
+        }
         let route_metadata = replay_route_metadata(&input.events, input.url.as_deref());
         let object_key = replay_object_key(
             input.storage_generation,
@@ -222,7 +258,48 @@ impl ReplayStorage {
             .await?
             {
                 tx.commit().await?;
-                return Ok::<(bool, bool), sqlx::Error>((false, false));
+                return Ok::<(bool, bool, bool), sqlx::Error>((false, false, false));
+            }
+
+            let stream_key = format!(
+                "{}:{}:{}:{}",
+                input.project_id,
+                input.session_id,
+                input.window_id,
+                input.storage_generation
+            );
+            sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+                .bind(stream_key)
+                .execute(&mut *tx)
+                .await?;
+
+            let overlap_exists: bool = sqlx::query_scalar(
+                r#"
+                SELECT EXISTS (
+                    SELECT 1 FROM replay_snapshots
+                    WHERE project_id = $1
+                      AND session_id = $2
+                      AND window_id = $3
+                      AND storage_generation = $6
+                      AND (
+                          ($4::text IS NOT NULL AND batch_id = $4)
+                          OR ($4::text IS NULL AND sequence = $5)
+                          OR ($5 BETWEEN first_sequence AND last_sequence)
+                      )
+                )
+                "#,
+            )
+            .bind(input.project_id)
+            .bind(&input.session_id)
+            .bind(&input.window_id)
+            .bind(&input.batch_id)
+            .bind(input.sequence)
+            .bind(input.storage_generation)
+            .fetch_one(&mut *tx)
+            .await?;
+            if overlap_exists {
+                tx.commit().await?;
+                return Ok::<(bool, bool, bool), sqlx::Error>((false, true, false));
             }
 
             let insert_result = sqlx::query(
@@ -320,7 +397,7 @@ impl ReplayStorage {
                 .fetch_one(&mut *tx)
                 .await?;
                 tx.commit().await?;
-                return Ok::<(bool, bool), sqlx::Error>((false, already_exists));
+                return Ok::<(bool, bool, bool), sqlx::Error>((false, already_exists, false));
             }
 
             let latest_filter_metadata = sqlx::query_as::<_, ReplayFilterMetadata>(
@@ -361,7 +438,7 @@ impl ReplayStorage {
                     actual_ended_at_ms,
                     actual_duration_ms,
                     event_count,
-                    snapshot_count,
+                    chunk_count,
                     total_bytes,
                     has_full_snapshot,
                     routes,
@@ -442,7 +519,7 @@ impl ReplayStorage {
                         ELSE NULL
                     END,
                     event_count = replay_sessions.event_count + EXCLUDED.event_count,
-                    snapshot_count = replay_sessions.snapshot_count + EXCLUDED.snapshot_count,
+                    chunk_count = replay_sessions.chunk_count + EXCLUDED.chunk_count,
                     total_bytes = replay_sessions.total_bytes + EXCLUDED.total_bytes,
                     has_full_snapshot = replay_sessions.has_full_snapshot OR EXCLUDED.has_full_snapshot,
                     routes = ARRAY(
@@ -489,13 +566,28 @@ impl ReplayStorage {
             .execute(&mut *tx)
             .await?;
 
+            let first_for_billing = sqlx::query_scalar::<_, Uuid>(
+                r#"
+                INSERT INTO replay_usage_sessions (id, project_id, session_id)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (project_id, session_id) DO NOTHING
+                RETURNING id
+                "#,
+            )
+            .bind(Uuid::new_v4())
+            .bind(input.project_id)
+            .bind(&input.session_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .is_some();
+
             tx.commit().await?;
-            Ok::<(bool, bool), sqlx::Error>((true, false))
+            Ok::<(bool, bool, bool), sqlx::Error>((true, false, first_for_billing))
         }
         .await;
 
         match result {
-            Ok((true, _)) => {
+            Ok((true, _, first_for_billing)) => {
                 record_replay_chunk_metrics(
                     input.flush_reason.as_deref(),
                     input.is_final,
@@ -503,23 +595,46 @@ impl ReplayStorage {
                     compressed_bytes,
                     uncompressed_bytes,
                 );
+                Ok(ReplayStoreOutcome { first_for_billing })
             }
-            Ok((false, true)) => {
+            Ok((false, true, _)) => {
                 // Idempotent retries use the same deterministic object key. Deleting it here
                 // would remove the object referenced by the transaction that won the race.
-                return Ok(());
+                Ok(ReplayStoreOutcome::default())
             }
-            Ok((false, false)) => {
+            Ok((false, false, _)) => {
                 self.delete_object(&bucket, &object_key).await?;
-                return Ok(());
+                Ok(ReplayStoreOutcome::default())
             }
             Err(error) => {
                 // Keep deterministic objects on database failure. A concurrent transaction may
                 // already reference the same key, and the backed-up retry can safely reuse it.
-                return Err(ReplayStorageError::Database(error));
+                Err(ReplayStorageError::Database(error))
             }
         }
+    }
 
+    pub async fn finalize_replay_session(
+        &self,
+        pool: &sqlx::PgPool,
+        project_id: Uuid,
+        session_id: &str,
+        window_id: &str,
+    ) -> Result<(), ReplayStorageError> {
+        sqlx::query(
+            r#"
+            UPDATE replay_sessions
+            SET is_complete = true,
+                finalized_at = COALESCE(finalized_at, NOW()),
+                updated_at = NOW()
+            WHERE project_id = $1 AND session_id = $2 AND window_id = $3
+            "#,
+        )
+        .bind(project_id)
+        .bind(session_id)
+        .bind(window_id)
+        .execute(pool)
+        .await?;
         Ok(())
     }
 

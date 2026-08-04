@@ -96,7 +96,6 @@ pub(crate) fn build_replay_chunk_input(
     context: &ProjectContext,
     token: &str,
     parsed: ReplayRequest,
-    replay_payload_bytes: usize,
     client_ip: &str,
     user_agent: &str,
 ) -> Result<BuiltReplayChunk, String> {
@@ -135,7 +134,7 @@ pub(crate) fn build_replay_chunk_input(
     events.retain(is_valid_rrweb_event);
     let dropped_event_count = received_event_count - events.len();
 
-    if events.is_empty() {
+    if events.is_empty() && !is_final {
         return Err("No valid events".to_string());
     }
 
@@ -163,7 +162,6 @@ pub(crate) fn build_replay_chunk_input(
             first_sequence: None,
             last_sequence: None,
             client_batch_count: 1,
-            approx_events_bytes: replay_payload_bytes,
             identifier: Some(server_id.to_string()),
             url: Some(url),
             events,
@@ -181,8 +179,6 @@ pub async fn replay(
         Ok(b) => b,
         Err(e) => return error_response(StatusCode::BAD_REQUEST, &e),
     };
-    let replay_payload_bytes = body.len();
-
     let parsed: ReplayRequest = match serde_json::from_slice(&body) {
         Ok(p) => p,
         Err(e) => {
@@ -261,30 +257,41 @@ pub async fn replay(
         );
     }
 
-    let Some(replay_coalescer) = state.replay_coalescer.as_deref() else {
+    let Some(replay_storage) = state.replay_storage.as_deref() else {
         return error_response(
             StatusCode::SERVICE_UNAVAILABLE,
             "Replay storage is not configured",
         );
     };
 
-    let built = match build_replay_chunk_input(
-        &context,
-        &token,
-        parsed,
-        replay_payload_bytes,
-        client_ip,
-        user_agent,
-    ) {
+    let built = match build_replay_chunk_input(&context, &token, parsed, client_ip, user_agent) {
         Ok(value) => value,
         Err(message) => return error_response(StatusCode::BAD_REQUEST, &message),
     };
 
-    match replay_coalescer.ingest(built.input) {
-        Ok(()) => {
-            state
-                .batch_queue
-                .track_replay_usage(&built.session_id, &built.tracking);
+    let mut input = built.input;
+    let stored = if input.events.is_empty() {
+        replay_storage
+            .finalize_replay_session(
+                &state.pool,
+                input.project_id,
+                &input.session_id,
+                &input.window_id,
+            )
+            .await
+            .map(|()| Default::default())
+    } else {
+        replay_storage
+            .store_replay_chunk(&state.pool, &mut input)
+            .await
+    };
+    match stored {
+        Ok(stored) => {
+            if stored.first_for_billing {
+                state
+                    .batch_queue
+                    .track_replay_usage(&built.session_id, &built.tracking);
+            }
         }
         Err(error) => {
             error!("Failed to store replay: {}", error);

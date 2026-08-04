@@ -579,7 +579,6 @@ pub async fn process_failed_request(
     batch_queue: &BatchQueue,
     pool: &sqlx::PgPool,
     replay_storage: Option<&crate::replay_storage::ReplayStorage>,
-    replay_coalescer: Option<&crate::replay_coalescer::ReplayCoalescer>,
     request: &FailedRequest,
 ) -> Result<(), String> {
     match request.request_type {
@@ -589,7 +588,7 @@ pub async fn process_failed_request(
             process_vitals_request(batch_queue, pool, replay_storage, request).await
         }
         RequestType::Replay => {
-            process_replay_request(batch_queue, pool, replay_coalescer, request).await
+            process_replay_request(batch_queue, pool, replay_storage, request).await
         }
     }
 }
@@ -885,7 +884,7 @@ async fn process_vitals_request(
 async fn process_replay_request(
     batch_queue: &BatchQueue,
     pool: &sqlx::PgPool,
-    replay_coalescer: Option<&crate::replay_coalescer::ReplayCoalescer>,
+    replay_storage: Option<&crate::replay_storage::ReplayStorage>,
     request: &FailedRequest,
 ) -> Result<(), String> {
     use crate::handler::replay::ReplayRequest;
@@ -898,8 +897,8 @@ async fn process_replay_request(
         .await
         .map_err(|_| "Unauthorized or database error")?;
 
-    let replay_coalescer =
-        replay_coalescer.ok_or_else(|| "Replay storage is not configured".to_string())?;
+    let replay_storage =
+        replay_storage.ok_or_else(|| "Replay storage is not configured".to_string())?;
     if !ctx.replay_storage_active {
         return Err("Replay storage is resetting".to_string());
     }
@@ -908,16 +907,24 @@ async fn process_replay_request(
         &ctx,
         &token,
         parsed,
-        request.body.len(),
         request.client_ip.as_deref().unwrap_or(""),
         request.user_agent.as_deref().unwrap_or(""),
     )?;
 
-    replay_coalescer
-        .ingest(built.input)
-        .map_err(|error| error.to_string())?;
+    let mut input = built.input;
+    let stored = if input.events.is_empty() {
+        replay_storage
+            .finalize_replay_session(pool, input.project_id, &input.session_id, &input.window_id)
+            .await
+            .map(|()| Default::default())
+    } else {
+        replay_storage.store_replay_chunk(pool, &mut input).await
+    }
+    .map_err(|error| error.to_string())?;
 
-    batch_queue.track_replay_usage(&built.session_id, &built.tracking);
+    if stored.first_for_billing {
+        batch_queue.track_replay_usage(&built.session_id, &built.tracking);
+    }
 
     Ok(())
 }

@@ -714,7 +714,6 @@ impl BatchQueue {
         &self,
         pool: &sqlx::PgPool,
         replay_storage: Option<&crate::replay_storage::ReplayStorage>,
-        replay_coalescer: Option<&crate::replay_coalescer::ReplayCoalescer>,
     ) {
         match self.backup_store.cleanup_stale_requests().await {
             Ok(count) if count > 0 => {
@@ -753,14 +752,8 @@ impl BatchQueue {
         }
 
         for (id, request) in requests {
-            let result = super::handler::process_failed_request(
-                self,
-                pool,
-                replay_storage,
-                replay_coalescer,
-                &request,
-            )
-            .await;
+            let result =
+                super::handler::process_failed_request(self, pool, replay_storage, &request).await;
 
             match result {
                 Ok(()) => {

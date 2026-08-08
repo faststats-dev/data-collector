@@ -9,6 +9,10 @@ use tracing::debug;
 static REGEX_CACHE: LazyLock<Cache<Arc<str>, Arc<Regex>>> =
     LazyLock::new(|| Cache::builder().max_capacity(100).build());
 
+pub const MAX_JSON_METRIC_DEPTH: usize = 8;
+pub const MAX_JSON_METRIC_BYTES: usize = 32 * 1024;
+pub const MAX_JSON_METRIC_ITEMS: usize = 256;
+
 fn get_cached_regex(pattern: &str) -> Option<Arc<Regex>> {
     if let Some(re) = REGEX_CACHE.get(pattern) {
         return Some(re);
@@ -42,6 +46,20 @@ pub fn validate_and_filter_payload(
 
         let re = ds.regex.as_deref().and_then(get_cached_regex);
         let shape = metric_shape(ds);
+
+        if ds.data_type == "json" {
+            match validate_json_metric(value) {
+                Ok(()) => {
+                    debug!("key='{}' VALID=true (json)", ref_id);
+                    return true;
+                }
+                Err(reason) => {
+                    warnings.insert(ref_id.clone(), format!("failed validation: {}", reason));
+                    debug!("key='{}' VALID=false reason='{}'", ref_id, reason);
+                    return false;
+                }
+            }
+        }
 
         if shape == "array" {
             if let Some(arr) = value.as_array_mut() {
@@ -157,6 +175,40 @@ fn metric_shape(ds: &DataSource) -> &str {
     }
 }
 
+fn validate_json_metric(value: &Value) -> Result<(), &'static str> {
+    if serde_json::to_vec(value).map_err(|_| "invalid JSON")?.len() > MAX_JSON_METRIC_BYTES {
+        return Err("JSON value exceeds 32 KiB");
+    }
+
+    let mut items = 0;
+    validate_json_node(value, 0, &mut items)
+}
+
+fn validate_json_node(value: &Value, depth: usize, items: &mut usize) -> Result<(), &'static str> {
+    if depth > MAX_JSON_METRIC_DEPTH {
+        return Err("JSON value exceeds maximum depth of 8");
+    }
+    *items += 1;
+    if *items > MAX_JSON_METRIC_ITEMS {
+        return Err("JSON value exceeds 256 items");
+    }
+
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                validate_json_node(value, depth + 1, items)?;
+            }
+        }
+        Value::Object(values) => {
+            for value in values.values() {
+                validate_json_node(value, depth + 1, items)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 fn validate_scalar(v: &Value, ds: &DataSource, re: Option<&Regex>) -> Result<(), &'static str> {
     match ds.data_type.as_str() {
         "string" => {
@@ -229,6 +281,65 @@ mod tests {
             min_value: None,
             max_value: None,
             metric_shape: None,
+        }
+    }
+
+    mod json_validation {
+        use super::*;
+
+        #[test]
+        fn accepts_bounded_nested_json() {
+            let ds_map = HashMap::from([("state".to_string(), make_data_source("json"))]);
+            let data = HashMap::from([(
+                "state".to_string(),
+                json!({
+                    "world": { "weather": "rain", "players": 12 },
+                    "features": ["claims", "economy"],
+                    "maintenance": false
+                }),
+            )]);
+
+            let (valid, warnings) = validate_and_filter_payload(data, &ds_map);
+
+            assert!(valid.contains_key("state"));
+            assert!(warnings.is_empty());
+        }
+
+        #[test]
+        fn rejects_json_over_depth_limit() {
+            let mut value = json!(true);
+            for _ in 0..=MAX_JSON_METRIC_DEPTH {
+                value = json!({ "nested": value });
+            }
+
+            assert_eq!(
+                validate_json_metric(&value),
+                Err("JSON value exceeds maximum depth of 8")
+            );
+        }
+
+        #[test]
+        fn rejects_json_over_item_limit() {
+            let value = Value::Array(
+                (0..MAX_JSON_METRIC_ITEMS)
+                    .map(|index| json!(index))
+                    .collect(),
+            );
+
+            assert_eq!(
+                validate_json_metric(&value),
+                Err("JSON value exceeds 256 items")
+            );
+        }
+
+        #[test]
+        fn rejects_json_over_size_limit() {
+            let value = json!("x".repeat(MAX_JSON_METRIC_BYTES));
+
+            assert_eq!(
+                validate_json_metric(&value),
+                Err("JSON value exceeds 32 KiB")
+            );
         }
     }
 

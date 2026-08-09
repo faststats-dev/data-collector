@@ -2,7 +2,7 @@ use super::{
     check_ip_allowed, error_response, get_authorization, get_client_ip, get_request_origin,
     load_project_context, success_response, validate_hostname,
 };
-use crate::identity::{PersonProfile, upsert_person_and_alias};
+use crate::identity::{PersonPatch, upsert_person_and_alias};
 use crate::models::AppState;
 use axum::body::Bytes;
 use axum::extract::State;
@@ -20,7 +20,8 @@ pub(crate) struct IdentifyRequest {
     #[serde(default, alias = "anonymousId")]
     pub(crate) identifier: Option<Uuid>,
     pub(crate) external_id: String,
-    pub(crate) email: String,
+    #[serde(default)]
+    pub(crate) email: Option<String>,
     #[serde(default)]
     pub(crate) name: Option<String>,
     #[serde(default)]
@@ -29,6 +30,14 @@ pub(crate) struct IdentifyRequest {
     pub(crate) avatar_url: Option<String>,
     #[serde(default)]
     pub(crate) traits: Option<Map<String, Value>>,
+    #[serde(default)]
+    pub(crate) replace_traits: bool,
+    #[serde(default)]
+    pub(crate) unset_traits: Vec<String>,
+    #[serde(default)]
+    pub(crate) clear_fields: Vec<String>,
+    #[serde(default)]
+    pub(crate) aliases: Vec<String>,
 }
 
 fn normalize_optional_text(value: Option<String>) -> Option<String> {
@@ -56,6 +65,10 @@ pub async fn identify(
         phone,
         avatar_url,
         traits,
+        replace_traits,
+        unset_traits,
+        clear_fields,
+        aliases,
     } = match serde_json::from_slice(&body) {
         Ok(req) => req,
         Err(_) => return error_response(StatusCode::BAD_REQUEST, "Invalid JSON"),
@@ -92,79 +105,37 @@ pub async fn identify(
         return error_response(StatusCode::BAD_REQUEST, "externalId is required");
     }
 
-    let email = email.trim();
-    if email.is_empty() {
-        return error_response(StatusCode::BAD_REQUEST, "email is required");
-    }
-
     let Some(source_id) = identifier else {
         return error_response(StatusCode::BAD_REQUEST, "identifier is required");
     };
 
     let user_id = crate::utils::hash_server_id(source_id, ctx.project_id).to_string();
-    let traits_value = Value::Object(traits.unwrap_or_default());
+    let aliases = aliases
+        .into_iter()
+        .filter_map(|alias| alias.parse::<Uuid>().ok())
+        .map(|alias| crate::utils::hash_server_id(alias, ctx.project_id).to_string())
+        .collect();
     let name = normalize_optional_text(name);
     let phone = normalize_optional_text(phone);
     let avatar_url = normalize_optional_text(avatar_url);
 
-    let person_profile = PersonProfile {
+    let person_patch = PersonPatch {
         external_id: external_id.to_owned(),
-        email: Some(email.to_owned()),
-        name: name.clone(),
-        phone: phone.clone(),
-        avatar_url: avatar_url.clone(),
-        traits: traits_value.clone(),
+        email: normalize_optional_text(email),
+        name,
+        phone,
+        avatar_url,
+        clear_fields,
+        traits: traits.unwrap_or_default(),
+        replace_traits,
+        unset_traits,
+        aliases,
     };
 
-    if upsert_person_and_alias(&state.pool, ctx.project_id, &user_id, &person_profile)
+    if upsert_person_and_alias(&state.pool, ctx.project_id, &user_id, &person_patch)
         .await
         .is_err()
     {
-        return error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to store identified user",
-        );
-    }
-
-    let result = sqlx::query(
-        r#"
-		INSERT INTO identified_project_users (
-			project_id,
-			user_id,
-			external_id,
-			email,
-			name,
-			phone,
-			avatar_url,
-			traits,
-			identified_at,
-			updated_at
-		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, NOW(), NOW())
-		ON CONFLICT (project_id, user_id)
-		DO UPDATE SET
-			external_id = EXCLUDED.external_id,
-			email = EXCLUDED.email,
-			name = EXCLUDED.name,
-			phone = EXCLUDED.phone,
-			avatar_url = EXCLUDED.avatar_url,
-			traits = EXCLUDED.traits,
-			identified_at = NOW(),
-			updated_at = NOW()
-		"#,
-    )
-    .bind(ctx.project_id)
-    .bind(user_id)
-    .bind(external_id)
-    .bind(email)
-    .bind(name)
-    .bind(phone)
-    .bind(avatar_url)
-    .bind(traits_value)
-    .execute(&state.pool)
-    .await;
-
-    if result.is_err() {
         return error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "Failed to store identified user",

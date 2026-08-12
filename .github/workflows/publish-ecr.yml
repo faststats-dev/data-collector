@@ -34,7 +34,7 @@ jobs:
           test -n "$ECR_REPOSITORY" || (echo "::error::Set repository secret ECR_REPOSITORY" && exit 1)
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v6.2.0
+        uses: aws-actions/configure-aws-credentials@v6.2.3
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           aws-region: ${{ env.AWS_REGION }}

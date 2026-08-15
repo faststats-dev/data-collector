@@ -36,6 +36,9 @@ pub struct ReplayChunkInput {
     pub last_sequence: Option<i64>,
     pub client_batch_count: i32,
     pub identifier: Option<String>,
+    pub browser: Option<String>,
+    pub country: Option<String>,
+    pub os: Option<String>,
     pub url: Option<String>,
     pub events: Vec<Value>,
 }
@@ -559,9 +562,24 @@ impl ReplayStorage {
             .bind(i32::try_from(route_metadata.routes.len()).unwrap_or(i32::MAX))
             .bind(route_metadata.entry_route.as_deref())
             .bind(route_metadata.exit_route.as_deref())
-            .bind(latest_filter_metadata.as_ref().and_then(|row| row.browser.as_deref()))
-            .bind(latest_filter_metadata.as_ref().and_then(|row| row.country.as_deref()))
-            .bind(latest_filter_metadata.as_ref().and_then(|row| row.os.as_deref()))
+            .bind(
+                input
+                    .browser
+                    .as_deref()
+                    .or_else(|| latest_filter_metadata.as_ref()?.browser.as_deref()),
+            )
+            .bind(
+                input
+                    .country
+                    .as_deref()
+                    .or_else(|| latest_filter_metadata.as_ref()?.country.as_deref()),
+            )
+            .bind(
+                input
+                    .os
+                    .as_deref()
+                    .or_else(|| latest_filter_metadata.as_ref()?.os.as_deref()),
+            )
             .bind(input.is_final)
             .execute(&mut *tx)
             .await?;

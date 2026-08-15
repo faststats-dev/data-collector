@@ -909,6 +909,7 @@ async fn process_replay_request(
         parsed,
         request.client_ip.as_deref().unwrap_or(""),
         request.user_agent.as_deref().unwrap_or(""),
+        request.country.as_deref(),
     )?;
 
     let mut input = built.input;

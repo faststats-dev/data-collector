@@ -1,6 +1,7 @@
 use super::{
     EncodingQuery, ProjectContext, check_ip_allowed, decompress_body, error_response,
-    get_client_ip, get_request_origin, load_project_context, success_response, validate_hostname,
+    get_client_ip, get_country, get_request_origin, load_project_context, success_response,
+    validate_hostname,
 };
 use crate::batch_queue::{FailedRequest, RequestType, TrackingContext};
 use crate::models::AppState;
@@ -98,6 +99,7 @@ pub(crate) fn build_replay_chunk_input(
     parsed: ReplayRequest,
     client_ip: &str,
     user_agent: &str,
+    country: Option<&str>,
 ) -> Result<BuiltReplayChunk, String> {
     let ReplayRequest {
         session_id,
@@ -129,6 +131,7 @@ pub(crate) fn build_replay_chunk_input(
                 crate::utils::cookieless_server_id(client_ip, user_agent, context.project_id)
             }),
     };
+    let user_agent_info = crate::ua_parser::parse(user_agent);
 
     let received_event_count = events.len();
     events.retain(is_valid_rrweb_event);
@@ -163,6 +166,20 @@ pub(crate) fn build_replay_chunk_input(
             last_sequence: None,
             client_batch_count: 1,
             identifier: Some(server_id.to_string()),
+            browser: user_agent_info
+                .as_ref()
+                .map(|info| info.browser.trim())
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned),
+            country: country
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned),
+            os: user_agent_info
+                .as_ref()
+                .map(|info| info.os.trim())
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned),
             url: Some(url),
             events,
         },
@@ -192,6 +209,7 @@ pub async fn replay(
     };
     let token = parsed.token.clone();
     let request_origin = get_request_origin(&headers);
+    let country = get_country(&headers);
 
     let context = match load_project_context(&state.pool, &token).await {
         Ok(ctx) => ctx,
@@ -205,7 +223,7 @@ pub async fn replay(
                 request_type: RequestType::Replay,
                 token: token.clone(),
                 body: body.to_vec(),
-                country: None,
+                country: country.clone(),
                 client_ip: if client_ip.is_empty() {
                     None
                 } else {
@@ -264,7 +282,14 @@ pub async fn replay(
         );
     };
 
-    let built = match build_replay_chunk_input(&context, &token, parsed, client_ip, user_agent) {
+    let built = match build_replay_chunk_input(
+        &context,
+        &token,
+        parsed,
+        client_ip,
+        user_agent,
+        country.as_deref(),
+    ) {
         Ok(value) => value,
         Err(message) => return error_response(StatusCode::BAD_REQUEST, &message),
     };
@@ -308,7 +333,7 @@ pub async fn replay(
                 request_type: RequestType::Replay,
                 token: token.clone(),
                 body: body.into_owned(),
-                country: None,
+                country,
                 client_ip,
                 user_agent,
                 origin: request_origin,

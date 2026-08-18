@@ -16,18 +16,18 @@ RUN cargo chef cook \
 COPY . .
 RUN cargo build \
     --release \
-    --bin data-collector \
-    && strip /app/target/release/data-collector
+    --package collector \
+    --bin collector \
+    && strip /app/target/release/collector
 
 FROM gcr.io/distroless/cc-debian12 AS runtime
 WORKDIR /app
-COPY regexes.yaml ./regexes.yaml
 COPY --from=builder \
-    /app/target/release/data-collector \
-    /usr/local/bin/data-collector
+    /app/target/release/collector \
+    /usr/local/bin/collector
 USER nonroot:nonroot
 
 ENV PORT=8080
 EXPOSE $PORT
 
-ENTRYPOINT ["/usr/local/bin/data-collector"]
+ENTRYPOINT ["/usr/local/bin/collector"]

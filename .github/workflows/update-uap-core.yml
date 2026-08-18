@@ -1,0 +1,61 @@
+name: Update uap-core rules
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: update-uap-core
+  cancel-in-progress: true
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Download current upstream rules
+        run: |
+          curl --fail --silent --show-error --location \
+            https://raw.githubusercontent.com/ua-parser/uap-core/master/regexes.yaml \
+            --output crates/user-agent/regexes.yaml
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Validate updated rules
+        run: cargo test -p user-agent
+
+      - name: Open update pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          if git diff --quiet -- crates/user-agent/regexes.yaml; then
+            echo "uap-core rules are already current"
+            exit 0
+          fi
+
+          branch="automation/update-uap-core"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$branch"
+          git add crates/user-agent/regexes.yaml
+          git commit -m "chore: update uap-core rules"
+          git push --force origin "$branch"
+
+          gh pr create \
+            --base "$BASE_BRANCH" \
+            --head "$branch" \
+            --title "chore: update uap-core rules" \
+            --body "Updates the vendored user-agent rules from ua-parser/uap-core and validates the generated Rust parser." \
+            || gh pr edit "$branch" \
+              --title "chore: update uap-core rules" \
+              --body "Updates the vendored user-agent rules from ua-parser/uap-core and validates the generated Rust parser."

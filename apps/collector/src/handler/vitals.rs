@@ -6,7 +6,6 @@ use super::{
 use crate::batch_queue::{FailedRequest, QueuedEvent, RequestType, TrackingContext};
 use crate::models::AppState;
 use crate::tinybird::WebVitalRow;
-use crate::ua_parser::UserAgentInfo;
 use axum::body::Bytes;
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -15,6 +14,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
 use tracing::{error, warn};
+use user_agent::UserAgentInfo;
 use uuid::Uuid;
 
 const UNKNOWN_DIMENSION: &str = "Unknown";
@@ -227,7 +227,7 @@ pub async fn vitals(
         .get("User-Agent")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let ua_info = crate::ua_parser::parse(user_agent);
+    let ua_info = user_agent::parse(user_agent);
     let rows = match build_web_vital_rows(
         ctx.project_id,
         &request,

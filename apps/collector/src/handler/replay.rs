@@ -131,7 +131,7 @@ pub(crate) fn build_replay_chunk_input(
                 crate::utils::cookieless_server_id(client_ip, user_agent, context.project_id)
             }),
     };
-    let user_agent_info = crate::ua_parser::parse(user_agent);
+    let user_agent_info = user_agent::parse(user_agent);
 
     let received_event_count = events.len();
     events.retain(is_valid_rrweb_event);

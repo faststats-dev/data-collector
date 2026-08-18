@@ -701,11 +701,7 @@ async fn process_web_request(
         return Ok(());
     }
 
-    let ua_info = match request
-        .user_agent
-        .as_deref()
-        .and_then(crate::ua_parser::parse)
-    {
+    let ua_info = match request.user_agent.as_deref().and_then(user_agent::parse) {
         Some(info) => info,
         None => return Ok(()), // Bot detected or no UA
     };
@@ -843,7 +839,7 @@ async fn process_vitals_request(
         organization_id: ctx.organization_id.as_deref().map(Into::into),
     };
 
-    let ua_info = crate::ua_parser::parse(request.user_agent.as_deref().unwrap_or(""));
+    let ua_info = user_agent::parse(request.user_agent.as_deref().unwrap_or(""));
     let rows = vitals::build_web_vital_rows(
         ctx.project_id,
         &req,

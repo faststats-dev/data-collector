@@ -30,7 +30,6 @@ mod models;
 mod polar;
 mod replay_storage;
 mod tinybird;
-pub mod ua_parser;
 mod utils;
 mod validation;
 
@@ -76,13 +75,7 @@ async fn main() {
         )
         .init();
 
-    // Initialize user agent parser
-    if let Err(e) = ua_parser::init() {
-        warn!("Failed to initialize UA parser: {}", e);
-        warn!("User agent parsing will be disabled");
-    } else {
-        info!("UA parser initialized successfully");
-    }
+    user_agent::init();
 
     let database_url = std::env::var("DATABASE_URL")
         .expect("DATABASE_URL must be set in .env file or environment variables");

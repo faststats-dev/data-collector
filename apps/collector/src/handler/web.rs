@@ -149,7 +149,7 @@ pub async fn web(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    let ua_info = match crate::ua_parser::parse(user_agent) {
+    let ua_info = match user_agent::parse(user_agent) {
         Some(info) => info,
         None => return success_response(HashMap::new()),
     };

@@ -35,15 +35,7 @@ impl Language {
     }
 
     pub(crate) fn parse_stack<'a>(self, input: &'a str) -> Result<StackTrace<'a>, ParseError> {
-        self.parse_stack_with_limits(input, &ParserLimits::default())
-    }
-
-    pub(crate) fn parse_stack_with_limits<'a>(
-        self,
-        input: &'a str,
-        limits: &ParserLimits,
-    ) -> Result<StackTrace<'a>, ParseError> {
-        crate::parser::parse(self, input, limits)
+        crate::parser::parse(self, input, &ParserLimits::default())
     }
 }
 

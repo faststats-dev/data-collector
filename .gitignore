@@ -5,3 +5,4 @@ data-collector
 coverage.out
 .idea
 backup.db
+.DS_STORE

@@ -1,8 +1,16 @@
 /target
 /crates/*/target
-.env
 data-collector
 coverage.out
+
+# Local Development
+
 .idea
 backup.db
 .DS_STORE
+.env
+
+# Agent Stuff
+
+.agents
+skills-lock.json

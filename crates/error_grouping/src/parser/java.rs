@@ -1,97 +1,76 @@
+use crate::ast::{SegmentRelation, StackFrame, StackTrace, TraceSegment};
 use crate::parser::{error_kind, looks_like_exception, payload, some, source_file, trim_line};
-use crate::{Language, ParseError, SegmentRelation, StackFrame, StackTrace, TraceSegment};
+use crate::{Language, ParseError};
 
 pub(super) fn parse_lines<'a>(
-    lines: impl Iterator<Item = &'a str>,
-) -> Result<StackTrace, ParseError> {
-    let mut segments = Vec::new();
-    let mut scopes = Vec::new();
+    lines: impl Iterator<Item = Result<&'a str, ParseError>>,
+) -> Result<StackTrace<'a>, ParseError> {
+    let mut trace = JavaTraceBuilder::default();
 
     for original in lines {
-        let (line, indent) = trim_line(original);
+        let original = original?;
+        let (line, _) = trim_line(original);
         if line.is_empty() {
             continue;
         }
         if let Some(error) = exception_in_thread(line) {
-            add_segment(
-                &mut segments,
-                &mut scopes,
-                indent,
-                SegmentRelation::Root,
-                error,
-            );
+            trace.start_segment(SegmentRelation::Root, error);
         } else if let Some((relation, error)) = related_error(line) {
-            add_segment(&mut segments, &mut scopes, indent, relation, error);
+            trace.start_segment(relation, error);
         } else if let Some(body) = payload(line, "at ") {
             if let Some(frame) = parse_frame(body) {
-                current_segment(&mut segments, &mut scopes)
-                    .frames
-                    .push(frame);
+                trace.push_frame(frame);
             }
-        } else if segments.is_empty() && looks_like_exception(line, &['$']) {
-            add_segment(
-                &mut segments,
-                &mut scopes,
-                indent,
-                SegmentRelation::Root,
-                line,
-            );
+        } else if trace.is_empty() && looks_like_exception(line, &['$']) {
+            trace.start_segment(SegmentRelation::Root, line);
         }
     }
 
-    if !segments
-        .iter()
-        .any(|segment| !segment.frames.is_empty() || segment.error_kind.is_some())
-    {
-        return Err(ParseError::Unrecognized);
-    }
-    Ok(StackTrace::new(Language::Java, segments))
+    trace.finish()
 }
 
-fn add_segment(
-    segments: &mut Vec<TraceSegment>,
-    scopes: &mut Vec<(usize, usize)>,
-    indent: usize,
-    relation: SegmentRelation,
-    error: &str,
-) {
-    let root = segments.is_empty() || relation == SegmentRelation::Root;
-    if root {
-        scopes.clear();
-    } else {
-        while scopes.len() > 1
-            && scopes.last().is_some_and(|(level, _)| {
-                *level > indent || (*level == indent && relation != SegmentRelation::Cause)
-            })
+#[derive(Default)]
+struct JavaTraceBuilder<'a> {
+    segments: Vec<TraceSegment<'a>>,
+}
+
+impl<'a> JavaTraceBuilder<'a> {
+    fn is_empty(&self) -> bool {
+        self.segments.is_empty()
+    }
+
+    fn start_segment(&mut self, relation: SegmentRelation, error: &'a str) {
+        self.segments.push(TraceSegment {
+            relation: if self.segments.is_empty() {
+                SegmentRelation::Root
+            } else {
+                relation
+            },
+            error_kind: error_kind(error),
+            frames: Vec::new(),
+        });
+    }
+
+    fn push_frame(&mut self, frame: StackFrame<'a>) {
+        if self.segments.is_empty() {
+            self.segments.push(TraceSegment::default());
+        }
+        if let Some(segment) = self.segments.last_mut() {
+            segment.frames.push(frame);
+        }
+    }
+
+    fn finish(self) -> Result<StackTrace<'a>, ParseError> {
+        if self
+            .segments
+            .iter()
+            .any(|segment| !segment.frames.is_empty() || segment.error_kind.is_some())
         {
-            scopes.pop();
+            Ok(StackTrace::new(Language::Java, self.segments))
+        } else {
+            Err(ParseError::Unrecognized)
         }
     }
-
-    let index = segments.len();
-    segments.push(TraceSegment {
-        parent: (!root).then(|| scopes.last().map_or(0, |(_, parent)| *parent)),
-        relation: if root {
-            SegmentRelation::Root
-        } else {
-            relation
-        },
-        error_kind: error_kind(error),
-        ..TraceSegment::default()
-    });
-    scopes.push((indent, index));
-}
-
-fn current_segment<'a>(
-    segments: &'a mut Vec<TraceSegment>,
-    scopes: &mut Vec<(usize, usize)>,
-) -> &'a mut TraceSegment {
-    if segments.is_empty() {
-        segments.push(TraceSegment::default());
-        scopes.push((0, 0));
-    }
-    let index = segments.len() - 1;
-    &mut segments[index]
 }
 
 fn related_error(line: &str) -> Option<(SegmentRelation, &str)> {
@@ -106,7 +85,7 @@ fn exception_in_thread(line: &str) -> Option<&str> {
     (!thread.is_empty() && !error.is_empty()).then_some(error)
 }
 
-fn parse_frame(body: &str) -> Option<StackFrame> {
+fn parse_frame(body: &str) -> Option<StackFrame<'_>> {
     let (callable, source) = body.rsplit_once('(')?;
     let source = source.strip_suffix(')')?;
     let (module, callable) = if callable.contains("$$Lambda$") {
@@ -152,14 +131,11 @@ Caused by: java.lang.IllegalStateException: bad state
             .unwrap();
         assert_eq!(trace.segments().len(), 2);
         assert_eq!(
-            trace.segments()[0].error_kind.as_deref(),
+            trace.segments()[0].error_kind,
             Some("java.lang.RuntimeException")
         );
-        assert_eq!(trace.segments()[0].frames[0].module.as_deref(), Some("app"));
-        assert_eq!(
-            trace.segments()[0].frames[0].file.as_deref(),
-            Some("Main.java")
-        );
+        assert_eq!(trace.segments()[0].frames[0].module, Some("app"));
+        assert_eq!(trace.segments()[0].frames[0].file, Some("Main.java"));
         assert_eq!(trace.segments()[1].relation, SegmentRelation::Cause);
     }
 
@@ -178,12 +154,9 @@ Caused by: java.lang.IllegalStateException: bad state
         )
         .unwrap();
         let frame = &trace.segments()[0].frames[0];
-        assert_eq!(frame.module.as_deref(), Some("java.base"));
-        assert_eq!(frame.file.as_deref(), Some("Thread.java"));
-        assert_eq!(frame.function.as_deref(), Some("java.lang.Thread.run"));
-        assert_eq!(trace.segments()[1].parent, Some(0));
-        assert_eq!(trace.segments()[2].parent, Some(1));
-        assert_eq!(trace.segments()[3].parent, Some(0));
+        assert_eq!(frame.module, Some("java.base"));
+        assert_eq!(frame.file, Some("Thread.java"));
+        assert_eq!(frame.function, Some("java.lang.Thread.run"));
         assert_eq!(trace.segments()[1].relation, SegmentRelation::Suppressed);
         assert_eq!(trace.segments()[2].relation, SegmentRelation::Cause);
         assert_eq!(trace.segments()[3].relation, SegmentRelation::Cause);
@@ -198,12 +171,12 @@ Caused by: java.lang.IllegalStateException: bad state
     }
 
     #[test]
-    fn successive_causes_form_a_chain() {
+    fn successive_causes_preserve_display_order() {
         let trace = Language::Java
             .parse_stack("Root: x\nCaused by: Middle: x\nCaused by: Bottom: x")
             .unwrap();
 
-        assert_eq!(trace.segments()[1].parent, Some(0));
-        assert_eq!(trace.segments()[2].parent, Some(1));
+        assert_eq!(trace.segments()[1].error_kind, Some("Middle"));
+        assert_eq!(trace.segments()[2].error_kind, Some("Bottom"));
     }
 }

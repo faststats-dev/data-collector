@@ -1,17 +1,19 @@
+use crate::ast::{StackFrame, StackTrace, TraceSegment};
 use crate::parser::{payload, some, source_file};
-use crate::{Language, ParseError, StackFrame, StackTrace, TraceSegment};
+use crate::{Language, ParseError};
 
 pub(super) fn parse_lines<'a>(
-    lines: impl Iterator<Item = &'a str>,
-) -> Result<StackTrace, ParseError> {
+    lines: impl Iterator<Item = Result<&'a str, ParseError>>,
+) -> Result<StackTrace<'a>, ParseError> {
     let mut segment = TraceSegment {
-        error_kind: Some("panic".to_owned()),
+        error_kind: Some("panic"),
         ..TraceSegment::default()
     };
     let mut saw_panic_header = false;
     let mut in_cause_list = false;
 
     for original in lines {
+        let original = original?;
         let line = original.trim();
         if line.is_empty() {
             continue;
@@ -64,7 +66,7 @@ fn indexed_frame(line: &str) -> Option<&str> {
     (!body.is_empty() && symbolic).then_some(body)
 }
 
-fn parse_frame(body: &str) -> StackFrame {
+fn parse_frame(body: &str) -> StackFrame<'_> {
     let function = if let Some((_, function)) = body.split_once(" - ") {
         some(function)
     } else if body.starts_with("0x") {
@@ -87,9 +89,9 @@ mod tests {
     fn parses_modern_panic_and_backtrace() {
         let trace = Language::Rust.parse_stack("thread 'main' panicked at src/main.rs:12:5:\nindex out of bounds\nstack backtrace:\n   0: 0xabc - demo::run\n             at ./src/main.rs:12:5\n   1: std::rt::lang_start").unwrap();
         let root = &trace.segments()[0];
-        assert_eq!(root.error_kind.as_deref(), Some("panic"));
-        assert_eq!(root.frames[0].function.as_deref(), Some("demo::run"));
-        assert_eq!(root.frames[0].file.as_deref(), Some("./src/main.rs"));
+        assert_eq!(root.error_kind, Some("panic"));
+        assert_eq!(root.frames[0].function, Some("demo::run"));
+        assert_eq!(root.frames[0].file, Some("./src/main.rs"));
     }
 
     #[test]
@@ -98,7 +100,7 @@ mod tests {
             "thread 'worker' panicked at 'boom', lib.rs:3:9\nstack backtrace:\n  0: crate::work",
         )
         .unwrap();
-        assert_eq!(trace.segments()[0].error_kind.as_deref(), Some("panic"));
+        assert_eq!(trace.segments()[0].error_kind, Some("panic"));
     }
 
     #[test]
@@ -116,7 +118,7 @@ mod tests {
         .unwrap();
         assert_eq!(trace.segments()[0].frames.len(), 1);
         assert_eq!(
-            trace.segments()[0].frames[0].function.as_deref(),
+            trace.segments()[0].frames[0].function,
             Some("my_app::client::send")
         );
     }

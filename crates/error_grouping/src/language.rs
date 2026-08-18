@@ -1,15 +1,13 @@
 use std::{error::Error, fmt, str::FromStr};
 
-use crate::{ParseError, ParserOptions, StackTrace};
+use crate::ParseError;
+use crate::ast::{ParserLimits, StackTrace};
 
 /// Runtime language of a stack trace.
-#[derive(
-    Clone, Copy, Debug, Default, Eq, Hash, PartialEq, serde::Deserialize, serde::Serialize,
-)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
 pub enum Language {
-    #[default]
     Java,
     Rust,
     #[serde(alias = "js")]
@@ -36,18 +34,16 @@ impl Language {
         }
     }
 
-    /// Parse a stack trace produced by this language.
-    pub fn parse_stack(self, input: &str) -> Result<StackTrace, ParseError> {
-        self.parse_stack_with_options(input, &ParserOptions::default())
+    pub(crate) fn parse_stack<'a>(self, input: &'a str) -> Result<StackTrace<'a>, ParseError> {
+        self.parse_stack_with_limits(input, &ParserLimits::default())
     }
 
-    /// Parse a stack trace with explicit resource limits.
-    pub fn parse_stack_with_options(
+    pub(crate) fn parse_stack_with_limits<'a>(
         self,
-        input: &str,
-        options: &ParserOptions,
-    ) -> Result<StackTrace, ParseError> {
-        crate::parser::parse(self, input, options)
+        input: &'a str,
+        limits: &ParserLimits,
+    ) -> Result<StackTrace<'a>, ParseError> {
+        crate::parser::parse(self, input, limits)
     }
 }
 

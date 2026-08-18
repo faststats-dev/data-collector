@@ -1,46 +1,34 @@
-//! Language-neutral stack trace representation.
-//!
-//! The AST retains only stable inputs used for error grouping. Runtime-specific
-//! diagnostics and volatile values belong in the original stack trace.
-
-use crate::Language;
 use std::{error::Error, fmt};
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct StackTrace {
-    /// Root error followed by causes/suppressed errors in display order.
-    segments: Vec<TraceSegment>,
-    language: Language,
+use crate::Language;
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct StackTrace<'a> {
+    pub(crate) segments: Vec<TraceSegment<'a>>,
+    pub(crate) language: Language,
 }
 
-impl StackTrace {
-    pub(crate) const fn new(language: Language, segments: Vec<TraceSegment>) -> Self {
+impl<'a> StackTrace<'a> {
+    pub(crate) const fn new(language: Language, segments: Vec<TraceSegment<'a>>) -> Self {
         Self { segments, language }
     }
 
-    /// Runtime that produced this stack trace.
-    pub const fn language(&self) -> Language {
-        self.language
-    }
-
-    pub fn segments(&self) -> &[TraceSegment] {
+    #[cfg(test)]
+    pub(crate) fn segments(&self) -> &[TraceSegment<'a>] {
         &self.segments
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct TraceSegment {
-    /// Index of the segment this related error belongs to. Roots have no parent.
-    pub parent: Option<usize>,
-    pub relation: SegmentRelation,
-    /// Runtime error class or category (`java.lang.Exception`, `TypeError`, `panic`).
-    pub error_kind: Option<String>,
-    pub frames: Vec<StackFrame>,
+#[derive(Debug, Default, Eq, PartialEq)]
+pub(crate) struct TraceSegment<'a> {
+    pub(crate) relation: SegmentRelation,
+    pub(crate) error_kind: Option<&'a str>,
+    /// Frames are ordered from the crash site toward the oldest caller.
+    pub(crate) frames: Vec<StackFrame<'a>>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
-#[non_exhaustive]
-pub enum SegmentRelation {
+pub(crate) enum SegmentRelation {
     #[default]
     Root,
     Cause,
@@ -49,22 +37,21 @@ pub enum SegmentRelation {
     Suppressed,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct StackFrame {
-    /// Fully-qualified callable as printed by the runtime.
-    pub function: Option<String>,
-    pub module: Option<String>,
-    pub file: Option<String>,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct StackFrame<'a> {
+    pub(crate) function: Option<&'a str>,
+    pub(crate) module: Option<&'a str>,
+    pub(crate) file: Option<&'a str>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ParserOptions {
-    pub max_input_bytes: usize,
-    pub max_lines: usize,
-    pub max_line_bytes: usize,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ParserLimits {
+    pub(crate) max_input_bytes: usize,
+    pub(crate) max_lines: usize,
+    pub(crate) max_line_bytes: usize,
 }
 
-impl Default for ParserOptions {
+impl Default for ParserLimits {
     fn default() -> Self {
         Self {
             max_input_bytes: 1024 * 1024,
@@ -91,6 +78,19 @@ pub enum ParseError {
         limit: usize,
     },
     Unrecognized,
+}
+
+impl ParseError {
+    /// Stable low-cardinality label suitable for metrics.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Empty => "empty",
+            Self::InputTooLarge { .. } => "input_too_large",
+            Self::TooManyLines { .. } => "too_many_lines",
+            Self::LineTooLong { .. } => "line_too_long",
+            Self::Unrecognized => "unrecognized",
+        }
+    }
 }
 
 impl fmt::Display for ParseError {

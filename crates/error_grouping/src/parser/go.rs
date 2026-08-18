@@ -1,14 +1,16 @@
+use crate::ast::{StackFrame, StackTrace, TraceSegment};
 use crate::parser::{payload, some, source_file, trim_line};
-use crate::{Language, ParseError, StackFrame, StackTrace, TraceSegment};
+use crate::{Language, ParseError};
 
 pub(super) fn parse_lines<'a>(
-    lines: impl Iterator<Item = &'a str>,
-) -> Result<StackTrace, ParseError> {
+    lines: impl Iterator<Item = Result<&'a str, ParseError>>,
+) -> Result<StackTrace<'a>, ParseError> {
     let mut segment = TraceSegment::default();
     let mut saw_goroutine = false;
     let mut skip_goroutine = false;
 
     for original in lines {
+        let original = original?;
         let (line, indent) = trim_line(original);
         if line.is_empty() {
             continue;
@@ -17,9 +19,9 @@ pub(super) fn parse_lines<'a>(
             continue;
         }
         if payload(line, "panic: ").is_some() {
-            segment.error_kind = Some("panic".to_owned());
+            segment.error_kind = Some("panic");
         } else if payload(line, "fatal error: ").is_some() {
-            segment.error_kind = Some("fatal error".to_owned());
+            segment.error_kind = Some("fatal error");
         } else if is_goroutine(line) {
             if saw_goroutine {
                 skip_goroutine = true;
@@ -64,7 +66,7 @@ fn is_function_line(line: &str) -> bool {
             .is_some_and(|(function, _)| !function.contains(char::is_whitespace))
 }
 
-fn go_frame(line: &str) -> StackFrame {
+fn go_frame(line: &str) -> StackFrame<'_> {
     // Receiver types may contain parentheses, as in `pkg.(*Server).Serve()`.
     let function = line.rsplit_once('(').map_or(line, |(function, _)| function);
     StackFrame {
@@ -74,7 +76,7 @@ fn go_frame(line: &str) -> StackFrame {
     }
 }
 
-fn parse_file(line: &str) -> Option<String> {
+fn parse_file(line: &str) -> Option<&str> {
     let location = line.split_once(" +").map_or(line, |(location, _)| location);
     location.rsplit_once(':')?.1.parse::<u32>().ok()?;
     Some(source_file(location))
@@ -87,15 +89,9 @@ mod tests {
     #[test]
     fn parses_panic_goroutine_and_created_by_frames() {
         let trace = Language::Go.parse_stack("panic: send on closed channel\n\ngoroutine 18 [running]:\nmain.worker(0x1)\n\t/work/main.go:14 +0x4f\ncreated by main.main in goroutine 1\n\t/work/main.go:8 +0x20").unwrap();
-        assert_eq!(trace.segments()[0].error_kind.as_deref(), Some("panic"));
-        assert_eq!(
-            trace.segments()[0].frames[0].file.as_deref(),
-            Some("/work/main.go")
-        );
-        assert_eq!(
-            trace.segments()[0].frames[1].function.as_deref(),
-            Some("main.main")
-        );
+        assert_eq!(trace.segments()[0].error_kind, Some("panic"));
+        assert_eq!(trace.segments()[0].frames[0].file, Some("/work/main.go"));
+        assert_eq!(trace.segments()[0].frames[1].function, Some("main.main"));
     }
 
     #[test]
@@ -107,14 +103,8 @@ mod tests {
     #[test]
     fn parses_runtime_fatal_errors() {
         let trace = Language::Go.parse_stack("fatal error: concurrent map writes\n\ngoroutine 7 [running]:\nmain.write()\n\t/app.go:4 +0x2").unwrap();
-        assert_eq!(
-            trace.segments()[0].error_kind.as_deref(),
-            Some("fatal error")
-        );
-        assert_eq!(
-            trace.segments()[0].frames[0].function.as_deref(),
-            Some("main.write")
-        );
+        assert_eq!(trace.segments()[0].error_kind, Some("fatal error"));
+        assert_eq!(trace.segments()[0].frames[0].function, Some("main.write"));
     }
 
     #[test]
@@ -123,7 +113,7 @@ mod tests {
             .parse_stack("goroutine 1 [running]:\nexample/pkg.(*Server).Serve()\n\t/app.go:9 +0x2")
             .unwrap();
         assert_eq!(
-            trace.segments()[0].frames[0].function.as_deref(),
+            trace.segments()[0].frames[0].function,
             Some("example/pkg.(*Server).Serve")
         );
     }
@@ -133,13 +123,7 @@ mod tests {
         let trace = Language::Go
             .parse_stack("panic: bad\n\ngoroutine 1 [running]:\nmain.f(0x1, 0x2)\n\t/app.go:3 +0x1")
             .unwrap();
-        assert_eq!(
-            trace.segments()[0].frames[0].function.as_deref(),
-            Some("main.f")
-        );
-        assert_eq!(
-            trace.segments()[0].frames[0].file.as_deref().unwrap(),
-            "/app.go"
-        );
+        assert_eq!(trace.segments()[0].frames[0].function, Some("main.f"));
+        assert_eq!(trace.segments()[0].frames[0].file.unwrap(), "/app.go");
     }
 }

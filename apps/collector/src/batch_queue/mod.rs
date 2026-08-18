@@ -80,7 +80,6 @@ pub enum QueuedEvent {
     },
     ErrorOccurrenceV3 {
         row: Box<ErrorOccurrenceV3Row>,
-        #[serde(default)]
         language: ErrorLanguage,
         #[serde(skip_serializing_if = "Option::is_none")]
         tracking: Option<TrackingContext>,

@@ -1,13 +1,15 @@
+use crate::ast::{StackFrame, StackTrace, TraceSegment};
 use crate::parser::{payload, some, source_file};
-use crate::{Language, ParseError, StackFrame, StackTrace, TraceSegment};
+use crate::{Language, ParseError};
 
 pub(super) fn parse_lines<'a>(
-    lines: impl Iterator<Item = &'a str>,
-) -> Result<StackTrace, ParseError> {
+    lines: impl Iterator<Item = Result<&'a str, ParseError>>,
+) -> Result<StackTrace<'a>, ParseError> {
     let mut segment = TraceSegment::default();
     let mut saw_content = false;
 
     for original in lines {
+        let original = original?;
         let line = original.trim();
         if line.is_empty() {
             continue;
@@ -33,7 +35,7 @@ fn error_header_kind(line: &str) -> Option<&str> {
     class.ends_with("Error").then_some(kind)
 }
 
-fn parse_spidermonkey_frame(line: &str) -> Option<StackFrame> {
+fn parse_spidermonkey_frame(line: &str) -> Option<StackFrame<'_>> {
     // The first `@` separates the callable. Later ones may legally occur in a
     // URL path or authority and must remain part of the location.
     let (function, location) = line.split_once('@')?;
@@ -47,7 +49,7 @@ fn parse_spidermonkey_frame(line: &str) -> Option<StackFrame> {
     })
 }
 
-fn parse_frame(body: &str) -> StackFrame {
+fn parse_frame(body: &str) -> StackFrame<'_> {
     let body = body.strip_prefix("async ").unwrap_or(body);
     let body = body.strip_prefix("new ").unwrap_or(body);
     let (function, location_text) = if body.ends_with(')') {
@@ -79,19 +81,10 @@ mod tests {
     #[test]
     fn parses_v8_node_and_async_frames() {
         let trace = Language::JavaScript.parse_stack("TypeError: nope\n    at async run (/srv/app.js:10:7)\n    at new Worker (node:internal/workers:22:3)\n    at nativeCall (native)").unwrap();
-        assert_eq!(trace.segments()[0].error_kind.as_deref(), Some("TypeError"));
-        assert_eq!(
-            trace.segments()[0].frames[0].function.as_deref(),
-            Some("run")
-        );
-        assert_eq!(
-            trace.segments()[0].frames[0].file.as_deref(),
-            Some("/srv/app.js")
-        );
-        assert_eq!(
-            trace.segments()[0].frames[1].function.as_deref(),
-            Some("Worker")
-        );
+        assert_eq!(trace.segments()[0].error_kind, Some("TypeError"));
+        assert_eq!(trace.segments()[0].frames[0].function, Some("run"));
+        assert_eq!(trace.segments()[0].frames[0].file, Some("/srv/app.js"));
+        assert_eq!(trace.segments()[0].frames[1].function, Some("Worker"));
         assert_eq!(trace.segments()[0].frames[2].file, None);
     }
 
@@ -102,12 +95,9 @@ mod tests {
                 "Error: nope\nrun@https://user@example.test/app@2.js:4:9\n@webpack:///boot.js:2:1",
             )
             .unwrap();
+        assert_eq!(trace.segments()[0].frames[0].function, Some("run"));
         assert_eq!(
-            trace.segments()[0].frames[0].function.as_deref(),
-            Some("run")
-        );
-        assert_eq!(
-            trace.segments()[0].frames[0].file.as_deref().unwrap(),
+            trace.segments()[0].frames[0].file.unwrap(),
             "https://user@example.test/app@2.js"
         );
         assert_eq!(trace.segments()[0].frames[1].function, None);
@@ -118,14 +108,8 @@ mod tests {
         let trace = Language::JavaScript
             .parse_stack("\r\n  \r\nRangeError: bad\r\n at run (C:\\app.js:3:4)\r\n")
             .unwrap();
-        assert_eq!(
-            trace.segments()[0].error_kind.as_deref(),
-            Some("RangeError")
-        );
-        assert_eq!(
-            trace.segments()[0].frames[0].file.as_deref(),
-            Some(r"C:\app.js")
-        );
+        assert_eq!(trace.segments()[0].error_kind, Some("RangeError"));
+        assert_eq!(trace.segments()[0].frames[0].file, Some(r"C:\app.js"));
     }
 
     #[test]
@@ -142,7 +126,7 @@ mod tests {
         let trace = Language::JavaScript
             .parse_stack("TypeError:\n at run (app.js:1:2)")
             .unwrap();
-        assert_eq!(trace.segments()[0].error_kind.as_deref(), Some("TypeError"));
+        assert_eq!(trace.segments()[0].error_kind, Some("TypeError"));
     }
 
     #[test]
@@ -152,7 +136,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            trace.segments()[0].error_kind.as_deref(),
+            trace.segments()[0].error_kind,
             Some("TypeError [ERR_INVALID_ARG_TYPE]")
         );
     }

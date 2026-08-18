@@ -1,15 +1,17 @@
+use crate::ast::{SegmentRelation, StackFrame, StackTrace, TraceSegment};
 use crate::parser::{error_kind, looks_like_exception, some, trim_line};
-use crate::{Language, ParseError, SegmentRelation, StackFrame, StackTrace, TraceSegment};
+use crate::{Language, ParseError};
 
 pub(super) fn parse_lines<'a>(
-    lines: impl Iterator<Item = &'a str>,
-) -> Result<StackTrace, ParseError> {
+    lines: impl Iterator<Item = Result<&'a str, ParseError>>,
+) -> Result<StackTrace<'a>, ParseError> {
     let mut segments = Vec::new();
     let mut current = None;
     let mut expect_context = false;
     let mut saw_traceback = false;
 
     for original in lines {
+        let original = original?;
         let (line, indent) = trim_line(original);
         if line.is_empty() {
             continue;
@@ -47,17 +49,18 @@ pub(super) fn parse_lines<'a>(
     // Python prints the oldest cause first. The common AST keeps the root first.
     segments.reverse();
     for (index, segment) in segments.iter_mut().enumerate() {
+        segment.frames.reverse();
         if index == 0 {
             segment.relation = SegmentRelation::Root;
-            segment.parent = None;
-        } else if segment.relation != SegmentRelation::Root {
-            segment.parent = Some(index - 1);
         }
     }
     Ok(StackTrace::new(Language::Python, segments))
 }
 
-fn finish_segment(segments: &mut Vec<TraceSegment>, current: &mut Option<TraceSegment>) {
+fn finish_segment<'a>(
+    segments: &mut Vec<TraceSegment<'a>>,
+    current: &mut Option<TraceSegment<'a>>,
+) {
     if let Some(segment) = current.take()
         && (!segment.frames.is_empty() || segment.error_kind.is_some())
     {
@@ -81,7 +84,7 @@ fn chain_relation(line: &str) -> Option<SegmentRelation> {
     }
 }
 
-fn parse_frame(line: &str) -> Option<StackFrame> {
+fn parse_frame(line: &str) -> Option<StackFrame<'_>> {
     let rest = line.strip_prefix("File \"")?;
     let (file, rest) = rest.split_once("\", line ")?;
     let (line, function) = rest
@@ -91,7 +94,7 @@ fn parse_frame(line: &str) -> Option<StackFrame> {
     Some(StackFrame {
         function,
         module: None,
-        file: Some(file.to_owned()),
+        file: Some(file),
     })
 }
 
@@ -106,15 +109,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(trace.segments().len(), 2);
-        assert_eq!(
-            trace.segments()[0].error_kind.as_deref(),
-            Some("RuntimeError")
-        );
+        assert_eq!(trace.segments()[0].error_kind, Some("RuntimeError"));
         assert_eq!(trace.segments()[1].relation, SegmentRelation::Cause);
-        assert_eq!(
-            trace.segments()[1].frames[0].function.as_deref(),
-            Some("load")
-        );
+        assert_eq!(trace.segments()[1].frames[0].function, Some("load"));
     }
 
     #[test]
@@ -124,9 +121,17 @@ mod tests {
         )
         .unwrap();
         assert_eq!(trace.segments()[1].relation, SegmentRelation::Context);
-        assert_eq!(
-            trace.segments()[1].error_kind.as_deref(),
-            Some("ValueError")
-        );
+        assert_eq!(trace.segments()[1].error_kind, Some("ValueError"));
+    }
+
+    #[test]
+    fn normalizes_frames_to_crash_nearest_first() {
+        let trace = Language::Python
+            .parse_stack(
+                "Traceback (most recent call last):\n  File \"oldest.py\", line 1, in oldest\n  File \"crash.py\", line 2, in crash\nValueError: bad",
+            )
+            .unwrap();
+
+        assert_eq!(trace.segments()[0].frames[0].function, Some("crash"));
     }
 }

@@ -1,4 +1,4 @@
-use error_grouping::{Language, ParseError, ParserOptions, SegmentRelation, StackTrace};
+use error_grouping::{GroupingEvidence, GroupingInput, Language, ParseError, group};
 
 const LANGUAGES: [Language; 7] = [
     Language::Java,
@@ -23,7 +23,7 @@ const SEEDS: [&str; 9] = [
 ];
 
 #[test]
-fn generated_inputs_never_panic_and_successes_preserve_ast_invariants() {
+fn generated_inputs_never_panic_and_always_produce_versioned_ids() {
     let mut state = 0x9e37_79b9_7f4a_7c15_u64;
     for case in 0..2_000 {
         let mut bytes = SEEDS[case % SEEDS.len()].as_bytes().to_vec();
@@ -39,45 +39,30 @@ fn generated_inputs_never_panic_and_successes_preserve_ast_invariants() {
         }
         let input = String::from_utf8_lossy(&bytes);
         for language in LANGUAGES {
-            if let Ok(trace) = language.parse_stack(&input) {
-                assert_trace_invariants(&trace);
-            }
+            let result = group(GroupingInput {
+                language,
+                error_kind: "Error",
+                stack: &input,
+            });
+            assert!(result.fingerprint.to_string().starts_with("eg1_"));
         }
     }
 }
 
 #[test]
-fn configured_limits_fail_at_the_first_observed_violation() {
-    let options = ParserOptions {
-        max_input_bytes: 1_024,
-        max_lines: 2,
-        max_line_bytes: 4,
-    };
+fn oversized_inputs_use_observable_raw_stack_fallback() {
+    let stack = "a".repeat(1024 * 1024 + 1);
+    let result = group(GroupingInput {
+        language: Language::Java,
+        error_kind: "Error",
+        stack: &stack,
+    });
 
-    assert_eq!(
-        Language::Java.parse_stack_with_options("a\nb\nc\nd", &options),
-        Err(ParseError::TooManyLines { limit: 2 })
-    );
-    assert_eq!(
-        Language::Java.parse_stack_with_options("abcde", &options),
-        Err(ParseError::LineTooLong {
-            line: 1,
-            actual: 5,
-            limit: 4,
-        })
-    );
-}
-
-fn assert_trace_invariants(trace: &StackTrace) {
-    assert!(!trace.segments().is_empty());
-    assert_eq!(trace.segments()[0].relation, SegmentRelation::Root);
-    for (index, segment) in trace.segments().iter().enumerate() {
-        if segment.relation == SegmentRelation::Root {
-            assert_eq!(segment.parent, None);
-        } else {
-            assert!(segment.parent.is_some_and(|parent| parent < index));
-        }
-    }
+    assert_eq!(result.evidence, GroupingEvidence::RawStack);
+    assert!(matches!(
+        result.parse_error,
+        Some(ParseError::InputTooLarge { .. })
+    ));
 }
 
 fn random_index(state: &mut u64, upper_bound: usize) -> usize {

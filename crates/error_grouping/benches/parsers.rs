@@ -1,6 +1,6 @@
 use std::{hint::black_box, time::Instant};
 
-use error_grouping::{Language, fingerprint};
+use error_grouping::{GroupingInput, Language, group};
 
 const JAVA: &str = "java.lang.RuntimeException: boom\n    at app.Main.run(Main.java:42)\nCaused by: java.lang.IllegalStateException: bad\n    at app.Work.go(Work.java:7)\n    ... 2 more";
 const JAVA_NESTED: &str = "java.lang.Error: root\n    at loader/java.base@17/java.lang.Thread.run(Thread.java:1)\n    Suppressed: java.lang.IllegalStateException: suppressed\n        at app.Work.close(Work.java:8)\n        Caused by: java.io.IOException: nested\n            at app.IO.fail(IO.java:9)\nCaused by: java.lang.RuntimeException: cause\n    at app.Main.run(Main.java:42)";
@@ -17,37 +17,55 @@ fn main() {
     }
 
     println!("benchmark                         ns/trace       MiB/s");
-    bench("java", JAVA, || Language::Java.parse_stack(black_box(JAVA)));
-    bench("java/nested", JAVA_NESTED, || {
-        Language::Java.parse_stack(black_box(JAVA_NESTED))
-    });
-    bench("javascript", JAVASCRIPT, || {
-        Language::JavaScript.parse_stack(black_box(JAVASCRIPT))
-    });
-    let fingerprint_trace = Language::Java.parse_stack(JAVA_NESTED).unwrap();
-    bench("fingerprint/java-nested", JAVA_NESTED, || {
-        fingerprint(black_box(&fingerprint_trace))
+    bench("group/java", JAVA, || {
+        group(GroupingInput {
+            language: Language::Java,
+            error_kind: "java.lang.RuntimeException",
+            stack: black_box(JAVA),
+        })
     });
     bench("group/java-nested", JAVA_NESTED, || {
-        let trace = Language::Java.parse_stack(black_box(JAVA_NESTED)).unwrap();
-        fingerprint(black_box(&trace))
+        group(GroupingInput {
+            language: Language::Java,
+            error_kind: "java.lang.Error",
+            stack: black_box(JAVA_NESTED),
+        })
+    });
+    bench("group/javascript", JAVASCRIPT, || {
+        group(GroupingInput {
+            language: Language::JavaScript,
+            error_kind: "TypeError",
+            stack: black_box(JAVASCRIPT),
+        })
     });
     bench_mixed();
 
     let large_java = large_java_trace(512);
-    bench("java/512-frames", &large_java, || {
-        Language::Java.parse_stack(black_box(&large_java))
+    bench("group/java-512-frames", &large_java, || {
+        group(GroupingInput {
+            language: Language::Java,
+            error_kind: "java.lang.RuntimeException",
+            stack: black_box(&large_java),
+        })
     });
 
     let noisy_java = noisy_java_trace(128);
-    bench("java/noise-discarded", &noisy_java, || {
-        Language::Java.parse_stack(black_box(&noisy_java))
+    bench("group/java-noise-discarded", &noisy_java, || {
+        group(GroupingInput {
+            language: Language::Java,
+            error_kind: "java.lang.RuntimeException",
+            stack: black_box(&noisy_java),
+        })
     });
 
     let line = "not a stack frame\n";
     let malformed = line.repeat((64 * 1024) / line.len());
-    bench("java/malformed-64-kib", &malformed, || {
-        Language::Java.parse_stack(black_box(&malformed))
+    bench("group/java-malformed-64-kib", &malformed, || {
+        group(GroupingInput {
+            language: Language::Java,
+            error_kind: "Error",
+            stack: black_box(&malformed),
+        })
     });
 }
 
@@ -79,14 +97,22 @@ fn bench_mixed() {
     const ITERATIONS: usize = 500_000;
     for index in 0..ITERATIONS / 20 {
         let (language, input) = CASES[index % CASES.len()];
-        let _ = black_box(language.parse_stack(black_box(input)));
+        let _ = black_box(group(GroupingInput {
+            language,
+            error_kind: "Error",
+            stack: black_box(input),
+        }));
     }
     let start = Instant::now();
     let mut bytes = 0;
     for index in 0..ITERATIONS {
         let (language, input) = CASES[index % CASES.len()];
         bytes += input.len();
-        let _ = black_box(language.parse_stack(black_box(input)));
+        let _ = black_box(group(GroupingInput {
+            language,
+            error_kind: "Error",
+            stack: black_box(input),
+        }));
     }
     report("all/mixed", bytes, ITERATIONS, start.elapsed());
 }

@@ -6,25 +6,25 @@ pub(crate) fn parse_optional(
     value
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(str::parse)
-        .transpose()
-        .map(|language| language.unwrap_or_default())
+        .ok_or(error_grouping::UnsupportedLanguage)?
+        .parse()
 }
 
 pub(crate) fn group_hash(language: ErrorLanguage, error_type: &str, stacktrace: &str) -> String {
-    match language.parse_stack(stacktrace) {
-        Ok(trace) => error_grouping::fingerprint_with_kind(&trace, Some(error_type)).to_string(),
-        Err(error) => {
-            if !matches!(error, error_grouping::ParseError::Empty) {
-                metrics::counter!(
-                    "error_grouping_parse_failures_total",
-                    "language" => language.as_str()
-                )
-                .increment(1);
-            }
-            error_grouping::fingerprint_error(language, error_type).to_string()
-        }
+    let result = error_grouping::group(error_grouping::GroupingInput {
+        language,
+        error_kind: error_type,
+        stack: stacktrace,
+    });
+    if let Some(error) = &result.parse_error {
+        metrics::counter!(
+            "error_grouping_parse_failures_total",
+            "language" => language.as_str(),
+            "reason" => error.as_str()
+        )
+        .increment(1);
     }
+    result.fingerprint.to_string()
 }
 
 #[cfg(test)]
@@ -32,9 +32,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn missing_language_defaults_to_java() {
-        assert_eq!(parse_optional(None), Ok(ErrorLanguage::Java));
-        assert_eq!(parse_optional(Some("")), Ok(ErrorLanguage::Java));
+    fn missing_language_is_rejected() {
+        assert!(parse_optional(None).is_err());
+        assert!(parse_optional(Some("")).is_err());
     }
 
     #[test]
@@ -81,7 +81,7 @@ mod tests {
     }
 
     #[test]
-    fn unparsed_stacks_use_only_the_authoritative_type() {
+    fn unparsed_stacks_use_raw_stack_evidence() {
         let first = group_hash(ErrorLanguage::Java, "FirstError", "not a stack");
         let second = group_hash(ErrorLanguage::Java, "SecondError", "not a stack");
         let noisy = group_hash(
@@ -91,6 +91,6 @@ mod tests {
         );
 
         assert_ne!(first, second);
-        assert_eq!(first, noisy);
+        assert_ne!(first, noisy);
     }
 }

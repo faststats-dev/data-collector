@@ -27,7 +27,7 @@ fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Result<StackTrace, P
     Ok(StackTrace::new(Language::JavaScript, vec![segment]))
 }
 
-pub(crate) fn error_header_kind(line: &str) -> Option<&str> {
+fn error_header_kind(line: &str) -> Option<&str> {
     let kind = line.split_once(':').map_or(line, |(kind, _)| kind).trim();
     let class = kind.split_ascii_whitespace().next()?;
     class.ends_with("Error").then_some(kind)

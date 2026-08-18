@@ -1,6 +1,6 @@
 use std::{hint::black_box, time::Instant};
 
-use error_grouping::{fingerprint, parse, parser};
+use error_grouping::{Language, fingerprint, parse_language};
 
 const JAVA: &str = "java.lang.RuntimeException: boom\n    at app.Main.run(Main.java:42)\nCaused by: java.lang.IllegalStateException: bad\n    at app.Work.go(Work.java:7)\n    ... 2 more";
 const JAVA_NESTED: &str = "java.lang.Error: root\n    at loader/java.base@17/java.lang.Thread.run(Thread.java:1)\n    Suppressed: java.lang.IllegalStateException: suppressed\n        at app.Work.close(Work.java:8)\n        Caused by: java.io.IOException: nested\n            at app.IO.fail(IO.java:9)\nCaused by: java.lang.RuntimeException: cause\n    at app.Main.run(Main.java:42)";
@@ -17,38 +17,39 @@ fn main() {
     }
 
     println!("benchmark                         ns/trace       MiB/s");
-    bench("java/direct", JAVA, || parser::java::parse(black_box(JAVA)));
-    bench("java/detect", JAVA, || parse(black_box(JAVA)));
-    bench("java/nested-direct", JAVA_NESTED, || {
-        parser::java::parse(black_box(JAVA_NESTED))
+    bench("java", JAVA, || {
+        parse_language(Language::Java, black_box(JAVA))
     });
-    bench("javascript/direct", JAVASCRIPT, || {
-        parser::javascript::parse(black_box(JAVASCRIPT))
+    bench("java/nested", JAVA_NESTED, || {
+        parse_language(Language::Java, black_box(JAVA_NESTED))
     });
-    let fingerprint_trace = parser::java::parse(JAVA_NESTED).unwrap();
+    bench("javascript", JAVASCRIPT, || {
+        parse_language(Language::JavaScript, black_box(JAVASCRIPT))
+    });
+    let fingerprint_trace = parse_language(Language::Java, JAVA_NESTED).unwrap();
     bench("fingerprint/java-nested", JAVA_NESTED, || {
         fingerprint(black_box(&fingerprint_trace))
     });
     bench("group/java-nested", JAVA_NESTED, || {
-        let trace = parser::java::parse(black_box(JAVA_NESTED)).unwrap();
+        let trace = parse_language(Language::Java, black_box(JAVA_NESTED)).unwrap();
         fingerprint(black_box(&trace))
     });
     bench_mixed();
 
     let large_java = large_java_trace(512);
     bench("java/512-frames", &large_java, || {
-        parser::java::parse(black_box(&large_java))
+        parse_language(Language::Java, black_box(&large_java))
     });
 
     let noisy_java = noisy_java_trace(128);
     bench("java/noise-discarded", &noisy_java, || {
-        parser::java::parse(black_box(&noisy_java))
+        parse_language(Language::Java, black_box(&noisy_java))
     });
 
     let line = "not a stack frame\n";
     let malformed = line.repeat((64 * 1024) / line.len());
-    bench("unknown/64-kib", &malformed, || {
-        parse(black_box(&malformed))
+    bench("java/malformed-64-kib", &malformed, || {
+        parse_language(Language::Java, black_box(&malformed))
     });
 }
 
@@ -68,19 +69,28 @@ where
 }
 
 fn bench_mixed() {
-    const CASES: [&str; 7] = [JAVA, RUST, JAVASCRIPT, PYTHON, PHP, GO, SWIFT];
+    const CASES: [(Language, &str); 7] = [
+        (Language::Java, JAVA),
+        (Language::Rust, RUST),
+        (Language::JavaScript, JAVASCRIPT),
+        (Language::Python, PYTHON),
+        (Language::Php, PHP),
+        (Language::Go, GO),
+        (Language::Swift, SWIFT),
+    ];
     const ITERATIONS: usize = 500_000;
     for index in 0..ITERATIONS / 20 {
-        let _ = black_box(parse(black_box(CASES[index % CASES.len()])));
+        let (language, input) = CASES[index % CASES.len()];
+        let _ = black_box(parse_language(language, black_box(input)));
     }
     let start = Instant::now();
     let mut bytes = 0;
     for index in 0..ITERATIONS {
-        let input = CASES[index % CASES.len()];
+        let (language, input) = CASES[index % CASES.len()];
         bytes += input.len();
-        let _ = black_box(parse(black_box(input)));
+        let _ = black_box(parse_language(language, black_box(input)));
     }
-    report("all/detect-mixed", bytes, ITERATIONS, start.elapsed());
+    report("all/mixed", bytes, ITERATIONS, start.elapsed());
 }
 
 fn report(name: &str, bytes: usize, iterations: usize, elapsed: std::time::Duration) {

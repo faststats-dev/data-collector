@@ -91,6 +91,10 @@ pub fn fingerprint_error(language: Language, error_kind: &str) -> Fingerprint {
     canonical.byte(language_tag(language));
     let error_kind = normalized_kind(language, Some(error_kind));
     canonical.optional_text(error_kind.as_deref());
+    canonical.byte(0x10);
+    canonical.byte(relation_tag(SegmentRelation::Root));
+    canonical.optional_text(None);
+    canonical.byte(0x2f);
     canonical.byte(0xff);
     Fingerprint(canonical.finish())
 }
@@ -148,6 +152,7 @@ pub fn fingerprint_with_kind_and_options(
         }
         canonical.byte(0x2f);
     }
+    write_java_topology(&mut canonical, trace, options.max_segments);
     canonical.byte(0xff);
 
     Fingerprint(canonical.finish())
@@ -325,6 +330,40 @@ fn selected_segment_indices(length: usize, limit: usize) -> impl Iterator<Item =
     (0..leading).chain(truncated.then_some(length - 1))
 }
 
+fn selected_segment_ordinal(index: usize, length: usize, limit: usize) -> Option<usize> {
+    let truncated = limit > 0 && length > limit;
+    let leading = if truncated {
+        limit - 1
+    } else {
+        length.min(limit)
+    };
+    if index < leading {
+        Some(index)
+    } else if truncated && index == length - 1 {
+        Some(leading)
+    } else {
+        None
+    }
+}
+
+fn write_java_topology(canonical: &mut Canonical, trace: &StackTrace, limit: usize) {
+    if trace.language() != Language::Java
+        || !selected_segment_indices(trace.segments().len(), limit)
+            .any(|index| index > 0 && trace.segments()[index].parent != Some(0))
+    {
+        return;
+    }
+
+    canonical.byte(0x30);
+    for index in selected_segment_indices(trace.segments().len(), limit) {
+        let parent = trace.segments()[index].parent;
+        let selected_ordinal = parent
+            .and_then(|parent| selected_segment_ordinal(parent, trace.segments().len(), limit));
+        canonical.parent(parent, selected_ordinal);
+    }
+    canonical.byte(0x3f);
+}
+
 fn normalized_kind(language: Language, kind: Option<&str>) -> Option<Cow<'_, str>> {
     kind.map(str::trim)
         .filter(|kind| !kind.is_empty())
@@ -490,6 +529,17 @@ impl Canonical {
         }
     }
 
+    fn parent(&mut self, parent: Option<usize>, selected_ordinal: Option<usize>) {
+        match (parent, selected_ordinal) {
+            (None, _) => self.byte(0),
+            (Some(_), None) => self.byte(1),
+            (Some(_), Some(ordinal)) => {
+                self.byte(2);
+                self.0.update((ordinal as u64).to_be_bytes());
+            }
+        }
+    }
+
     fn finish(self) -> [u8; 32] {
         self.0.finalize().into()
     }
@@ -503,15 +553,17 @@ fn sha256(input: &[u8]) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{parse, parser};
+    use crate::{parse_language, parser};
 
     #[test]
     fn ignores_common_deployment_and_runtime_noise() {
-        let first = parse(
+        let first = parse_language(
+            Language::JavaScript,
             "TypeError: user 123 failed\n at load (/release/a/app.js:10:2)\n at node:internal/main/run_main_module:28:49",
         )
         .unwrap();
-        let second = parse(
+        let second = parse_language(
+            Language::JavaScript,
             "TypeError: user 999 failed\n at load (C:\\release\\b\\app.js:800:40)\n at node:internal/main/run_main_module:99:1",
         )
         .unwrap();
@@ -527,9 +579,15 @@ mod tests {
 
     #[test]
     fn semantic_changes_produce_different_fingerprints() {
-        let type_error = parse("TypeError: x\n at load (/app.js:1:2)").unwrap();
-        let range_error = parse("RangeError: x\n at load (/app.js:1:2)").unwrap();
-        let other_frame = parse("TypeError: x\n at save (/app.js:1:2)").unwrap();
+        let type_error =
+            parse_language(Language::JavaScript, "TypeError: x\n at load (/app.js:1:2)").unwrap();
+        let range_error = parse_language(
+            Language::JavaScript,
+            "RangeError: x\n at load (/app.js:1:2)",
+        )
+        .unwrap();
+        let other_frame =
+            parse_language(Language::JavaScript, "TypeError: x\n at save (/app.js:1:2)").unwrap();
         assert_ne!(fingerprint(&type_error), fingerprint(&range_error));
         assert_ne!(fingerprint(&type_error), fingerprint(&other_frame));
     }
@@ -537,7 +595,8 @@ mod tests {
     #[test]
     fn authoritative_kind_works_with_frame_only_collector_payloads() {
         let frames = parser::javascript::parse("at load (/app.js:1:2)").unwrap();
-        let with_header = parse("TypeError: x\nat load (/app.js:9:8)").unwrap();
+        let with_header =
+            parse_language(Language::JavaScript, "TypeError: x\nat load (/app.js:9:8)").unwrap();
 
         assert_eq!(
             fingerprint_with_kind(&frames, Some("TypeError")),
@@ -547,6 +606,29 @@ mod tests {
             fingerprint_with_kind(&frames, Some("TypeError")),
             fingerprint_with_kind(&frames, Some("RangeError"))
         );
+    }
+
+    #[test]
+    fn fallback_matches_a_parsed_trace_without_frames() {
+        let trace = parser::java::parse("java.lang.RuntimeException: dynamic message").unwrap();
+
+        assert_eq!(
+            fingerprint_with_kind(&trace, Some("java.lang.RuntimeException")),
+            fingerprint_error(Language::Java, "java.lang.RuntimeException")
+        );
+    }
+
+    #[test]
+    fn java_exception_topology_affects_the_fingerprint() {
+        let nested = parser::java::parse(
+            "Root: x\n  Suppressed: S: x\n    Caused by: A: x\nCaused by: B: x",
+        )
+        .unwrap();
+        let linear =
+            parser::java::parse("Root: x\n  Suppressed: S: x\nCaused by: A: x\n  Caused by: B: x")
+                .unwrap();
+
+        assert_ne!(fingerprint(&nested), fingerprint(&linear));
     }
 
     #[test]
@@ -708,11 +790,16 @@ mod tests {
 
     #[test]
     fn rust_symbol_hashes_and_recursion_depth_are_noise() {
-        let first = parse(
+        let first = parse_language(
+            Language::Rust,
             "stack backtrace:\n 0: app::work::h0123456789abcdef\n 1: app::work::h0123456789abcdef",
         )
         .unwrap();
-        let second = parse("stack backtrace:\n 0: app::work::hfedcba9876543210").unwrap();
+        let second = parse_language(
+            Language::Rust,
+            "stack backtrace:\n 0: app::work::hfedcba9876543210",
+        )
+        .unwrap();
         assert_eq!(fingerprint(&first), fingerprint(&second));
     }
 
@@ -746,8 +833,13 @@ mod tests {
 
     #[test]
     fn zero_frame_limit_really_excludes_frames() {
-        let first = parse("TypeError: x\n at load (/app.js:1:2)").unwrap();
-        let second = parse("TypeError: x\n at save (/other.js:9:8)").unwrap();
+        let first =
+            parse_language(Language::JavaScript, "TypeError: x\n at load (/app.js:1:2)").unwrap();
+        let second = parse_language(
+            Language::JavaScript,
+            "TypeError: x\n at save (/other.js:9:8)",
+        )
+        .unwrap();
         let options = FingerprintOptions {
             max_frames_per_segment: 0,
             ..FingerprintOptions::default()

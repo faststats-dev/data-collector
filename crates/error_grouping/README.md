@@ -12,14 +12,17 @@
 - Rust: current and legacy panic backtraces.
 - Swift: Swift runtime crash reports, fatal errors, and symbolicated frames.
 
-Automatic language detection is intentionally conservative. When the runtime is already known, use `parse_language` or the parser in `parser::<language>` to skip detection.
+The collector supplies the authoritative runtime language, avoiding ambiguous language detection and an extra scan of every trace.
 
 ## Usage
 
 ```rust
-use error_grouping::{Language, fingerprint_with_kind, parse};
+use error_grouping::{Language, fingerprint_with_kind, parse_language};
 
-let trace = parse("TypeError: bad value\n    at load (/app/main.js:8:2)")?;
+let trace = parse_language(
+    Language::JavaScript,
+    "TypeError: bad value\n    at load (/app/main.js:8:2)",
+)?;
 assert_eq!(trace.language(), Language::JavaScript);
 
 let group = fingerprint_with_kind(&trace, Some("TypeError"));

@@ -41,6 +41,8 @@ impl StackTrace {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct TraceSegment {
+    /// Index of the segment this related error belongs to. Roots have no parent.
+    pub parent: Option<usize>,
     pub relation: SegmentRelation,
     /// Runtime error class or category (`java.lang.Exception`, `TypeError`, `panic`).
     pub error_kind: Option<String>,

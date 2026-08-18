@@ -163,6 +163,17 @@ mod tests {
     }
 
     #[test]
+    fn empty_and_header_only_payloads_group_together() {
+        let empty = ErrorLanguage::Java.fingerprint("java.lang.RuntimeException", "");
+        let header = ErrorLanguage::Java.fingerprint(
+            "java.lang.RuntimeException",
+            "java.lang.RuntimeException: dynamic message",
+        );
+
+        assert_eq!(empty, header);
+    }
+
+    #[test]
     fn supports_python_and_go_grouping() {
         let python = ErrorLanguage::Python.fingerprint(
             "ValueError",

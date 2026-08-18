@@ -9,6 +9,7 @@ fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Result<StackTrace, P
         ..TraceSegment::default()
     };
     let mut saw_panic_header = false;
+    let mut in_cause_list = false;
 
     for original in lines {
         let line = original.trim();
@@ -17,9 +18,14 @@ fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Result<StackTrace, P
         }
         if is_panic_header(line) {
             saw_panic_header = true;
-        } else if let Some(body) = indexed_frame(line) {
+        } else if line == "Caused by:" {
+            in_cause_list = true;
+        } else if line.eq_ignore_ascii_case("stack backtrace:") {
+            in_cause_list = false;
+        } else if !in_cause_list && let Some(body) = indexed_frame(line) {
             segment.frames.push(parse_frame(body));
-        } else if let Some(location) = payload(line, "at ")
+        } else if !in_cause_list
+            && let Some(location) = payload(line, "at ")
             && let Some(frame) = segment.frames.last_mut()
         {
             frame.file = Some(source_file(location));
@@ -102,14 +108,22 @@ mod tests {
     }
 
     #[test]
-    fn ignores_anyhow_numbered_messages_but_keeps_symbolic_frames() {
-        let trace =
-            parse("Caused by:\n  0: request 123 failed for user abc\n  1: my_app::client::send")
-                .unwrap();
+    fn ignores_anyhow_numbered_messages_but_keeps_backtrace_frames() {
+        let trace = parse(
+            "Caused by:\n  0: request 123 failed for user abc\n  1: app::Error for user 123\n\nStack backtrace:\n  0: my_app::client::send",
+        )
+        .unwrap();
         assert_eq!(trace.segments()[0].frames.len(), 1);
         assert_eq!(
             trace.segments()[0].frames[0].function.as_deref(),
             Some("my_app::client::send")
         );
+    }
+
+    #[test]
+    fn rejects_anyhow_cause_messages_without_a_backtrace() {
+        let result = parse("Caused by:\n  0: app::Error for user 123");
+
+        assert_eq!(result, Err(ParseError::Unrecognized));
     }
 }

@@ -46,6 +46,14 @@ fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Result<StackTrace, P
 
     // Python prints the oldest cause first. The common AST keeps the root first.
     segments.reverse();
+    for (index, segment) in segments.iter_mut().enumerate() {
+        if index == 0 {
+            segment.relation = SegmentRelation::Root;
+            segment.parent = None;
+        } else if segment.relation != SegmentRelation::Root {
+            segment.parent = Some(index - 1);
+        }
+    }
     Ok(StackTrace::new(Language::Python, segments))
 }
 

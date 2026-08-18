@@ -1,18 +1,16 @@
 use error_grouping::{
-    ParseError, ParserOptions, SegmentRelation, StackTrace, parse, parse_with_options, parser,
+    Language, ParseError, ParserOptions, SegmentRelation, StackTrace, parse_language,
+    parse_language_with_options,
 };
 
-type Parser = fn(&str) -> Result<StackTrace, ParseError>;
-
-const PARSERS: [Parser; 8] = [
-    parse,
-    parser::java::parse,
-    parser::rust::parse,
-    parser::javascript::parse,
-    parser::python::parse,
-    parser::php::parse,
-    parser::go::parse,
-    parser::swift::parse,
+const LANGUAGES: [Language; 7] = [
+    Language::Java,
+    Language::Rust,
+    Language::JavaScript,
+    Language::Python,
+    Language::Php,
+    Language::Go,
+    Language::Swift,
 ];
 
 const SEEDS: [&str; 9] = [
@@ -43,8 +41,8 @@ fn generated_inputs_never_panic_and_successes_preserve_ast_invariants() {
             }
         }
         let input = String::from_utf8_lossy(&bytes);
-        for parser in PARSERS {
-            if let Ok(trace) = parser(&input) {
+        for language in LANGUAGES {
+            if let Ok(trace) = parse_language(language, &input) {
                 assert_trace_invariants(&trace);
             }
         }
@@ -60,11 +58,11 @@ fn configured_limits_fail_at_the_first_observed_violation() {
     };
 
     assert_eq!(
-        parse_with_options("a\nb\nc\nd", &options),
+        parse_language_with_options(Language::Java, "a\nb\nc\nd", &options),
         Err(ParseError::TooManyLines { limit: 2 })
     );
     assert_eq!(
-        parse_with_options("abcde", &options),
+        parse_language_with_options(Language::Java, "abcde", &options),
         Err(ParseError::LineTooLong {
             line: 1,
             actual: 5,
@@ -76,6 +74,13 @@ fn configured_limits_fail_at_the_first_observed_violation() {
 fn assert_trace_invariants(trace: &StackTrace) {
     assert!(!trace.segments().is_empty());
     assert_eq!(trace.segments()[0].relation, SegmentRelation::Root);
+    for (index, segment) in trace.segments().iter().enumerate() {
+        if segment.relation == SegmentRelation::Root {
+            assert_eq!(segment.parent, None);
+        } else {
+            assert!(segment.parent.is_some_and(|parent| parent < index));
+        }
+    }
 }
 
 fn random_index(state: &mut u64, upper_bound: usize) -> usize {

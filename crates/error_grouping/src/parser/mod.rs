@@ -1,21 +1,22 @@
 //! Stack trace parsers. The public functions return owned ASTs, so results do
 //! not borrow potentially large or short-lived log buffers.
 
-pub mod go;
-pub mod java;
-pub mod javascript;
-pub mod php;
-pub mod python;
-pub mod rust;
-pub mod swift;
+pub(crate) mod go;
+pub(crate) mod java;
+pub(crate) mod javascript;
+pub(crate) mod php;
+pub(crate) mod python;
+pub(crate) mod rust;
+pub(crate) mod swift;
 
 macro_rules! parser_entrypoints {
     () => {
-        pub fn parse(input: &str) -> Result<$crate::StackTrace, $crate::ParseError> {
+        #[cfg(test)]
+        pub(crate) fn parse(input: &str) -> Result<$crate::StackTrace, $crate::ParseError> {
             parse_with_options(input, &$crate::ParserOptions::default())
         }
 
-        pub fn parse_with_options(
+        pub(crate) fn parse_with_options(
             input: &str,
             options: &$crate::ParserOptions,
         ) -> Result<$crate::StackTrace, $crate::ParseError> {
@@ -23,12 +24,6 @@ macro_rules! parser_entrypoints {
             let result = parse_lines(&mut lines);
             lines.finish()?;
             result
-        }
-
-        pub(crate) fn parse_validated(
-            input: &str,
-        ) -> Result<$crate::StackTrace, $crate::ParseError> {
-            parse_lines(input.lines())
         }
     };
 }
@@ -39,124 +34,6 @@ use crate::ast::{ParseError, ParserOptions};
 pub(crate) fn trim_line(line: &str) -> (&str, usize) {
     let trimmed_start = line.trim_start();
     (trimmed_start.trim_end(), line.len() - trimmed_start.len())
-}
-
-#[derive(Default)]
-pub(crate) struct DetectionHints<'a> {
-    header: &'a str,
-    java_frame: bool,
-    php_frame: bool,
-    rust_marker: bool,
-    javascript_frame: bool,
-    swift_marker: bool,
-    complete: bool,
-}
-
-impl DetectionHints<'_> {
-    pub(crate) fn looks_like_python(&self) -> bool {
-        self.header == "Traceback (most recent call last):"
-    }
-
-    pub(crate) fn looks_like_go(&self) -> bool {
-        self.header.starts_with("panic:")
-            || self.header.starts_with("fatal error:")
-            || self.header.starts_with("goroutine ")
-    }
-
-    pub(crate) fn looks_like_java(&self) -> bool {
-        if self.header.starts_with("Exception in thread ") || self.header.starts_with("Caused by:")
-        {
-            return true;
-        }
-        let kind = self
-            .header
-            .split_once(':')
-            .map_or(self.header, |(kind, _)| kind);
-        !kind.contains(char::is_whitespace) && self.java_frame
-    }
-
-    pub(crate) fn looks_like_php(&self) -> bool {
-        self.header.starts_with("PHP Fatal error:")
-            || self.header.starts_with("Fatal error:")
-            || self.header.starts_with("Uncaught ")
-            || self.php_frame
-    }
-
-    pub(crate) fn looks_like_rust(&self) -> bool {
-        (self.header.starts_with("thread '") && self.header.contains("panicked at"))
-            || self.rust_marker
-    }
-
-    pub(crate) fn looks_like_javascript(&self) -> bool {
-        javascript::error_header_kind(self.header).is_some() && self.javascript_frame
-    }
-
-    pub(crate) fn looks_like_swift(&self) -> bool {
-        self.header.starts_with("Swift runtime failure:") || self.swift_marker
-    }
-}
-
-pub(crate) fn validate_and_detect<'a>(
-    input: &'a str,
-    options: &ParserOptions,
-) -> Result<DetectionHints<'a>, ParseError> {
-    let mut lines = CheckedLines::new(input, options)?;
-    let mut hints = DetectionHints::default();
-    let mut is_header = true;
-
-    for line in lines.by_ref() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if !hints.complete {
-            hints.inspect(trimmed, is_header);
-        }
-        is_header = false;
-    }
-    lines.finish()?;
-    Ok(hints)
-}
-
-impl<'a> DetectionHints<'a> {
-    fn inspect(&mut self, trimmed: &'a str, is_header: bool) {
-        if is_header {
-            self.header = trimmed;
-            self.complete = self.looks_like_python()
-                || self.looks_like_go()
-                || self.header.starts_with("Exception in thread ")
-                || self.header.starts_with("Caused by:")
-                || self.header.starts_with("PHP Fatal error:")
-                || self.header.starts_with("Fatal error:")
-                || self.header.starts_with("Uncaught ")
-                || self.looks_like_swift()
-                || (self.header.starts_with("thread '") && self.header.contains("panicked at"));
-            if self.complete {
-                return;
-            }
-        }
-
-        self.rust_marker |= trimmed == "stack backtrace:";
-        self.swift_marker |= trimmed.contains("Program crashed:");
-        if self.swift_marker {
-            self.complete = true;
-            return;
-        }
-        if !is_header {
-            match trimmed.as_bytes().first() {
-                Some(b'#') => self.php_frame |= trimmed.starts_with("#0 "),
-                Some(b'a') => {
-                    self.javascript_frame |= trimmed.starts_with("at ") || trimmed.contains('@');
-                    self.java_frame |= looks_like_java_frame(trimmed);
-                }
-                _ => self.javascript_frame |= trimmed.contains('@'),
-            }
-        }
-        if self.java_frame || self.php_frame || self.javascript_frame {
-            self.complete =
-                self.looks_like_java() || self.looks_like_php() || self.looks_like_javascript();
-        }
-    }
 }
 
 pub(crate) struct CheckedLines<'input, 'options> {
@@ -225,20 +102,6 @@ impl<'input> Iterator for CheckedLines<'input, '_> {
         }
         Some(line)
     }
-}
-
-fn looks_like_java_frame(line: &str) -> bool {
-    let Some((callable, source)) = line
-        .strip_prefix("at ")
-        .and_then(|body| body.rsplit_once('('))
-    else {
-        return false;
-    };
-    callable.contains('.')
-        && source.ends_with(')')
-        && (source.starts_with("Native Method")
-            || source.starts_with("Unknown Source")
-            || source.contains(".java:"))
 }
 
 pub(crate) fn looks_like_exception(line: &str, extra_kind_chars: &[char]) -> bool {

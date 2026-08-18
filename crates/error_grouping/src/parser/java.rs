@@ -1,26 +1,41 @@
 use crate::ast::{Language, ParseError, SegmentRelation, StackFrame, StackTrace, TraceSegment};
-use crate::parser::{error_kind, looks_like_exception, payload, some, source_file};
+use crate::parser::{error_kind, looks_like_exception, payload, some, source_file, trim_line};
 
 crate::parser::parser_entrypoints!();
 
 fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Result<StackTrace, ParseError> {
     let mut segments = Vec::new();
+    let mut scopes = Vec::new();
 
     for original in lines {
-        let line = original.trim();
+        let (line, indent) = trim_line(original);
         if line.is_empty() {
             continue;
         }
         if let Some(error) = exception_in_thread(line) {
-            add_segment(&mut segments, SegmentRelation::Root, error);
+            add_segment(
+                &mut segments,
+                &mut scopes,
+                indent,
+                SegmentRelation::Root,
+                error,
+            );
         } else if let Some((relation, error)) = related_error(line) {
-            add_segment(&mut segments, relation, error);
+            add_segment(&mut segments, &mut scopes, indent, relation, error);
         } else if let Some(body) = payload(line, "at ") {
             if let Some(frame) = parse_frame(body) {
-                current_segment(&mut segments).frames.push(frame);
+                current_segment(&mut segments, &mut scopes)
+                    .frames
+                    .push(frame);
             }
         } else if segments.is_empty() && looks_like_exception(line, &['$']) {
-            add_segment(&mut segments, SegmentRelation::Root, line);
+            add_segment(
+                &mut segments,
+                &mut scopes,
+                indent,
+                SegmentRelation::Root,
+                line,
+            );
         }
     }
 
@@ -33,9 +48,26 @@ fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Result<StackTrace, P
     Ok(StackTrace::new(Language::Java, segments))
 }
 
-fn add_segment(segments: &mut Vec<TraceSegment>, relation: SegmentRelation, error: &str) {
+fn add_segment(
+    segments: &mut Vec<TraceSegment>,
+    scopes: &mut Vec<(usize, usize)>,
+    indent: usize,
+    relation: SegmentRelation,
+    error: &str,
+) {
+    let root = segments.is_empty() || relation == SegmentRelation::Root;
+    if root {
+        scopes.clear();
+    } else {
+        while scopes.len() > 1 && scopes.last().is_some_and(|(level, _)| *level >= indent) {
+            scopes.pop();
+        }
+    }
+
+    let index = segments.len();
     segments.push(TraceSegment {
-        relation: if segments.is_empty() {
+        parent: (!root).then(|| scopes.last().map_or(0, |(_, parent)| *parent)),
+        relation: if root {
             SegmentRelation::Root
         } else {
             relation
@@ -43,11 +75,16 @@ fn add_segment(segments: &mut Vec<TraceSegment>, relation: SegmentRelation, erro
         error_kind: error_kind(error),
         ..TraceSegment::default()
     });
+    scopes.push((indent, index));
 }
 
-fn current_segment(segments: &mut Vec<TraceSegment>) -> &mut TraceSegment {
+fn current_segment<'a>(
+    segments: &'a mut Vec<TraceSegment>,
+    scopes: &mut Vec<(usize, usize)>,
+) -> &'a mut TraceSegment {
     if segments.is_empty() {
         segments.push(TraceSegment::default());
+        scopes.push((0, 0));
     }
     let index = segments.len() - 1;
     &mut segments[index]
@@ -139,6 +176,9 @@ Caused by: java.lang.IllegalStateException: bad state
         assert_eq!(frame.module.as_deref(), Some("java.base"));
         assert_eq!(frame.file.as_deref(), Some("Thread.java"));
         assert_eq!(frame.function.as_deref(), Some("java.lang.Thread.run"));
+        assert_eq!(trace.segments()[1].parent, Some(0));
+        assert_eq!(trace.segments()[2].parent, Some(1));
+        assert_eq!(trace.segments()[3].parent, Some(0));
         assert_eq!(trace.segments()[1].relation, SegmentRelation::Suppressed);
         assert_eq!(trace.segments()[2].relation, SegmentRelation::Cause);
         assert_eq!(trace.segments()[3].relation, SegmentRelation::Cause);

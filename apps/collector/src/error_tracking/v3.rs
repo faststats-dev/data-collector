@@ -54,7 +54,7 @@ pub fn build_occurrence(input: OccurrenceInput<'_>, error: ErrorTracking) -> Err
         environment: "prod".to_string(),
         language: input.language.as_str().to_owned(),
         release: build_id.unwrap_or_else(|| input.release.unwrap_or_default().to_owned()),
-        group_hash: input.language.group_hash(&error_type, source_stack),
+        group_hash: input.language.fingerprint(&error_type, source_stack),
         exact_hash: exact_hash(&error_type, &error_message, source_stack),
         error_type,
         error_message,
@@ -83,7 +83,7 @@ pub async fn enrich_with_mapping(
         .await;
 
     if let Some(mapped) = mapped {
-        row.group_hash = language.group_hash(&row.error_type, &mapped.stacktrace);
+        row.group_hash = language.fingerprint(&row.error_type, &mapped.stacktrace);
         row.exact_hash = exact_hash(&row.error_type, &row.error_message, &mapped.stacktrace);
         row.mapped_stacktrace = Some(mapped.stacktrace);
         row.mapping_used = Some(mapped.mapping_used);
@@ -178,7 +178,7 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
-    fn mods_occurrences_use_java_group_hash() {
+    fn mods_occurrences_use_java_fingerprint() {
         let error = ErrorTracking {
             error: Error {
                 error: "java.lang.RuntimeException".to_string(),
@@ -213,7 +213,7 @@ mod tests {
 
         assert_eq!(
             row.group_hash,
-            ErrorLanguage::Java.group_hash(
+            ErrorLanguage::Java.fingerprint(
                 "java.lang.RuntimeException",
                 "\tat plugin-1.2.3.jar//com.example.Plugin.handle(Plugin.java:42)"
             )
@@ -301,7 +301,7 @@ mod tests {
     }
 
     #[test]
-    fn error_only_occurrences_can_use_php_group_hash() {
+    fn error_only_occurrences_can_use_php_fingerprint() {
         let error = ErrorTracking {
             error: Error {
                 error: "RuntimeException".to_string(),
@@ -336,7 +336,7 @@ mod tests {
 
         assert_eq!(
             row.group_hash,
-            ErrorLanguage::Php.group_hash(
+            ErrorLanguage::Php.fingerprint(
                 "RuntimeException",
                 "#0 /var/www/app/src/UserService.php(42): App\\Service\\UserService->find('abc', 123)"
             )
@@ -345,7 +345,7 @@ mod tests {
     }
 
     #[test]
-    fn error_only_occurrences_can_use_rust_group_hash() {
+    fn error_only_occurrences_can_use_rust_fingerprint() {
         let stacktrace =
             "0: my_app::worker::run::h0123456789abcdef\n   at /srv/my-app/src/worker.rs:42:17";
         let error = ErrorTracking {
@@ -380,7 +380,7 @@ mod tests {
 
         assert_eq!(
             row.group_hash,
-            ErrorLanguage::Rust.group_hash("panic", stacktrace)
+            ErrorLanguage::Rust.fingerprint("panic", stacktrace)
         );
         assert_eq!(row.language, "rust");
     }

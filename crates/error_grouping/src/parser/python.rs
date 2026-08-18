@@ -1,4 +1,7 @@
-use crate::base_ast::*;
+use crate::ast::{
+    FrameDetails, ParseError, ParserOptions, PythonFrameDetails, SegmentRelation, SourceLocation,
+    StackFrame, StackTrace, TraceDetails, TraceSegment,
+};
 use crate::parser::{UnparsedLines, error_parts, looks_like_exception, some, trim_line};
 
 crate::parser::parser_entrypoints!();

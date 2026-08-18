@@ -50,7 +50,7 @@ impl ErrorLanguage {
         }
     }
 
-    pub fn group_hash(self, error_type: &str, stacktrace: &str) -> String {
+    pub fn fingerprint(self, error_type: &str, stacktrace: &str) -> String {
         let language = self.into();
         match error_grouping::parse_language(language, stacktrace) {
             Ok(trace) => {
@@ -142,8 +142,8 @@ mod tests {
     #[test]
     fn grouping_uses_the_authoritative_type_and_versioned_new_algorithm() {
         let stack = "at render (/app/main.js:10:2)";
-        let type_error = ErrorLanguage::Javascript.group_hash("TypeError", stack);
-        let range_error = ErrorLanguage::Javascript.group_hash("RangeError", stack);
+        let type_error = ErrorLanguage::Javascript.fingerprint("TypeError", stack);
+        let range_error = ErrorLanguage::Javascript.fingerprint("RangeError", stack);
 
         assert!(type_error.starts_with("eg1_"));
         assert_ne!(type_error, range_error);
@@ -152,8 +152,8 @@ mod tests {
     #[test]
     fn header_and_frame_only_payloads_group_together() {
         let frames =
-            ErrorLanguage::Javascript.group_hash("TypeError", "at render (/app/main.js:10:2)");
-        let full = ErrorLanguage::Javascript.group_hash(
+            ErrorLanguage::Javascript.fingerprint("TypeError", "at render (/app/main.js:10:2)");
+        let full = ErrorLanguage::Javascript.fingerprint(
             "TypeError",
             "TypeError: dynamic message\nat render (/app/main.js:99:8)",
         );
@@ -163,11 +163,11 @@ mod tests {
 
     #[test]
     fn supports_python_and_go_grouping() {
-        let python = ErrorLanguage::Python.group_hash(
+        let python = ErrorLanguage::Python.fingerprint(
             "ValueError",
             "Traceback (most recent call last):\n  File \"/app/main.py\", line 1, in run\nValueError: x",
         );
-        let go = ErrorLanguage::Go.group_hash(
+        let go = ErrorLanguage::Go.fingerprint(
             "panic",
             "panic: bad\n\ngoroutine 1 [running]:\nmain.run()\n\t/app/main.go:3 +0x1",
         );
@@ -179,9 +179,9 @@ mod tests {
 
     #[test]
     fn unparsed_stacks_use_only_new_type_identity() {
-        let first = ErrorLanguage::Java.group_hash("FirstError", "not a stack");
-        let second = ErrorLanguage::Java.group_hash("SecondError", "not a stack");
-        let noisy = ErrorLanguage::Java.group_hash("FirstError", "different unsupported text");
+        let first = ErrorLanguage::Java.fingerprint("FirstError", "not a stack");
+        let second = ErrorLanguage::Java.fingerprint("SecondError", "not a stack");
+        let noisy = ErrorLanguage::Java.fingerprint("FirstError", "different unsupported text");
 
         assert_eq!(first, noisy);
         assert_ne!(first, second);

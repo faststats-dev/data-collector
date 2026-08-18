@@ -1,4 +1,7 @@
-use crate::base_ast::*;
+use crate::ast::{
+    ErrorInfo, FrameDetails, ParseError, ParserOptions, RustFrameDetails, StackFrame, StackTrace,
+    TraceDetails, TraceSegment,
+};
 use crate::parser::{UnparsedLines, payload, some, split_location};
 
 crate::parser::parser_entrypoints!();

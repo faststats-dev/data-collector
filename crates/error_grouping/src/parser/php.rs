@@ -1,4 +1,7 @@
-use crate::base_ast::*;
+use crate::ast::{
+    ErrorInfo, FrameDetails, ParseError, ParserOptions, PhpCallType, PhpFrameDetails,
+    SourceLocation, StackFrame, StackTrace, TraceDetails, TraceSegment,
+};
 use crate::parser::{UnparsedLines, error_parts, some, split_location};
 
 crate::parser::parser_entrypoints!();

@@ -1,4 +1,7 @@
-use crate::base_ast::*;
+use crate::ast::{
+    FrameDetails, GoFrameDetails, GoTraceDetails, ParseError, ParserOptions, SourceLocation,
+    StackFrame, StackTrace, TraceDetails, TraceSegment,
+};
 use crate::parser::{UnparsedLines, payload, some, split_location, trim_line};
 
 crate::parser::parser_entrypoints!();

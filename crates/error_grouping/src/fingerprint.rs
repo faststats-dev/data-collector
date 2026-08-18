@@ -3,12 +3,13 @@
 //! The canonical format is deliberately private. Its version is part of the
 //! hash domain, so future semantic changes cannot silently collide with v1.
 
-use std::{borrow::Cow, fmt};
+use std::{borrow::Cow, collections::VecDeque, fmt};
 
-use crate::{Language, SegmentRelation, StackFrame, StackTrace};
+use crate::{Language, SegmentRelation, StackFrame, StackTrace, TraceSegment};
 use sha2::{Digest, Sha256};
 
 const DOMAIN: &[u8] = b"error-grouping/fingerprint/v1";
+/// Prefix used by display-form group identifiers.
 pub const FINGERPRINT_VERSION: &str = "eg1";
 
 /// A stable SHA-256 fingerprint of the useful identity of a stack trace.
@@ -16,10 +17,13 @@ pub const FINGERPRINT_VERSION: &str = "eg1";
 pub struct Fingerprint([u8; 32]);
 
 impl Fingerprint {
-    pub fn as_bytes(&self) -> &[u8; 32] {
+    /// Returns the raw SHA-256 digest.
+    pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
 
+    /// Encodes the raw digest without the algorithm-version prefix.
+    /// Use [`std::fmt::Display`] for a persistent group identifier.
     pub fn to_hex(self) -> String {
         const HEX: &[u8; 16] = b"0123456789abcdef";
         let mut output = String::with_capacity(64);
@@ -47,36 +51,12 @@ impl fmt::Display for Fingerprint {
     }
 }
 
-/// The semantic inputs retained by the fingerprint policy.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct FingerprintExplanation {
-    pub version: &'static str,
-    pub language: Language,
-    pub authoritative_error_kind: Option<String>,
-    pub segments: Vec<SegmentExplanation>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SegmentExplanation {
-    pub source_index: usize,
-    pub relation: SegmentRelation,
-    pub error_kind: Option<String>,
-    pub frames: Vec<FrameExplanation>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct FrameExplanation {
-    pub function: Option<String>,
-    pub module: Option<String>,
-    pub file: Option<String>,
-}
-
 /// Controls the bounded amount of stable stack identity included in a hash.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FingerprintOptions {
     /// Maximum related errors included, in display order.
     pub max_segments: usize,
-    /// Maximum non-consecutive frames included per error segment.
+    /// Maximum frames included per error segment after duplicate removal.
     pub max_frames_per_segment: usize,
     /// Ignore well-known standard-library/runtime frames when other frames exist.
     pub filter_runtime_frames: bool,
@@ -112,7 +92,7 @@ pub fn fingerprint_error(language: Language, error_kind: &str) -> Fingerprint {
     let error_kind = normalized_kind(language, Some(error_kind));
     canonical.optional_text(error_kind.as_deref());
     canonical.byte(0xff);
-    Fingerprint(sha256(&canonical.bytes))
+    Fingerprint(canonical.finish())
 }
 
 /// Fingerprint a parsed trace with an explicit noise policy.
@@ -126,38 +106,12 @@ pub fn fingerprint_with_kind_and_options(
     error_kind: Option<&str>,
     options: &FingerprintOptions,
 ) -> Fingerprint {
-    build_fingerprint(trace, error_kind, options, false).0
-}
-
-/// Return the semantic components retained by the fingerprint policy.
-pub fn explain_fingerprint(
-    trace: &StackTrace,
-    error_kind: Option<&str>,
-    options: &FingerprintOptions,
-) -> FingerprintExplanation {
-    build_fingerprint(trace, error_kind, options, true)
-        .1
-        .expect("explanation requested")
-}
-
-fn build_fingerprint(
-    trace: &StackTrace,
-    error_kind: Option<&str>,
-    options: &FingerprintOptions,
-    explain: bool,
-) -> (Fingerprint, Option<FingerprintExplanation>) {
     let mut canonical = Canonical::default();
     canonical.field(DOMAIN);
     canonical.byte(language_tag(trace.language()));
     let authoritative_kind = normalized_kind(trace.language(), error_kind);
     let has_authoritative_kind = authoritative_kind.is_some();
     canonical.optional_text(authoritative_kind.as_deref());
-    let mut explanation = explain.then(|| FingerprintExplanation {
-        version: FINGERPRINT_VERSION,
-        language: trace.language(),
-        authoritative_error_kind: authoritative_kind,
-        segments: Vec::new(),
-    });
 
     for index in selected_segment_indices(trace.segments().len(), options.max_segments) {
         let segment = &trace.segments()[index];
@@ -177,66 +131,105 @@ fn build_fingerprint(
                 .iter()
                 .any(|frame| !is_runtime_frame(trace.language(), frame));
 
-        let mut identities = Vec::new();
-        let mut previous = None;
-        for frame in segment
-            .frames
-            .iter()
-            .filter(|frame| !filter_runtime_frames || !is_runtime_frame(trace.language(), frame))
-        {
-            let identity = frame_identity(trace.language(), frame);
-            if previous.as_ref() == Some(&identity) {
-                continue;
-            }
-            previous = Some(identity.clone());
-            identities.push(identity);
-        }
-        let start = if trace.language() == Language::Python {
-            identities
-                .len()
-                .saturating_sub(options.max_frames_per_segment)
+        if trace.language() == Language::Python {
+            write_python_frames(
+                &mut canonical,
+                segment,
+                filter_runtime_frames,
+                options.max_frames_per_segment,
+            );
         } else {
-            0
-        };
-        let end = if trace.language() == Language::Python {
-            identities.len()
-        } else {
-            identities.len().min(options.max_frames_per_segment)
-        };
-        let mut explained_frames = explanation.as_ref().map(|_| Vec::new());
-        for identity in &identities[start..end] {
-            canonical.byte(0x20);
-            canonical.optional_text(identity.function.as_deref());
-            canonical.optional_text(identity.module.as_deref());
-            canonical.optional_text(identity.file.as_deref());
-            if let Some(frames) = &mut explained_frames {
-                frames.push(FrameExplanation {
-                    function: identity.function.clone().map(Cow::into_owned),
-                    module: identity.module.clone().map(Cow::into_owned),
-                    file: identity.file.clone().map(Cow::into_owned),
-                });
-            }
+            write_leading_frames(
+                &mut canonical,
+                trace.language(),
+                segment,
+                filter_runtime_frames,
+                options.max_frames_per_segment,
+            );
         }
         canonical.byte(0x2f);
-        if let Some(explanation) = &mut explanation {
-            explanation.segments.push(SegmentExplanation {
-                source_index: index,
-                relation: segment.relation,
-                error_kind: segment_kind,
-                frames: explained_frames.expect("explanation frames"),
-            });
-        }
     }
     canonical.byte(0xff);
 
-    (Fingerprint(sha256(&canonical.bytes)), explanation)
+    Fingerprint(canonical.finish())
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 struct FrameIdentity<'a> {
     function: Option<Cow<'a, str>>,
     module: Option<Cow<'a, str>>,
     file: Option<Cow<'a, str>>,
+}
+
+fn write_leading_frames(
+    canonical: &mut Canonical,
+    language: Language,
+    segment: &TraceSegment,
+    filter_runtime_frames: bool,
+    limit: usize,
+) {
+    let mut previous = None;
+    let mut included = 0;
+    for frame in &segment.frames {
+        if filter_runtime_frames && is_runtime_frame(language, frame) {
+            continue;
+        }
+        let identity = frame_identity(language, frame);
+        if previous.as_ref() == Some(&identity) {
+            continue;
+        }
+        if included == limit {
+            break;
+        }
+        write_frame(canonical, &identity);
+        previous = Some(identity);
+        included += 1;
+    }
+}
+
+fn write_python_frames(
+    canonical: &mut Canonical,
+    segment: &TraceSegment,
+    filter_runtime_frames: bool,
+    limit: usize,
+) {
+    if segment.frames.len() <= limit {
+        write_leading_frames(
+            canonical,
+            Language::Python,
+            segment,
+            filter_runtime_frames,
+            limit,
+        );
+        return;
+    }
+    if limit == 0 {
+        return;
+    }
+
+    let mut identities = VecDeque::with_capacity(limit);
+    for frame in &segment.frames {
+        if filter_runtime_frames && is_runtime_frame(Language::Python, frame) {
+            continue;
+        }
+        let identity = frame_identity(Language::Python, frame);
+        if identities.back() != Some(&identity) {
+            if identities.len() == limit {
+                identities.pop_front();
+            }
+            identities.push_back(identity);
+        }
+    }
+    for identity in &identities {
+        write_frame(canonical, identity);
+    }
+}
+
+fn write_frame(canonical: &mut Canonical, identity: &FrameIdentity<'_>) {
+    canonical.byte(0x20);
+    canonical.optional_text(identity.function.as_deref());
+    canonical.optional_text(identity.module.as_deref());
+    canonical.optional_text(identity.file.as_deref());
 }
 
 fn frame_identity(language: Language, frame: &StackFrame) -> FrameIdentity<'_> {
@@ -281,42 +274,62 @@ fn normalize_function(language: Language, function: &str) -> Cow<'_, str> {
 fn normalized_file(language: Language, file: &str) -> Option<Cow<'_, str>> {
     let file = file.trim().split(['?', '#']).next().unwrap_or("");
     let file = file.trim_end_matches(['/', '\\']);
-    let components = file
-        .split(['/', '\\'])
-        .filter(|component| !component.is_empty() && *component != ".")
-        .collect::<Vec<_>>();
-    let stable_root = components.iter().rposition(|component| {
-        matches!(
-            *component,
-            "src" | "tests" | "test" | "app" | "lib" | "crates" | "packages"
-        )
-    });
-    let start = stable_root
-        .map(|index| index.max(components.len().saturating_sub(3)))
-        .unwrap_or_else(|| components.len().saturating_sub(1));
-    let suffix = components[start..].join("/");
-    if suffix.is_empty() {
+    if file.is_empty() {
         None
+    } else if file.contains('\\') {
+        let normalized = file.replace('\\', "/");
+        Some(Cow::Owned(
+            normalize_file_path(language, &normalized).into_owned(),
+        ))
     } else {
-        let suffix = normalize_case(language, &suffix);
-        Some(Cow::Owned(normalize_asset_hashes(&suffix)))
+        Some(normalize_file_path(language, file))
     }
 }
 
-fn selected_segment_indices(length: usize, limit: usize) -> Vec<usize> {
-    if limit == 0 {
-        Vec::new()
-    } else if length <= limit {
-        (0..length).collect()
-    } else {
-        (0..limit - 1).chain(std::iter::once(length - 1)).collect()
+fn normalize_file_path(language: Language, path: &str) -> Cow<'_, str> {
+    let path = path.trim_start_matches('/');
+    let mut offset = 0;
+    let mut stable_root = None;
+    for component in path.split('/') {
+        if is_stable_path_root(component) {
+            stable_root = Some(offset);
+        }
+        offset += component.len() + 1;
     }
+    let suffix = stable_root.map_or_else(
+        || path.rsplit_once('/').map_or(path, |(_, basename)| basename),
+        |root| {
+            let last_three = path
+                .rmatch_indices('/')
+                .nth(2)
+                .map_or(0, |(index, _)| index + 1);
+            &path[root.max(last_three)..]
+        },
+    );
+    normalize_asset_hashes(normalize_case(language, suffix))
 }
 
-fn normalized_kind(language: Language, kind: Option<&str>) -> Option<String> {
+fn is_stable_path_root(component: &str) -> bool {
+    matches!(
+        component,
+        "src" | "tests" | "test" | "app" | "lib" | "crates" | "packages"
+    )
+}
+
+fn selected_segment_indices(length: usize, limit: usize) -> impl Iterator<Item = usize> {
+    let truncated = limit > 0 && length > limit;
+    let leading = if truncated {
+        limit - 1
+    } else {
+        length.min(limit)
+    };
+    (0..leading).chain(truncated.then_some(length - 1))
+}
+
+fn normalized_kind(language: Language, kind: Option<&str>) -> Option<Cow<'_, str>> {
     kind.map(str::trim)
         .filter(|kind| !kind.is_empty())
-        .map(|kind| normalize_case(language, kind).into_owned())
+        .map(|kind| normalize_case(language, kind))
 }
 
 fn normalize_case(language: Language, value: &str) -> Cow<'_, str> {
@@ -329,6 +342,15 @@ fn normalize_case(language: Language, value: &str) -> Cow<'_, str> {
 
 fn normalize_java_generated_function(function: &str) -> Cow<'_, str> {
     let bytes = function.as_bytes();
+    let generated = function.contains("$$Lambda$")
+        || function.contains("$Proxy")
+        || bytes
+            .windows(2)
+            .any(|pair| pair[0] == b'$' && pair[1].is_ascii_digit());
+    if !generated {
+        return Cow::Borrowed(function);
+    }
+
     let mut output = String::with_capacity(function.len());
     let mut index = 0;
     let mut changed = false;
@@ -357,10 +379,9 @@ fn normalize_java_generated_function(function: &str) -> Cow<'_, str> {
             }
             changed = true;
         } else {
-            let character = function[index..]
-                .chars()
-                .next()
-                .expect("character boundary");
+            let Some(character) = function[index..].chars().next() else {
+                break;
+            };
             output.push(character);
             index += character.len_utf8();
         }
@@ -372,17 +393,26 @@ fn normalize_java_generated_function(function: &str) -> Cow<'_, str> {
     }
 }
 
-fn normalize_asset_hashes(value: &str) -> String {
-    let hashes = value
-        .split(['.', '-'])
-        .filter(|part| part.len() >= 8 && part.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    let mut output = value.to_owned();
-    for hash in hashes {
-        output = output.replace(&hash, "<hash>");
+fn normalize_asset_hashes(value: Cow<'_, str>) -> Cow<'_, str> {
+    if !value.split(['.', '-']).any(is_asset_hash) {
+        return value;
     }
-    output
+
+    let mut output = String::with_capacity(value.len());
+    for component in value.split_inclusive(['.', '-']) {
+        let token = component.trim_end_matches(['.', '-']);
+        output.push_str(if is_asset_hash(token) {
+            "<hash>"
+        } else {
+            token
+        });
+        output.push_str(&component[token.len()..]);
+    }
+    Cow::Owned(output)
+}
+
+fn is_asset_hash(value: &str) -> bool {
+    value.len() >= 8 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn is_runtime_frame(language: Language, frame: &StackFrame) -> bool {
@@ -411,7 +441,7 @@ fn is_runtime_frame(language: Language, frame: &StackFrame) -> bool {
     }
 }
 
-fn language_tag(language: Language) -> u8 {
+const fn language_tag(language: Language) -> u8 {
     match language {
         Language::Java => 1,
         Language::Rust => 2,
@@ -422,7 +452,7 @@ fn language_tag(language: Language) -> u8 {
     }
 }
 
-fn relation_tag(relation: SegmentRelation) -> u8 {
+const fn relation_tag(relation: SegmentRelation) -> u8 {
     match relation {
         SegmentRelation::Root => 0,
         SegmentRelation::Cause => 1,
@@ -432,19 +462,16 @@ fn relation_tag(relation: SegmentRelation) -> u8 {
 }
 
 #[derive(Default)]
-struct Canonical {
-    bytes: Vec<u8>,
-}
+struct Canonical(Sha256);
 
 impl Canonical {
     fn byte(&mut self, value: u8) {
-        self.bytes.push(value);
+        self.0.update([value]);
     }
 
     fn field(&mut self, value: &[u8]) {
-        self.bytes
-            .extend_from_slice(&(value.len() as u64).to_be_bytes());
-        self.bytes.extend_from_slice(value);
+        self.0.update((value.len() as u64).to_be_bytes());
+        self.0.update(value);
     }
 
     fn optional_text(&mut self, value: Option<&str>) {
@@ -461,13 +488,18 @@ impl Canonical {
         match value {
             Some(value) => {
                 self.byte(1);
-                self.bytes.extend_from_slice(&(value as u64).to_be_bytes());
+                self.0.update((value as u64).to_be_bytes());
             }
             None => self.byte(0),
         }
     }
+
+    fn finish(self) -> [u8; 32] {
+        self.0.finalize().into()
+    }
 }
 
+#[cfg(test)]
 fn sha256(input: &[u8]) -> [u8; 32] {
     Sha256::digest(input).into()
 }
@@ -487,6 +519,13 @@ mod tests {
             "TypeError: user 999 failed\n at load (C:\\release\\b\\app.js:800:40)\n at node:internal/main/run_main_module:99:1",
         )
         .unwrap();
+        assert_eq!(fingerprint(&first), fingerprint(&second));
+    }
+
+    #[test]
+    fn stable_application_root_ignores_deployment_prefix() {
+        let first = parser::javascript::parse("at load (/srv/app/main.js:1:2)").unwrap();
+        let second = parser::javascript::parse("at load (/opt/app/main.js:9:8)").unwrap();
         assert_eq!(fingerprint(&first), fingerprint(&second));
     }
 
@@ -529,6 +568,12 @@ mod tests {
         let asset_b =
             parser::javascript::parse("at run (/assets/app.0123456789ab.js:9:8)").unwrap();
         assert_eq!(fingerprint(&asset_a), fingerprint(&asset_b));
+
+        let chunks_a =
+            parser::javascript::parse("at run (/assets/app.abcdef12-deadbeef.js:1:2)").unwrap();
+        let chunks_b =
+            parser::javascript::parse("at run (/assets/app.12345678-90abcdef.js:9:8)").unwrap();
+        assert_eq!(fingerprint(&chunks_a), fingerprint(&chunks_b));
     }
 
     #[test]
@@ -546,41 +591,81 @@ mod tests {
 
     #[test]
     fn python_limit_keeps_crash_nearest_frames() {
-        let trace = parser::python::parse(
+        let first = parser::python::parse(
             "Traceback (most recent call last):\n  File \"/app/old.py\", line 1, in old\n  File \"/app/middle.py\", line 2, in middle\n  File \"/app/crash.py\", line 3, in crash\nValueError: x",
+        )
+        .unwrap();
+        let second = parser::python::parse(
+            "Traceback (most recent call last):\n  File \"/app/changed.py\", line 1, in changed\n  File \"/app/middle.py\", line 2, in middle\n  File \"/app/crash.py\", line 3, in crash\nValueError: x",
         )
         .unwrap();
         let options = FingerprintOptions {
             max_frames_per_segment: 2,
             ..FingerprintOptions::default()
         };
-        let explanation = explain_fingerprint(&trace, None, &options);
-        let functions = explanation.segments[0]
-            .frames
-            .iter()
-            .map(|frame| frame.function.as_deref())
-            .collect::<Vec<_>>();
-        assert_eq!(functions, [Some("middle"), Some("crash")]);
+        assert_eq!(
+            fingerprint_with_options(&first, &options),
+            fingerprint_with_options(&second, &options)
+        );
+    }
+
+    #[test]
+    fn python_limit_distinguishes_different_crash_frames() {
+        let first = parser::python::parse(
+            "Traceback (most recent call last):\n  File \"/app/old.py\", line 1, in old\n  File \"/app/crash.py\", line 2, in crash\nValueError: x",
+        )
+        .unwrap();
+        let second = parser::python::parse(
+            "Traceback (most recent call last):\n  File \"/app/old.py\", line 1, in old\n  File \"/app/other.py\", line 2, in other\nValueError: x",
+        )
+        .unwrap();
+        let options = FingerprintOptions {
+            max_frames_per_segment: 1,
+            ..FingerprintOptions::default()
+        };
+        assert_ne!(
+            fingerprint_with_options(&first, &options),
+            fingerprint_with_options(&second, &options)
+        );
     }
 
     #[test]
     fn segment_limit_keeps_the_terminal_cause() {
-        let trace = parser::java::parse(
+        let first = parser::java::parse(
             "Root: x\nat app.Root.run(Root.java:1)\nCaused by: First: x\nat app.First.run(First.java:1)\nCaused by: Second: x\nat app.Second.run(Second.java:1)\nCaused by: Terminal: x\nat app.Terminal.run(Terminal.java:1)",
+        )
+        .unwrap();
+        let second = parser::java::parse(
+            "Root: x\nat app.Root.run(Root.java:1)\nCaused by: Different: x\nat app.Different.run(Different.java:1)\nCaused by: Other: x\nat app.Other.run(Other.java:1)\nCaused by: Terminal: x\nat app.Terminal.run(Terminal.java:1)",
         )
         .unwrap();
         let options = FingerprintOptions {
             max_segments: 2,
             ..FingerprintOptions::default()
         };
-        let explanation = explain_fingerprint(&trace, None, &options);
         assert_eq!(
-            explanation
-                .segments
-                .iter()
-                .map(|segment| segment.source_index)
-                .collect::<Vec<_>>(),
-            [0, 3]
+            fingerprint_with_options(&first, &options),
+            fingerprint_with_options(&second, &options)
+        );
+    }
+
+    #[test]
+    fn segment_limit_distinguishes_different_terminal_causes() {
+        let first = parser::java::parse(
+            "Root: x\nat app.Root.run(Root.java:1)\nCaused by: Middle: x\nat app.Middle.run(Middle.java:1)\nCaused by: Terminal: x\nat app.Terminal.run(Terminal.java:1)",
+        )
+        .unwrap();
+        let second = parser::java::parse(
+            "Root: x\nat app.Root.run(Root.java:1)\nCaused by: Middle: x\nat app.Middle.run(Middle.java:1)\nCaused by: Other: x\nat app.Other.run(Other.java:1)",
+        )
+        .unwrap();
+        let options = FingerprintOptions {
+            max_segments: 2,
+            ..FingerprintOptions::default()
+        };
+        assert_ne!(
+            fingerprint_with_options(&first, &options),
+            fingerprint_with_options(&second, &options)
         );
     }
 
@@ -590,6 +675,18 @@ mod tests {
         let lower = parser::php::parse("#0 /app/src/user.php(9): app\\user->run()").unwrap();
         assert_eq!(fingerprint(&upper), fingerprint(&lower));
         assert!(fingerprint(&upper).to_string().starts_with("eg1_"));
+    }
+
+    #[test]
+    fn v1_semantic_identity_is_stable() {
+        let trace = parser::java::parse(
+            "RootError: dynamic message\nat app.Root.run(Root.java:42)\nCaused by: CauseError: other message\nat app.Work.run(Work.java:7)",
+        )
+        .unwrap();
+        assert_eq!(
+            fingerprint_with_kind(&trace, Some("RootError")).to_string(),
+            "eg1_2838de7bcd3cb8d9af49266be76376ce6a71894076510f08efbde08b95cb73da"
+        );
     }
 
     #[test]

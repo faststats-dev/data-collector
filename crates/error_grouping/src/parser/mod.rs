@@ -34,7 +34,7 @@ macro_rules! parser_entrypoints {
 }
 pub(crate) use parser_entrypoints;
 
-use crate::base_ast::{
+use crate::ast::{
     ErrorInfo, ParseError, ParserOptions, SegmentRelation, SourceLocation, TraceSegment,
 };
 
@@ -162,60 +162,71 @@ pub(crate) fn validate_and_detect<'a>(
     input: &'a str,
     options: &ParserOptions,
 ) -> Result<DetectionHints<'a>, ParseError> {
-    scan_input(
-        input,
-        options,
-        DetectionHints::default(),
-        |hints, line, is_header| {
-            if hints.complete {
-                return;
-            }
-            let trimmed = line.trim();
-            if is_header {
-                hints.header = trimmed;
-                hints.complete = hints.looks_like_python()
-                    || hints.looks_like_go()
-                    || hints.header.starts_with("Exception in thread ")
-                    || hints.header.starts_with("Caused by:")
-                    || hints.header.starts_with("PHP Fatal error:")
-                    || hints.header.starts_with("Fatal error:")
-                    || hints.header.starts_with("Uncaught ")
-                    || (hints.header.starts_with("thread '")
-                        && hints.header.contains("panicked at"));
-                if hints.complete {
-                    return;
-                }
-            }
-            hints.rust_marker |= line == "stack backtrace:";
-            if !is_header {
-                match trimmed.as_bytes().first() {
-                    Some(b'#') => hints.php_frame |= trimmed.starts_with("#0 "),
-                    Some(b'a') => {
-                        hints.javascript_frame |=
-                            trimmed.starts_with("at ") || trimmed.contains('@');
-                        hints.java_frame |= looks_like_java_frame(trimmed);
-                    }
-                    _ => hints.javascript_frame |= trimmed.contains('@'),
-                }
-            }
-            if hints.java_frame || hints.php_frame || hints.javascript_frame {
-                hints.complete = hints.looks_like_java()
-                    || hints.looks_like_php()
-                    || hints.looks_like_javascript();
-            }
-        },
-    )
+    let mut lines = CheckedLines::new(input, options)?;
+    let mut hints = DetectionHints::default();
+    let mut is_header = true;
+
+    for line in lines.by_ref() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if !hints.complete {
+            hints.inspect(trimmed, is_header);
+        }
+        is_header = false;
+    }
+    lines.finish()?;
+    Ok(hints)
 }
 
-pub(crate) struct CheckedLines<'a> {
-    lines: std::iter::Enumerate<std::str::Lines<'a>>,
-    options: &'a ParserOptions,
+impl<'a> DetectionHints<'a> {
+    fn inspect(&mut self, trimmed: &'a str, is_header: bool) {
+        if is_header {
+            self.header = trimmed;
+            self.complete = self.looks_like_python()
+                || self.looks_like_go()
+                || self.header.starts_with("Exception in thread ")
+                || self.header.starts_with("Caused by:")
+                || self.header.starts_with("PHP Fatal error:")
+                || self.header.starts_with("Fatal error:")
+                || self.header.starts_with("Uncaught ")
+                || (self.header.starts_with("thread '") && self.header.contains("panicked at"));
+            if self.complete {
+                return;
+            }
+        }
+
+        self.rust_marker |= trimmed == "stack backtrace:";
+        if !is_header {
+            match trimmed.as_bytes().first() {
+                Some(b'#') => self.php_frame |= trimmed.starts_with("#0 "),
+                Some(b'a') => {
+                    self.javascript_frame |= trimmed.starts_with("at ") || trimmed.contains('@');
+                    self.java_frame |= looks_like_java_frame(trimmed);
+                }
+                _ => self.javascript_frame |= trimmed.contains('@'),
+            }
+        }
+        if self.java_frame || self.php_frame || self.javascript_frame {
+            self.complete =
+                self.looks_like_java() || self.looks_like_php() || self.looks_like_javascript();
+        }
+    }
+}
+
+pub(crate) struct CheckedLines<'input, 'options> {
+    lines: std::iter::Enumerate<std::str::Lines<'input>>,
+    options: &'options ParserOptions,
     saw_content: bool,
     error: Option<ParseError>,
 }
 
-impl<'a> CheckedLines<'a> {
-    pub(crate) fn new(input: &'a str, options: &'a ParserOptions) -> Result<Self, ParseError> {
+impl<'input, 'options> CheckedLines<'input, 'options> {
+    pub(crate) fn new(
+        input: &'input str,
+        options: &'options ParserOptions,
+    ) -> Result<Self, ParseError> {
         if input.len() > options.max_input_bytes {
             return Err(ParseError::InputTooLarge {
                 actual: input.len(),
@@ -242,8 +253,8 @@ impl<'a> CheckedLines<'a> {
     }
 }
 
-impl<'a> Iterator for CheckedLines<'a> {
-    type Item = &'a str;
+impl<'input> Iterator for CheckedLines<'input, '_> {
+    type Item = &'input str;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.error.is_some() {
@@ -271,53 +282,6 @@ impl<'a> Iterator for CheckedLines<'a> {
         }
         Some(line)
     }
-}
-
-fn scan_input<'a, State>(
-    input: &'a str,
-    options: &ParserOptions,
-    mut state: State,
-    mut inspect: impl FnMut(&mut State, &'a str, bool),
-) -> Result<State, ParseError> {
-    // Check bytes before scanning for whitespace: a huge whitespace-only input
-    // must be rejected in O(1), not traversed in full first.
-    if input.len() > options.max_input_bytes {
-        return Err(ParseError::InputTooLarge {
-            actual: input.len(),
-            limit: options.max_input_bytes,
-        });
-    }
-    let mut saw_content = false;
-    for (index, line) in input.lines().enumerate() {
-        let line_number = index + 1;
-        if line_number > options.max_lines {
-            return Err(ParseError::TooManyLines {
-                actual: line_number,
-                limit: options.max_lines,
-            });
-        }
-        if line.len() > options.max_line_bytes {
-            return Err(ParseError::LineTooLong {
-                line: line_number,
-                actual: line.len(),
-                limit: options.max_line_bytes,
-            });
-        }
-
-        if !saw_content {
-            if line.trim().is_empty() {
-                continue;
-            }
-            saw_content = true;
-            inspect(&mut state, line, true);
-        } else {
-            inspect(&mut state, line, false);
-        }
-    }
-    if !saw_content {
-        return Err(ParseError::Empty);
-    }
-    Ok(state)
 }
 
 fn looks_like_java_frame(line: &str) -> bool {
@@ -405,10 +369,8 @@ fn take_numeric_suffix(text: &str) -> (&str, Option<u32>) {
     let Some((head, tail)) = text.rsplit_once(':') else {
         return (text, None);
     };
-    match tail.parse::<u32>() {
-        Ok(value) => (head, Some(value)),
-        Err(_) => (text, None),
-    }
+    tail.parse::<u32>()
+        .map_or((text, None), |value| (head, Some(value)))
 }
 
 pub(crate) fn error_parts(text: &str) -> (Option<String>, Option<String>) {

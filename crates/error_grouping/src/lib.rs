@@ -14,20 +14,19 @@
 
 #![forbid(unsafe_code)]
 
-mod base_ast;
+mod ast;
 pub mod fingerprint;
 pub mod parser;
 
-pub use base_ast::{
+pub use ast::{
     ErrorInfo, FrameDetails, GoFrameDetails, GoTraceDetails, JavaFrameDetails,
     JavaScriptFrameDetails, JavaScriptStackFormat, Language, ParseError, ParserOptions,
     PhpCallType, PhpFrameDetails, PythonFrameDetails, RustFrameDetails, SegmentRelation,
     SourceLocation, StackFrame, StackTrace, TraceDetails, TraceSegment,
 };
 pub use fingerprint::{
-    FINGERPRINT_VERSION, Fingerprint, FingerprintExplanation, FingerprintOptions, FrameExplanation,
-    SegmentExplanation, explain_fingerprint, fingerprint, fingerprint_error, fingerprint_with_kind,
-    fingerprint_with_kind_and_options, fingerprint_with_options,
+    FINGERPRINT_VERSION, Fingerprint, FingerprintOptions, fingerprint, fingerprint_error,
+    fingerprint_with_kind, fingerprint_with_kind_and_options, fingerprint_with_options,
 };
 
 /// Parse a supported stack trace using conservative language detection.

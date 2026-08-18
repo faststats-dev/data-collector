@@ -1,4 +1,9 @@
-use crate::base_ast::*;
+#[cfg(test)]
+use crate::ast::SourceLocation;
+use crate::ast::{
+    FrameDetails, JavaScriptFrameDetails, JavaScriptStackFormat, ParseError, ParserOptions,
+    StackFrame, StackTrace, TraceDetails, TraceSegment,
+};
 use crate::parser::{UnparsedLines, error_parts, payload, some, split_location};
 
 crate::parser::parser_entrypoints!();

@@ -28,6 +28,10 @@ fn main() {
     bench("fingerprint/java-nested", JAVA_NESTED, || {
         fingerprint(black_box(&fingerprint_trace))
     });
+    bench("group/java-nested", JAVA_NESTED, || {
+        let trace = parser::java::parse(black_box(JAVA_NESTED)).unwrap();
+        fingerprint(black_box(&trace))
+    });
     bench_mixed();
 
     let large_java = large_java_trace(512);
@@ -87,6 +91,7 @@ fn bench_mixed() {
 
 fn report(name: &str, bytes: usize, iterations: usize, elapsed: std::time::Duration) {
     let ns = elapsed.as_nanos() / iterations as u128;
+    #[allow(clippy::cast_precision_loss)] // Human-readable throughput is intentionally approximate.
     let mib = bytes as f64 / (1024.0 * 1024.0);
     println!(
         "{name:32} {ns:>8} {throughput:>12.1}",

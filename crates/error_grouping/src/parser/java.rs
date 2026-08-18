@@ -1,4 +1,7 @@
-use crate::base_ast::*;
+use crate::ast::{
+    FrameDetails, JavaFrameDetails, ParseError, ParserOptions, SegmentRelation, StackFrame,
+    StackTrace, TraceDetails,
+};
 use crate::parser::{
     ExceptionTreeBuilder, UnparsedLines, looks_like_exception, payload, some, split_location,
     trim_line,
@@ -10,8 +13,6 @@ fn parse_lines<'a>(
     lines: impl Iterator<Item = &'a str>,
     options: &ParserOptions,
 ) -> Result<StackTrace, ParseError> {
-    use SegmentRelation::*;
-
     let mut tree = ExceptionTreeBuilder::default();
     let mut unparsed_lines = UnparsedLines::new(options);
 
@@ -21,7 +22,7 @@ fn parse_lines<'a>(
             continue;
         }
         if let Some((thread, error)) = exception_in_thread(line) {
-            tree.add(indent, Root, error, some(thread));
+            tree.add(indent, SegmentRelation::Root, error, some(thread));
         } else if let Some((relation, error)) = related_error(line) {
             tree.add(indent, relation, error, None);
         } else if let Some(body) = payload(line, "at ") {
@@ -33,7 +34,7 @@ fn parse_lines<'a>(
         } else if let Some(count) = omitted_count(line) {
             tree.current().omitted_frames = count;
         } else if tree.segments.is_empty() && looks_like_exception(line, &['$']) {
-            tree.add(indent, Root, line, None);
+            tree.add(indent, SegmentRelation::Root, line, None);
         } else {
             unparsed_lines.push(original);
         }
@@ -77,17 +78,16 @@ fn parse_frame(body: &str) -> Option<StackFrame> {
             .map_or((None, callable), |(p, c)| (Some(p), c))
     };
     let (class_loader, module_spec) = prefix.map_or((None, None), |prefix| {
-        prefix.split_once('/').map_or(
-            (None, (!prefix.is_empty()).then_some(prefix)),
+        prefix.split_once('/').map_or_else(
+            || (None, (!prefix.is_empty()).then_some(prefix)),
             |(loader, module)| (some(loader), (!module.is_empty()).then_some(module)),
         )
     });
     let (module, module_version) = module_spec.map_or((None, None), |module_spec| {
-        module_spec
-            .split_once('@')
-            .map_or((some(module_spec), None), |(module, version)| {
-                (some(module), some(version))
-            })
+        module_spec.split_once('@').map_or_else(
+            || (some(module_spec), None),
+            |(module, version)| (some(module), some(version)),
+        )
     });
     let (class, method) = callable.rsplit_once('.')?;
     let native = source == "Native Method";

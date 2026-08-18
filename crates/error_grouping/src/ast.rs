@@ -28,7 +28,7 @@ pub struct StackTrace {
 }
 
 impl StackTrace {
-    pub(crate) fn new(
+    pub(crate) const fn new(
         details: TraceDetails,
         segments: Vec<TraceSegment>,
         unparsed_lines: Vec<String>,
@@ -41,7 +41,7 @@ impl StackTrace {
     }
 
     /// Runtime that produced this stack trace.
-    pub fn language(&self) -> Language {
+    pub const fn language(&self) -> Language {
         self.details.language()
     }
 
@@ -53,7 +53,7 @@ impl StackTrace {
         &self.unparsed_lines
     }
 
-    pub fn details(&self) -> &TraceDetails {
+    pub const fn details(&self) -> &TraceDetails {
         &self.details
     }
 }
@@ -118,7 +118,7 @@ pub enum TraceDetails {
 }
 
 impl TraceDetails {
-    pub fn language(&self) -> Language {
+    pub const fn language(&self) -> Language {
         match self {
             Self::Java => Language::Java,
             Self::Rust => Language::Rust,

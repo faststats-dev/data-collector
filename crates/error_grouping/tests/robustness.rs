@@ -31,13 +31,13 @@ fn generated_inputs_never_panic_and_successes_preserve_ast_invariants() {
     let mut state = 0x9e37_79b9_7f4a_7c15_u64;
     for case in 0..2_000 {
         let mut bytes = SEEDS[case % SEEDS.len()].as_bytes().to_vec();
-        let edits = next(&mut state) as usize % 24;
+        let edits = random_index(&mut state, 24);
         for _ in 0..edits {
             if bytes.is_empty() || next(&mut state).is_multiple_of(2) {
-                let index = next(&mut state) as usize % (bytes.len() + 1);
-                bytes.insert(index, next(&mut state) as u8);
+                let index = random_index(&mut state, bytes.len() + 1);
+                bytes.insert(index, next(&mut state).to_le_bytes()[0]);
             } else {
-                let index = next(&mut state) as usize % bytes.len();
+                let index = random_index(&mut state, bytes.len());
                 bytes.remove(index);
             }
         }
@@ -111,7 +111,12 @@ fn assert_trace_invariants(trace: &StackTrace) {
     assert!(matching_details);
 }
 
-fn next(state: &mut u64) -> u64 {
+fn random_index(state: &mut u64, upper_bound: usize) -> usize {
+    let upper_bound = u64::try_from(upper_bound).expect("test input length fits in u64");
+    usize::try_from(next(state) % upper_bound).expect("random index fits in usize")
+}
+
+const fn next(state: &mut u64) -> u64 {
     *state ^= *state << 13;
     *state ^= *state >> 7;
     *state ^= *state << 17;

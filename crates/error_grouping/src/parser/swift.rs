@@ -22,9 +22,9 @@ pub(super) fn parse_lines<'a>(
             if segment.error_kind.is_none() {
                 segment.error_kind = Some(kind.to_owned());
             }
-        } else if is_thread_header(line) {
+        } else if let Some(crashed) = crashed_thread(line) {
             saw_thread_headers = true;
-            in_crashed_thread = line.ends_with(" crashed:");
+            in_crashed_thread = crashed;
         } else if (!saw_thread_headers || in_crashed_thread)
             && let Some(frame) = parse_frame(line)
         {
@@ -57,8 +57,14 @@ fn crash_kind(line: &str) -> Option<&str> {
     (!reason.is_empty()).then_some(reason)
 }
 
-fn is_thread_header(line: &str) -> bool {
-    line.starts_with("Thread ") && line.ends_with(':')
+fn crashed_thread(line: &str) -> Option<bool> {
+    let header = line.strip_prefix("Thread ")?.strip_suffix(':')?;
+    Some(
+        header
+            .split_ascii_whitespace()
+            .next_back()
+            .is_some_and(|word| word.eq_ignore_ascii_case("crashed")),
+    )
 }
 
 fn parse_frame(line: &str) -> Option<StackFrame> {
@@ -70,6 +76,17 @@ fn parse_frame(line: &str) -> Option<StackFrame> {
         let (_, rest) = body.split_once("] ")?;
         body = rest;
     }
+    let mut module = None;
+    if !body.starts_with("0x")
+        && let Some(address) = body.find("0x")
+        && body[..address]
+            .chars()
+            .next_back()
+            .is_some_and(char::is_whitespace)
+    {
+        module = some(body[..address].trim());
+        body = &body[address..];
+    }
     if body.starts_with("0x") {
         let (_, rest) = body.split_once(char::is_whitespace)?;
         body = rest.trim_start();
@@ -78,19 +95,30 @@ fn parse_frame(line: &str) -> Option<StackFrame> {
     let (symbol, file) = body
         .rsplit_once(" at ")
         .map_or((body, None), |(symbol, location)| {
-            if has_source_line(location) {
+            if has_source_position(location) {
                 (symbol, Some(source_file(location)))
             } else {
                 (body, None)
             }
         });
+    let (symbol, file) = if file.is_none()
+        && let Some((symbol, location)) = symbol
+            .strip_suffix(')')
+            .and_then(|text| text.rsplit_once(" ("))
+        && has_source_position(location)
+    {
+        (symbol, Some(source_file(location)))
+    } else {
+        (symbol, file)
+    };
     let (function, module) = symbol
         .rsplit_once(" in ")
-        .map_or((symbol, None), |(function, module)| {
-            (function, some(module))
+        .map_or((symbol, module), |(function, swift_module)| {
+            (function, some(swift_module))
         });
     let function = strip_offset(function).trim();
-    let function = (function != "<unknown>").then(|| function.to_owned());
+    let function =
+        (function != "<unknown>" && !function.starts_with("0x")).then(|| function.to_owned());
 
     if function.is_none() && module.is_none() && file.is_none() {
         return None;
@@ -109,14 +137,10 @@ fn strip_offset(function: &str) -> &str {
     offset.parse::<u64>().map_or(function, |_| name)
 }
 
-fn has_source_line(location: &str) -> bool {
-    let without_column = location
+fn has_source_position(location: &str) -> bool {
+    location
         .rsplit_once(':')
-        .filter(|(_, value)| value.parse::<u32>().is_ok())
-        .map_or(location, |(path, _)| path);
-    without_column
-        .rsplit_once(':')
-        .is_some_and(|(_, line)| line.parse::<u32>().is_ok())
+        .is_some_and(|(_, position)| position.parse::<u32>().is_ok())
 }
 
 #[cfg(test)]
@@ -179,5 +203,20 @@ mod tests {
             trace.segments()[0].frames[0].file.as_deref(),
             Some("C:\\work\\main.swift")
         );
+    }
+
+    #[test]
+    fn parses_apple_crash_report_frames() {
+        let trace = Language::Swift
+            .parse_stack(
+                "Thread 0 Crashed:\n0   TouchCanvas  0x0000000102afb3d0 CanvasView.update() + 62416 (CanvasView.swift:231)\nThread 1:\n0   libsystem 0x00000001 worker + 8",
+            )
+            .unwrap();
+        let frame = &trace.segments()[0].frames[0];
+
+        assert_eq!(trace.segments()[0].frames.len(), 1);
+        assert_eq!(frame.module.as_deref(), Some("TouchCanvas"));
+        assert_eq!(frame.function.as_deref(), Some("CanvasView.update()"));
+        assert_eq!(frame.file.as_deref(), Some("CanvasView.swift"));
     }
 }

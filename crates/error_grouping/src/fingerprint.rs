@@ -460,9 +460,24 @@ fn is_runtime_frame(language: Language, frame: &StackFrame) -> bool {
         Language::Java => ["java.", "javax.", "jdk.", "sun.", "com.sun."]
             .iter()
             .any(|prefix| function.starts_with(prefix)),
-        Language::Rust => ["std::", "core::", "alloc::", "backtrace::"]
+        Language::Rust => {
+            [
+                "std::",
+                "core::",
+                "alloc::",
+                "backtrace::",
+                "rustc_demangle::",
+                "<std::",
+                "<core::",
+                "<alloc::",
+            ]
             .iter()
-            .any(|prefix| function.starts_with(prefix)),
+            .any(|prefix| function.starts_with(prefix))
+                || function == "rust_begin_unwind"
+                || function.starts_with("__rust")
+                || function.starts_with("_rust")
+                || function.contains(" as core::ops::function::")
+        }
         Language::JavaScript => {
             file.starts_with("node:internal/")
                 || file.starts_with("internal/")
@@ -819,6 +834,20 @@ mod tests {
         )
         .unwrap();
         assert_eq!(fingerprint(&first), fingerprint(&second));
+    }
+
+    #[test]
+    fn rust_runtime_entrypoints_are_noise() {
+        let noisy = Language::Rust
+            .parse_stack(
+                "stack backtrace:\n 0: __rustc::rust_begin_unwind\n 1: core::panicking::panic_fmt\n 2: <fn() as core::ops::function::FnOnce<()>>::call_once\n 3: app::main",
+            )
+            .unwrap();
+        let application = Language::Rust
+            .parse_stack("stack backtrace:\n 0: app::main")
+            .unwrap();
+
+        assert_eq!(fingerprint(&noisy), fingerprint(&application));
     }
 
     #[test]

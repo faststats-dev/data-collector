@@ -59,7 +59,11 @@ fn add_segment(
     if root {
         scopes.clear();
     } else {
-        while scopes.len() > 1 && scopes.last().is_some_and(|(level, _)| *level >= indent) {
+        while scopes.len() > 1
+            && scopes.last().is_some_and(|(level, _)| {
+                *level > indent || (*level == indent && relation != SegmentRelation::Cause)
+            })
+        {
             scopes.pop();
         }
     }
@@ -191,5 +195,15 @@ Caused by: java.lang.IllegalStateException: bad state
             .parse_stack("Caused by: java.lang.Error: bad\n at a.B.f(B.java:1)")
             .unwrap();
         assert_eq!(trace.segments()[0].relation, SegmentRelation::Root);
+    }
+
+    #[test]
+    fn successive_causes_form_a_chain() {
+        let trace = Language::Java
+            .parse_stack("Root: x\nCaused by: Middle: x\nCaused by: Bottom: x")
+            .unwrap();
+
+        assert_eq!(trace.segments()[1].parent, Some(0));
+        assert_eq!(trace.segments()[2].parent, Some(1));
     }
 }

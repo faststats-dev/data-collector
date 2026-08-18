@@ -5,8 +5,8 @@ edition.workspace = true
 build = "build.rs"
 
 [dependencies]
-regex = "1.12.2"
+regex = "1.13.1"
 
 [build-dependencies]
-serde = { version = "1.0.228", features = ["derive"] }
+serde = { version = "1.0.229", features = ["derive"] }
 serde_yaml = "0.9.34"

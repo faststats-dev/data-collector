@@ -1,4 +1,6 @@
-use error_grouping::{ParseError, ParserOptions, StackTrace, parse, parse_with_options, parser};
+use error_grouping::{
+    ParseError, ParserOptions, SegmentRelation, StackTrace, parse, parse_with_options, parser,
+};
 
 type Parser = fn(&str) -> Result<StackTrace, ParseError>;
 
@@ -58,11 +60,8 @@ fn configured_limits_fail_at_the_first_observed_violation() {
     };
 
     assert_eq!(
-        parse_with_options("a\nb\nc", &options),
-        Err(ParseError::TooManyLines {
-            actual: 3,
-            limit: 2,
-        })
+        parse_with_options("a\nb\nc\nd", &options),
+        Err(ParseError::TooManyLines { limit: 2 })
     );
     assert_eq!(
         parse_with_options("abcde", &options),
@@ -76,13 +75,7 @@ fn configured_limits_fail_at_the_first_observed_violation() {
 
 fn assert_trace_invariants(trace: &StackTrace) {
     assert!(!trace.segments().is_empty());
-    assert!(trace.segments()[0].parent.is_none());
-
-    for (index, segment) in trace.segments().iter().enumerate() {
-        if let Some(parent) = segment.parent {
-            assert!(parent < index);
-        }
-    }
+    assert_eq!(trace.segments()[0].relation, SegmentRelation::Root);
 }
 
 fn random_index(state: &mut u64, upper_bound: usize) -> usize {

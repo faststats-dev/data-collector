@@ -1,39 +1,56 @@
-use crate::ast::{Language, ParseError, SegmentRelation, StackFrame, StackTrace};
-use crate::parser::{
-    ExceptionTreeBuilder, looks_like_exception, payload, some, source_file, trim_line,
-};
+use crate::ast::{Language, ParseError, SegmentRelation, StackFrame, StackTrace, TraceSegment};
+use crate::parser::{error_kind, looks_like_exception, payload, some, source_file};
 
 crate::parser::parser_entrypoints!();
 
 fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Result<StackTrace, ParseError> {
-    let mut tree = ExceptionTreeBuilder::default();
+    let mut segments = Vec::new();
 
     for original in lines {
-        let (line, indent) = trim_line(original);
+        let line = original.trim();
         if line.is_empty() {
             continue;
         }
         if let Some(error) = exception_in_thread(line) {
-            tree.add(indent, SegmentRelation::Root, error);
+            add_segment(&mut segments, SegmentRelation::Root, error);
         } else if let Some((relation, error)) = related_error(line) {
-            tree.add(indent, relation, error);
+            add_segment(&mut segments, relation, error);
         } else if let Some(body) = payload(line, "at ") {
             if let Some(frame) = parse_frame(body) {
-                tree.current().frames.push(frame);
+                current_segment(&mut segments).frames.push(frame);
             }
-        } else if tree.segments.is_empty() && looks_like_exception(line, &['$']) {
-            tree.add(indent, SegmentRelation::Root, line);
+        } else if segments.is_empty() && looks_like_exception(line, &['$']) {
+            add_segment(&mut segments, SegmentRelation::Root, line);
         }
     }
 
-    if !tree
-        .segments
+    if !segments
         .iter()
         .any(|segment| !segment.frames.is_empty() || segment.error_kind.is_some())
     {
         return Err(ParseError::Unrecognized);
     }
-    Ok(StackTrace::new(Language::Java, tree.segments))
+    Ok(StackTrace::new(Language::Java, segments))
+}
+
+fn add_segment(segments: &mut Vec<TraceSegment>, relation: SegmentRelation, error: &str) {
+    segments.push(TraceSegment {
+        relation: if segments.is_empty() {
+            SegmentRelation::Root
+        } else {
+            relation
+        },
+        error_kind: error_kind(error),
+        ..TraceSegment::default()
+    });
+}
+
+fn current_segment(segments: &mut Vec<TraceSegment>) -> &mut TraceSegment {
+    if segments.is_empty() {
+        segments.push(TraceSegment::default());
+    }
+    let index = segments.len() - 1;
+    &mut segments[index]
 }
 
 fn related_error(line: &str) -> Option<(SegmentRelation, &str)> {
@@ -113,7 +130,7 @@ Caused by: java.lang.IllegalStateException: bad state
     }
 
     #[test]
-    fn parses_class_loader_module_and_nested_relations() {
+    fn parses_class_loader_module_and_related_errors() {
         let trace = parse(
             "java.lang.Error: root\n at loader/java.base@17/java.lang.Thread.run(Thread.java:1)\n    Suppressed: java.lang.IllegalStateException: suppressed\n        Caused by: java.io.IOException: nested\nCaused by: java.lang.RuntimeException: cause",
         )
@@ -122,15 +139,14 @@ Caused by: java.lang.IllegalStateException: bad state
         assert_eq!(frame.module.as_deref(), Some("java.base"));
         assert_eq!(frame.file.as_deref(), Some("Thread.java"));
         assert_eq!(frame.function.as_deref(), Some("java.lang.Thread.run"));
-        assert_eq!(trace.segments()[1].parent, Some(0));
-        assert_eq!(trace.segments()[2].parent, Some(1));
-        assert_eq!(trace.segments()[3].parent, Some(0));
+        assert_eq!(trace.segments()[1].relation, SegmentRelation::Suppressed);
+        assert_eq!(trace.segments()[2].relation, SegmentRelation::Cause);
+        assert_eq!(trace.segments()[3].relation, SegmentRelation::Cause);
     }
 
     #[test]
     fn caused_by_fragment_is_promoted_to_root() {
         let trace = parse("Caused by: java.lang.Error: bad\n at a.B.f(B.java:1)").unwrap();
         assert_eq!(trace.segments()[0].relation, SegmentRelation::Root);
-        assert_eq!(trace.segments()[0].parent, None);
     }
 }

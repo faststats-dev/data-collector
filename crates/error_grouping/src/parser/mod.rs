@@ -34,56 +34,7 @@ macro_rules! parser_entrypoints {
 }
 pub(crate) use parser_entrypoints;
 
-use crate::ast::{ParseError, ParserOptions, SegmentRelation, TraceSegment};
-
-#[derive(Default)]
-pub(crate) struct ExceptionTreeBuilder {
-    pub segments: Vec<TraceSegment>,
-    scopes: Vec<(usize, usize)>,
-}
-
-impl ExceptionTreeBuilder {
-    pub fn add(&mut self, indent: usize, relation: SegmentRelation, error: &str) {
-        let root = self.segments.is_empty() || relation == SegmentRelation::Root;
-        if root {
-            self.scopes.clear();
-        } else {
-            while self.scopes.len() > 1
-                && self
-                    .scopes
-                    .last()
-                    .is_some_and(|(level, _)| *level >= indent)
-            {
-                self.scopes.pop();
-            }
-        }
-        let index = self.segments.len();
-        self.segments.push(TraceSegment {
-            parent: (!root).then(|| {
-                self.scopes
-                    .last()
-                    .map(|(_, index)| *index)
-                    .expect("a related error must have a parent scope")
-            }),
-            relation: if root {
-                SegmentRelation::Root
-            } else {
-                relation
-            },
-            error_kind: error_kind(error),
-            ..TraceSegment::default()
-        });
-        self.scopes.push((indent, index));
-    }
-
-    pub fn current(&mut self) -> &mut TraceSegment {
-        if self.segments.is_empty() {
-            self.segments.push(TraceSegment::default());
-            self.scopes.push((0, 0));
-        }
-        self.segments.last_mut().expect("root segment exists")
-    }
-}
+use crate::ast::{ParseError, ParserOptions};
 
 pub(crate) fn trim_line(line: &str) -> (&str, usize) {
     let trimmed_start = line.trim_start();
@@ -137,11 +88,7 @@ impl DetectionHints<'_> {
     }
 
     pub(crate) fn looks_like_javascript(&self) -> bool {
-        let kind = self
-            .header
-            .split_once(':')
-            .map_or(self.header, |(kind, _)| kind);
-        kind.ends_with("Error") && self.javascript_frame
+        javascript::error_header_kind(self.header).is_some() && self.javascript_frame
     }
 
     pub(crate) fn looks_like_swift(&self) -> bool {
@@ -261,7 +208,6 @@ impl<'input> Iterator for CheckedLines<'input, '_> {
         let line_number = index + 1;
         if line_number > self.options.max_lines {
             self.error = Some(ParseError::TooManyLines {
-                actual: line_number,
                 limit: self.options.max_lines,
             });
             return None;
@@ -386,10 +332,7 @@ mod tests {
                 "java.lang.Error: bad\n at app.Main.run(Main.java:1)\ntrailing",
                 &options,
             ),
-            Err(ParseError::TooManyLines {
-                actual: 3,
-                limit: 2,
-            })
+            Err(ParseError::TooManyLines { limit: 2 })
         );
         assert_eq!(java::parse(" \t"), Err(ParseError::Empty));
     }

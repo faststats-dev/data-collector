@@ -26,30 +26,30 @@ impl ErrorLanguage {
         }
     }
 
-    pub fn parse(value: &str) -> Result<Self, UnsupportedLanguage> {
+    pub fn parse(value: &str) -> Option<Self> {
         let value = value.trim();
         if value.eq_ignore_ascii_case("java") {
-            Ok(Self::Java)
+            Some(Self::Java)
         } else if value.eq_ignore_ascii_case("javascript") || value.eq_ignore_ascii_case("js") {
-            Ok(Self::Javascript)
+            Some(Self::Javascript)
         } else if value.eq_ignore_ascii_case("python") || value.eq_ignore_ascii_case("py") {
-            Ok(Self::Python)
+            Some(Self::Python)
         } else if value.eq_ignore_ascii_case("php") {
-            Ok(Self::Php)
+            Some(Self::Php)
         } else if value.eq_ignore_ascii_case("go") || value.eq_ignore_ascii_case("golang") {
-            Ok(Self::Go)
+            Some(Self::Go)
         } else if value.eq_ignore_ascii_case("rust") || value.eq_ignore_ascii_case("rs") {
-            Ok(Self::Rust)
+            Some(Self::Rust)
         } else if value.eq_ignore_ascii_case("swift") {
-            Ok(Self::Swift)
+            Some(Self::Swift)
         } else {
-            Err(UnsupportedLanguage(value.to_ascii_lowercase()))
+            None
         }
     }
 
     pub fn parse_optional(value: Option<&str>) -> Result<Self, &'static str> {
         match value.map(str::trim).filter(|value| !value.is_empty()) {
-            Some(value) => Self::parse(value).map_err(|_| UNSUPPORTED_LANGUAGE_MESSAGE),
+            Some(value) => Self::parse(value).ok_or(UNSUPPORTED_LANGUAGE_MESSAGE),
             None => Ok(Self::default()),
         }
     }
@@ -60,12 +60,14 @@ impl ErrorLanguage {
             Ok(trace) => {
                 error_grouping::fingerprint_with_kind(&trace, Some(error_type)).to_string()
             }
-            Err(_) => {
-                metrics::counter!(
-                    "error_grouping_parse_failures_total",
-                    "language" => self.as_str()
-                )
-                .increment(1);
+            Err(error) => {
+                if !matches!(error, error_grouping::ParseError::Empty) {
+                    metrics::counter!(
+                        "error_grouping_parse_failures_total",
+                        "language" => self.as_str()
+                    )
+                    .increment(1);
+                }
                 error_grouping::fingerprint_error(language, error_type).to_string()
             }
         }
@@ -86,30 +88,24 @@ impl From<ErrorLanguage> for error_grouping::Language {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct UnsupportedLanguage(String);
-
 #[cfg(test)]
 mod tests {
     use super::{ErrorLanguage, UNSUPPORTED_LANGUAGE_MESSAGE};
 
     #[test]
     fn parses_supported_languages_and_aliases() {
-        assert_eq!(ErrorLanguage::parse(" java ").unwrap(), ErrorLanguage::Java);
+        assert_eq!(ErrorLanguage::parse(" java "), Some(ErrorLanguage::Java));
         assert_eq!(
-            ErrorLanguage::parse("JavaScript").unwrap(),
-            ErrorLanguage::Javascript
+            ErrorLanguage::parse("JavaScript"),
+            Some(ErrorLanguage::Javascript)
         );
-        assert_eq!(
-            ErrorLanguage::parse("js").unwrap(),
-            ErrorLanguage::Javascript
-        );
-        assert_eq!(ErrorLanguage::parse("py").unwrap(), ErrorLanguage::Python);
-        assert_eq!(ErrorLanguage::parse("PHP").unwrap(), ErrorLanguage::Php);
-        assert_eq!(ErrorLanguage::parse("golang").unwrap(), ErrorLanguage::Go);
-        assert_eq!(ErrorLanguage::parse("Rust").unwrap(), ErrorLanguage::Rust);
-        assert_eq!(ErrorLanguage::parse("rs").unwrap(), ErrorLanguage::Rust);
-        assert_eq!(ErrorLanguage::parse("Swift").unwrap(), ErrorLanguage::Swift);
+        assert_eq!(ErrorLanguage::parse("js"), Some(ErrorLanguage::Javascript));
+        assert_eq!(ErrorLanguage::parse("py"), Some(ErrorLanguage::Python));
+        assert_eq!(ErrorLanguage::parse("PHP"), Some(ErrorLanguage::Php));
+        assert_eq!(ErrorLanguage::parse("golang"), Some(ErrorLanguage::Go));
+        assert_eq!(ErrorLanguage::parse("Rust"), Some(ErrorLanguage::Rust));
+        assert_eq!(ErrorLanguage::parse("rs"), Some(ErrorLanguage::Rust));
+        assert_eq!(ErrorLanguage::parse("Swift"), Some(ErrorLanguage::Swift));
     }
 
     #[test]
@@ -137,9 +133,7 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_languages() {
-        let error = ErrorLanguage::parse(" RUBY ").unwrap_err();
-
-        assert_eq!(error.0, "ruby");
+        assert_eq!(ErrorLanguage::parse(" RUBY "), None);
         assert_eq!(
             ErrorLanguage::parse_optional(Some("ruby")).unwrap_err(),
             UNSUPPORTED_LANGUAGE_MESSAGE

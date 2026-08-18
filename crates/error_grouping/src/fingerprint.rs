@@ -117,7 +117,6 @@ pub fn fingerprint_with_kind_and_options(
         let segment = &trace.segments()[index];
         canonical.byte(0x10);
         canonical.byte(relation_tag(segment.relation));
-        canonical.optional_usize(segment.parent);
         let segment_kind = if index == 0 && has_authoritative_kind {
             None
         } else {
@@ -491,16 +490,6 @@ impl Canonical {
         }
     }
 
-    fn optional_usize(&mut self, value: Option<usize>) {
-        match value {
-            Some(value) => {
-                self.byte(1);
-                self.0.update((value as u64).to_be_bytes());
-            }
-            None => self.byte(0),
-        }
-    }
-
     fn finish(self) -> [u8; 32] {
         self.0.finalize().into()
     }
@@ -677,6 +666,27 @@ mod tests {
     }
 
     #[test]
+    fn segment_limit_ignores_the_number_of_omitted_segments() {
+        let short = parser::java::parse(
+            "Root: x\nat app.Root.run(Root.java:1)\n    Suppressed: Omitted: x\n    Caused by: Terminal: x\n    at app.Terminal.run(Terminal.java:1)",
+        )
+        .unwrap();
+        let long = parser::java::parse(
+            "Root: x\nat app.Root.run(Root.java:1)\n    Suppressed: Omitted: x\n    Caused by: AlsoOmitted: x\n    Caused by: Terminal: x\n    at app.Terminal.run(Terminal.java:1)",
+        )
+        .unwrap();
+        let options = FingerprintOptions {
+            max_segments: 2,
+            ..FingerprintOptions::default()
+        };
+
+        assert_eq!(
+            fingerprint_with_options(&short, &options),
+            fingerprint_with_options(&long, &options)
+        );
+    }
+
+    #[test]
     fn php_identity_is_case_insensitive_and_ids_are_versioned() {
         let upper = parser::php::parse("#0 /APP/src/User.php(1): APP\\USER->RUN()").unwrap();
         let lower = parser::php::parse("#0 /app/src/user.php(9): app\\user->run()").unwrap();
@@ -692,7 +702,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             fingerprint_with_kind(&trace, Some("RootError")).to_string(),
-            "eg1_2838de7bcd3cb8d9af49266be76376ce6a71894076510f08efbde08b95cb73da"
+            "eg1_5b1ba84a9ba0a95e7975cbf43d53b0fba3f24644e39bcb3497f392f572876e6c"
         );
     }
 

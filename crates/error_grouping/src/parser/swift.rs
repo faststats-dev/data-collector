@@ -42,9 +42,13 @@ fn runtime_failure_kind(line: &str) -> Option<&str> {
     if line.starts_with("Swift runtime failure:") {
         return Some("Swift runtime failure");
     }
-    ["Fatal error", "Precondition failed", "Assertion failed"]
-        .into_iter()
-        .find(|kind| line.contains(&format!(": {kind}:")))
+    [
+        ("Fatal error", ": Fatal error:"),
+        ("Precondition failed", ": Precondition failed:"),
+        ("Assertion failed", ": Assertion failed:"),
+    ]
+    .into_iter()
+    .find_map(|(kind, marker)| line.contains(marker).then_some(kind))
 }
 
 fn crash_kind(line: &str) -> Option<&str> {

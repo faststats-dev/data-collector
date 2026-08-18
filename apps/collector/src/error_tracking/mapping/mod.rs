@@ -106,14 +106,7 @@ impl MappingResolver {
         if build_id.is_empty() || stacktrace.is_empty() {
             return None;
         }
-        if matches!(
-            language,
-            ErrorLanguage::Python
-                | ErrorLanguage::Php
-                | ErrorLanguage::Go
-                | ErrorLanguage::Rust
-                | ErrorLanguage::Swift
-        ) {
+        if !matches!(language, ErrorLanguage::Java | ErrorLanguage::Javascript) {
             return None;
         }
 
@@ -121,21 +114,15 @@ impl MappingResolver {
             return None;
         }
 
-        let (stacktrace, mapper) = match language {
-            ErrorLanguage::Java => {
-                let mapping = self.load_proguard_mapping(project_id, build_id).await?;
-                let mapped = mapping.retrace(stacktrace);
-                (mapped != stacktrace).then_some((mapped, "r8"))?
-            }
-            ErrorLanguage::Javascript => (
+        let (stacktrace, mapper) = if language == ErrorLanguage::Java {
+            let mapping = self.load_proguard_mapping(project_id, build_id).await?;
+            let mapped = mapping.retrace(stacktrace);
+            (mapped != stacktrace).then_some((mapped, "r8"))?
+        } else {
+            (
                 sourcemap::apply(self, project_id, build_id, stacktrace).await?,
                 "javascript",
-            ),
-            ErrorLanguage::Python
-            | ErrorLanguage::Php
-            | ErrorLanguage::Go
-            | ErrorLanguage::Rust
-            | ErrorLanguage::Swift => return None,
+            )
         };
 
         Some(MappedStacktrace {

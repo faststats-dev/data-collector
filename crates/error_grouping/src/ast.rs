@@ -41,8 +41,6 @@ impl StackTrace {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct TraceSegment {
-    /// Index of the segment that owns this related error. Roots have no parent.
-    pub parent: Option<usize>,
     pub relation: SegmentRelation,
     /// Runtime error class or category (`java.lang.Exception`, `TypeError`, `panic`).
     pub error_kind: Option<String>,
@@ -94,7 +92,6 @@ pub enum ParseError {
         limit: usize,
     },
     TooManyLines {
-        actual: usize,
         limit: usize,
     },
     LineTooLong {
@@ -112,8 +109,8 @@ impl fmt::Display for ParseError {
             Self::InputTooLarge { actual, limit } => {
                 write!(f, "input is {actual} bytes; limit is {limit}")
             }
-            Self::TooManyLines { actual, limit } => {
-                write!(f, "input has {actual} lines; limit is {limit}")
+            Self::TooManyLines { limit } => {
+                write!(f, "input exceeds the limit of {limit} lines")
             }
             Self::LineTooLong {
                 line,

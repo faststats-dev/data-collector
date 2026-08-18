@@ -1,5 +1,5 @@
 use crate::ast::{Language, ParseError, StackFrame, StackTrace, TraceSegment};
-use crate::parser::{error_kind, payload, some, source_file};
+use crate::parser::{payload, some, source_file};
 
 crate::parser::parser_entrypoints!();
 
@@ -12,8 +12,8 @@ fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Result<StackTrace, P
         if line.is_empty() {
             continue;
         }
-        if !saw_content && is_error_header(line) {
-            segment.error_kind = error_kind(line);
+        if !saw_content && let Some(kind) = error_header_kind(line) {
+            segment.error_kind = some(kind);
         } else if let Some(body) = payload(line, "at ") {
             segment.frames.push(parse_frame(body));
         } else if let Some(frame) = parse_spidermonkey_frame(line) {
@@ -27,10 +27,10 @@ fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Result<StackTrace, P
     Ok(StackTrace::new(Language::JavaScript, vec![segment]))
 }
 
-fn is_error_header(line: &str) -> bool {
-    line.split_once(':')
-        .map_or(line, |(kind, _)| kind)
-        .ends_with("Error")
+pub(crate) fn error_header_kind(line: &str) -> Option<&str> {
+    let kind = line.split_once(':').map_or(line, |(kind, _)| kind).trim();
+    let class = kind.split_ascii_whitespace().next()?;
+    class.ends_with("Error").then_some(kind)
 }
 
 fn parse_spidermonkey_frame(line: &str) -> Option<StackFrame> {
@@ -136,5 +136,16 @@ mod tests {
     fn parses_an_empty_error_message() {
         let trace = parse("TypeError:\n at run (app.js:1:2)").unwrap();
         assert_eq!(trace.segments()[0].error_kind.as_deref(), Some("TypeError"));
+    }
+
+    #[test]
+    fn preserves_node_error_codes_in_headers() {
+        let trace =
+            parse("TypeError [ERR_INVALID_ARG_TYPE]: bad\n at run (/app/main.js:1:2)").unwrap();
+
+        assert_eq!(
+            trace.segments()[0].error_kind.as_deref(),
+            Some("TypeError [ERR_INVALID_ARG_TYPE]")
+        );
     }
 }

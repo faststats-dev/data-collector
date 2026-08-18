@@ -97,7 +97,9 @@ mod tests {
             Language::Java
         );
         assert_eq!(
-            parse("Error: x\n at run (app.js:1:2)").unwrap().language(),
+            parse("TypeError [ERR_INVALID_ARG_TYPE]: x\n at run (app.js:1:2)")
+                .unwrap()
+                .language(),
             Language::JavaScript
         );
         assert_eq!(

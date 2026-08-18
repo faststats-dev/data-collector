@@ -1,18 +1,11 @@
-use crate::ast::{
-    FrameDetails, ParseError, ParserOptions, PythonFrameDetails, SegmentRelation, SourceLocation,
-    StackFrame, StackTrace, TraceDetails, TraceSegment,
-};
-use crate::parser::{UnparsedLines, error_parts, looks_like_exception, some, trim_line};
+use crate::ast::{Language, ParseError, SegmentRelation, StackFrame, StackTrace, TraceSegment};
+use crate::parser::{error_kind, looks_like_exception, some, trim_line};
 
 crate::parser::parser_entrypoints!();
 
-fn parse_lines<'a>(
-    lines: impl Iterator<Item = &'a str>,
-    options: &ParserOptions,
-) -> Result<StackTrace, ParseError> {
+fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Result<StackTrace, ParseError> {
     let mut segments = Vec::new();
     let mut current = None;
-    let mut unparsed_lines = UnparsedLines::new(options);
     let mut expect_context = false;
     let mut saw_traceback = false;
 
@@ -39,22 +32,11 @@ fn parse_lines<'a>(
                 .push(frame);
             expect_context = true;
         } else if expect_context && indent > 0 {
-            if let Some(FrameDetails::Python(details)) = current
-                .as_mut()
-                .and_then(|segment| segment.frames.last_mut())
-                .map(|frame| &mut frame.details)
-            {
-                details.code_context = some(line);
-            }
             expect_context = false;
         } else if indent == 0 && looks_like_exception(line, &[]) {
-            let (kind, message) = error_parts(line);
             let segment = current.get_or_insert_with(TraceSegment::default);
-            segment.error.kind = kind;
-            segment.error.message = message;
+            segment.error_kind = error_kind(line);
             expect_context = false;
-        } else {
-            unparsed_lines.push(original);
         }
     }
     finish_segment(&mut segments, &mut current);
@@ -71,12 +53,12 @@ fn parse_lines<'a>(
             segment.parent = index.checked_sub(1);
         }
     }
-    Ok(unparsed_lines.finish_trace(TraceDetails::Python, segments))
+    Ok(StackTrace::new(Language::Python, segments))
 }
 
 fn finish_segment(segments: &mut Vec<TraceSegment>, current: &mut Option<TraceSegment>) {
     if let Some(segment) = current.take()
-        && (!segment.frames.is_empty() || segment.error.kind.is_some())
+        && (!segment.frames.is_empty() || segment.error_kind.is_some())
     {
         segments.push(segment);
     }
@@ -104,16 +86,11 @@ fn parse_frame(line: &str) -> Option<StackFrame> {
     let (line, function) = rest
         .split_once(", in ")
         .map_or((rest, None), |(line, function)| (line, some(function)));
-    let line = line.parse().ok()?;
+    line.parse::<u32>().ok()?;
     Some(StackFrame {
         function,
         module: None,
-        location: Some(SourceLocation {
-            file: file.to_owned(),
-            line: Some(line),
-            column: None,
-        }),
-        details: FrameDetails::Python(PythonFrameDetails::default()),
+        file: Some(file.to_owned()),
     })
 }
 
@@ -129,14 +106,14 @@ mod tests {
         .unwrap();
         assert_eq!(trace.segments().len(), 2);
         assert_eq!(
-            trace.segments()[0].error.kind.as_deref(),
+            trace.segments()[0].error_kind.as_deref(),
             Some("RuntimeError")
         );
         assert_eq!(trace.segments()[1].relation, SegmentRelation::Cause);
-        let FrameDetails::Python(details) = &trace.segments()[1].frames[0].details else {
-            panic!()
-        };
-        assert_eq!(details.code_context.as_deref(), Some("int('x')"));
+        assert_eq!(
+            trace.segments()[1].frames[0].function.as_deref(),
+            Some("load")
+        );
     }
 
     #[test]
@@ -148,9 +125,8 @@ mod tests {
         assert_eq!(trace.segments()[1].relation, SegmentRelation::Context);
         assert_eq!(trace.segments()[1].parent, Some(0));
         assert_eq!(
-            trace.segments()[1].error.kind.as_deref(),
+            trace.segments()[1].error_kind.as_deref(),
             Some("ValueError")
         );
-        assert_eq!(trace.segments()[1].error.message, None);
     }
 }

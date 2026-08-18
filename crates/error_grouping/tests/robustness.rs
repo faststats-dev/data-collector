@@ -1,7 +1,4 @@
-use error_grouping::{
-    FrameDetails, Language, ParseError, ParserOptions, StackTrace, TraceDetails, parse,
-    parse_with_options, parser,
-};
+use error_grouping::{ParseError, ParserOptions, StackTrace, parse, parse_with_options, parser};
 
 type Parser = fn(&str) -> Result<StackTrace, ParseError>;
 
@@ -56,7 +53,6 @@ fn configured_limits_fail_at_the_first_observed_violation() {
         max_input_bytes: 1_024,
         max_lines: 2,
         max_line_bytes: 4,
-        retain_unparsed_lines: false,
     };
 
     assert_eq!(
@@ -78,37 +74,13 @@ fn configured_limits_fail_at_the_first_observed_violation() {
 
 fn assert_trace_invariants(trace: &StackTrace) {
     assert!(!trace.segments().is_empty());
-    assert_eq!(trace.language(), trace.details().language());
     assert!(trace.segments()[0].parent.is_none());
 
     for (index, segment) in trace.segments().iter().enumerate() {
         if let Some(parent) = segment.parent {
             assert!(parent < index);
         }
-        for frame in &segment.frames {
-            let matching_details = matches!(
-                (trace.language(), &frame.details),
-                (Language::Java, FrameDetails::Java(_))
-                    | (Language::Rust, FrameDetails::Rust(_))
-                    | (Language::JavaScript, FrameDetails::JavaScript(_))
-                    | (Language::Python, FrameDetails::Python(_))
-                    | (Language::Php, FrameDetails::Php(_))
-                    | (Language::Go, FrameDetails::Go(_))
-            );
-            assert!(matching_details);
-        }
     }
-
-    let matching_details = matches!(
-        (trace.language(), trace.details()),
-        (Language::Java, TraceDetails::Java)
-            | (Language::Rust, TraceDetails::Rust)
-            | (Language::JavaScript, TraceDetails::JavaScript(_))
-            | (Language::Python, TraceDetails::Python)
-            | (Language::Php, TraceDetails::Php)
-            | (Language::Go, TraceDetails::Go(_))
-    );
-    assert!(matching_details);
 }
 
 fn random_index(state: &mut u64, upper_bound: usize) -> usize {

@@ -1,6 +1,6 @@
 use std::{hint::black_box, time::Instant};
 
-use error_grouping::{ParserOptions, fingerprint, parse, parser};
+use error_grouping::{fingerprint, parse, parser};
 
 const JAVA: &str = "java.lang.RuntimeException: boom\n    at app.Main.run(Main.java:42)\nCaused by: java.lang.IllegalStateException: bad\n    at app.Work.go(Work.java:7)\n    ... 2 more";
 const JAVA_NESTED: &str = "java.lang.Error: root\n    at loader/java.base@17/java.lang.Thread.run(Thread.java:1)\n    Suppressed: java.lang.IllegalStateException: suppressed\n        at app.Work.close(Work.java:8)\n        Caused by: java.io.IOException: nested\n            at app.IO.fail(IO.java:9)\nCaused by: java.lang.RuntimeException: cause\n    at app.Main.run(Main.java:42)";
@@ -40,13 +40,6 @@ fn main() {
     });
 
     let noisy_java = noisy_java_trace(128);
-    let retained_options = ParserOptions {
-        retain_unparsed_lines: true,
-        ..ParserOptions::default()
-    };
-    bench("java/noise-retained", &noisy_java, || {
-        parser::java::parse_with_options(black_box(&noisy_java), &retained_options)
-    });
     bench("java/noise-discarded", &noisy_java, || {
         parser::java::parse(black_box(&noisy_java))
     });

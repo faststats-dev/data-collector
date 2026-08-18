@@ -19,24 +19,21 @@ macro_rules! parser_entrypoints {
             options: &$crate::ParserOptions,
         ) -> Result<$crate::StackTrace, $crate::ParseError> {
             let mut lines = $crate::parser::CheckedLines::new(input, options)?;
-            let result = parse_lines(&mut lines, options);
+            let result = parse_lines(&mut lines);
             lines.finish()?;
             result
         }
 
         pub(crate) fn parse_validated(
             input: &str,
-            options: &$crate::ParserOptions,
         ) -> Result<$crate::StackTrace, $crate::ParseError> {
-            parse_lines(input.lines(), options)
+            parse_lines(input.lines())
         }
     };
 }
 pub(crate) use parser_entrypoints;
 
-use crate::ast::{
-    ErrorInfo, ParseError, ParserOptions, SegmentRelation, SourceLocation, TraceSegment,
-};
+use crate::ast::{ParseError, ParserOptions, SegmentRelation, TraceSegment};
 
 #[derive(Default)]
 pub(crate) struct ExceptionTreeBuilder {
@@ -45,13 +42,7 @@ pub(crate) struct ExceptionTreeBuilder {
 }
 
 impl ExceptionTreeBuilder {
-    pub fn add(
-        &mut self,
-        indent: usize,
-        relation: SegmentRelation,
-        error: &str,
-        thread: Option<String>,
-    ) {
+    pub fn add(&mut self, indent: usize, relation: SegmentRelation, error: &str) {
         let root = self.segments.is_empty() || relation == SegmentRelation::Root;
         if root {
             self.scopes.clear();
@@ -66,7 +57,6 @@ impl ExceptionTreeBuilder {
             }
         }
         let index = self.segments.len();
-        let (kind, message) = error_parts(error);
         self.segments.push(TraceSegment {
             parent: (!root).then(|| {
                 self.scopes
@@ -79,12 +69,7 @@ impl ExceptionTreeBuilder {
             } else {
                 relation
             },
-            error: ErrorInfo {
-                kind,
-                message,
-                thread,
-                location: None,
-            },
+            error_kind: error_kind(error),
             ..TraceSegment::default()
         });
         self.scopes.push((indent, index));
@@ -298,38 +283,6 @@ fn looks_like_java_frame(line: &str) -> bool {
             || source.contains(".java:"))
 }
 
-pub(crate) struct UnparsedLines<'a> {
-    lines: Option<Vec<&'a str>>,
-}
-
-impl<'a> UnparsedLines<'a> {
-    pub(crate) fn new(options: &ParserOptions) -> Self {
-        Self {
-            lines: options.retain_unparsed_lines.then(Vec::new),
-        }
-    }
-
-    pub(crate) fn push(&mut self, line: &'a str) {
-        if let Some(lines) = &mut self.lines {
-            lines.push(line);
-        }
-    }
-
-    pub(crate) fn finish_trace(
-        self,
-        details: crate::TraceDetails,
-        segments: Vec<TraceSegment>,
-    ) -> crate::StackTrace {
-        let lines = self
-            .lines
-            .unwrap_or_default()
-            .into_iter()
-            .map(str::to_owned)
-            .collect();
-        crate::StackTrace::new(details, segments, lines)
-    }
-}
-
 pub(crate) fn looks_like_exception(line: &str, extra_kind_chars: &[char]) -> bool {
     let kind = line.split_once(':').map_or(line, |(kind, _)| kind);
     !kind.is_empty()
@@ -346,23 +299,11 @@ pub(crate) fn payload<'a>(line: &'a str, prefix: &'static str) -> Option<&'a str
         .filter(|payload| !payload.is_empty())
 }
 
-pub(crate) fn split_location(text: &str) -> SourceLocation {
+pub(crate) fn source_file(text: &str) -> String {
     let text = text.trim();
-    let (before_column, column) = take_numeric_suffix(text);
-    let (file, line) = take_numeric_suffix(before_column);
-    if line.is_some() {
-        SourceLocation {
-            file: file.to_owned(),
-            line,
-            column,
-        }
-    } else {
-        SourceLocation {
-            file: before_column.to_owned(),
-            line: column,
-            column: None,
-        }
-    }
+    let (before_last_number, _) = take_numeric_suffix(text);
+    let (before_line, line) = take_numeric_suffix(before_last_number);
+    line.map_or(before_last_number, |_| before_line).to_owned()
 }
 
 fn take_numeric_suffix(text: &str) -> (&str, Option<u32>) {
@@ -373,12 +314,9 @@ fn take_numeric_suffix(text: &str) -> (&str, Option<u32>) {
         .map_or((text, None), |value| (head, Some(value)))
 }
 
-pub(crate) fn error_parts(text: &str) -> (Option<String>, Option<String>) {
+pub(crate) fn error_kind(text: &str) -> Option<String> {
     let text = text.trim();
-    match text.split_once(':') {
-        Some((kind, message)) => (some(kind.trim()), some(message.trim_start())),
-        None => (some(text), None),
-    }
+    some(text.split_once(':').map_or(text, |(kind, _)| kind).trim())
 }
 
 pub(crate) fn some(value: &str) -> Option<String> {
@@ -392,25 +330,11 @@ mod tests {
     #[test]
     fn parses_locations_without_confusing_url_or_windows_colons() {
         assert_eq!(
-            split_location("https://host:8080/app.js:12:7"),
-            SourceLocation {
-                file: "https://host:8080/app.js".to_owned(),
-                line: Some(12),
-                column: Some(7),
-            }
+            source_file("https://host:8080/app.js:12:7"),
+            "https://host:8080/app.js"
         );
-        assert_eq!(
-            split_location(r"C:\work\app.js:9:2").file,
-            r"C:\work\app.js"
-        );
-        assert_eq!(
-            split_location("Main.java:42"),
-            SourceLocation {
-                file: "Main.java".to_owned(),
-                line: Some(42),
-                column: None,
-            }
-        );
+        assert_eq!(source_file(r"C:\work\app.js:9:2"), r"C:\work\app.js");
+        assert_eq!(source_file("Main.java:42"), "Main.java");
     }
 
     #[test]
@@ -419,7 +343,6 @@ mod tests {
             max_input_bytes: 8,
             max_lines: 1,
             max_line_bytes: 3,
-            retain_unparsed_lines: false,
         };
         assert!(matches!(
             CheckedLines::new("         ", &options).and_then(CheckedLines::finish),
@@ -445,7 +368,6 @@ mod tests {
             max_input_bytes: 1_024,
             max_lines: 2,
             max_line_bytes: 1_024,
-            retain_unparsed_lines: false,
         };
         assert_eq!(
             java::parse_with_options(
@@ -458,10 +380,5 @@ mod tests {
             })
         );
         assert_eq!(java::parse(" \t"), Err(ParseError::Empty));
-    }
-
-    #[test]
-    fn diagnostics_default_to_off() {
-        assert!(!ParserOptions::default().retain_unparsed_lines);
     }
 }

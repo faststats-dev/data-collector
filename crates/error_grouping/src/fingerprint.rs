@@ -121,7 +121,7 @@ pub fn fingerprint_with_kind_and_options(
         let segment_kind = if index == 0 && has_authoritative_kind {
             None
         } else {
-            normalized_kind(trace.language(), segment.error.kind.as_deref())
+            normalized_kind(trace.language(), segment.error_kind.as_deref())
         };
         canonical.optional_text(segment_kind.as_deref());
 
@@ -246,9 +246,9 @@ fn frame_identity(language: Language, frame: &StackFrame) -> FrameIdentity<'_> {
         .filter(|value| !value.is_empty())
         .map(|value| normalize_case(language, value));
     let file = frame
-        .location
-        .as_ref()
-        .and_then(|location| normalized_file(language, &location.file));
+        .file
+        .as_deref()
+        .and_then(|file| normalized_file(language, file));
     FrameIdentity {
         function,
         module,
@@ -417,10 +417,7 @@ fn is_asset_hash(value: &str) -> bool {
 
 fn is_runtime_frame(language: Language, frame: &StackFrame) -> bool {
     let function = frame.function.as_deref().unwrap_or("");
-    let file = frame
-        .location
-        .as_ref()
-        .map_or("", |location| location.file.as_str());
+    let file = frame.file.as_deref().unwrap_or("");
     match language {
         Language::Java => ["java.", "javax.", "jdk.", "sun.", "com.sun."]
             .iter()

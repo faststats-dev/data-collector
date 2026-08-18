@@ -19,10 +19,7 @@ pub mod fingerprint;
 pub mod parser;
 
 pub use ast::{
-    ErrorInfo, FrameDetails, GoFrameDetails, GoTraceDetails, JavaFrameDetails,
-    JavaScriptFrameDetails, JavaScriptStackFormat, Language, ParseError, ParserOptions,
-    PhpCallType, PhpFrameDetails, PythonFrameDetails, RustFrameDetails, SegmentRelation,
-    SourceLocation, StackFrame, StackTrace, TraceDetails, TraceSegment,
+    Language, ParseError, ParserOptions, SegmentRelation, StackFrame, StackTrace, TraceSegment,
 };
 pub use fingerprint::{
     FINGERPRINT_VERSION, Fingerprint, FingerprintOptions, fingerprint, fingerprint_error,
@@ -37,32 +34,32 @@ pub fn parse(input: &str) -> Result<StackTrace, ParseError> {
 pub fn parse_with_options(input: &str, options: &ParserOptions) -> Result<StackTrace, ParseError> {
     let hints = parser::validate_and_detect(input, options)?;
     if hints.looks_like_python()
-        && let Ok(trace) = parser::python::parse_validated(input, options)
+        && let Ok(trace) = parser::python::parse_validated(input)
     {
         return Ok(trace);
     }
     if hints.looks_like_go()
-        && let Ok(trace) = parser::go::parse_validated(input, options)
+        && let Ok(trace) = parser::go::parse_validated(input)
     {
         return Ok(trace);
     }
     if hints.looks_like_java()
-        && let Ok(trace) = parser::java::parse_validated(input, options)
+        && let Ok(trace) = parser::java::parse_validated(input)
     {
         return Ok(trace);
     }
     if hints.looks_like_php()
-        && let Ok(trace) = parser::php::parse_validated(input, options)
+        && let Ok(trace) = parser::php::parse_validated(input)
     {
         return Ok(trace);
     }
     if hints.looks_like_rust()
-        && let Ok(trace) = parser::rust::parse_validated(input, options)
+        && let Ok(trace) = parser::rust::parse_validated(input)
     {
         return Ok(trace);
     }
     if hints.looks_like_javascript()
-        && let Ok(trace) = parser::javascript::parse_validated(input, options)
+        && let Ok(trace) = parser::javascript::parse_validated(input)
     {
         return Ok(trace);
     }
@@ -152,7 +149,7 @@ mod tests {
         let trace = parse("MyException: bad\n at Main.run(Main.java:1)").unwrap();
         assert_eq!(trace.language(), Language::Java);
         assert_eq!(
-            trace.segments()[0].error.kind.as_deref(),
+            trace.segments()[0].error_kind.as_deref(),
             Some("MyException")
         );
     }

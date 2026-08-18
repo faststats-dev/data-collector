@@ -1,9 +1,9 @@
-use crate::ast::{Language, ParseError, SegmentRelation, StackFrame, StackTrace, TraceSegment};
 use crate::parser::{error_kind, looks_like_exception, some, trim_line};
+use crate::{Language, ParseError, SegmentRelation, StackFrame, StackTrace, TraceSegment};
 
-crate::parser::parser_entrypoints!();
-
-fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Result<StackTrace, ParseError> {
+pub(super) fn parse_lines<'a>(
+    lines: impl Iterator<Item = &'a str>,
+) -> Result<StackTrace, ParseError> {
     let mut segments = Vec::new();
     let mut current = None;
     let mut expect_context = false;
@@ -101,7 +101,7 @@ mod tests {
 
     #[test]
     fn parses_frames_context_and_chained_exceptions() {
-        let trace = parse(
+        let trace = Language::Python.parse_stack(
             "Traceback (most recent call last):\n  File \"/app.py\", line 3, in load\n    int('x')\nValueError: invalid\n\nThe above exception was the direct cause of the following exception:\n\nTraceback (most recent call last):\n  File \"/app.py\", line 8, in main\n    load()\nRuntimeError: failed",
         )
         .unwrap();
@@ -119,7 +119,7 @@ mod tests {
 
     #[test]
     fn preserves_implicit_context_and_empty_messages() {
-        let trace = parse(
+        let trace = Language::Python.parse_stack(
             "Traceback (most recent call last):\n  File \"a.py\", line 1, in first\nValueError:\n\nDuring handling of the above exception, another exception occurred:\n\nTraceback (most recent call last):\n  File \"a.py\", line 2, in second\nRuntimeError: failed",
         )
         .unwrap();

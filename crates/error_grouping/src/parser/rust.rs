@@ -1,9 +1,9 @@
-use crate::ast::{Language, ParseError, StackFrame, StackTrace, TraceSegment};
 use crate::parser::{payload, some, source_file};
+use crate::{Language, ParseError, StackFrame, StackTrace, TraceSegment};
 
-crate::parser::parser_entrypoints!();
-
-fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Result<StackTrace, ParseError> {
+pub(super) fn parse_lines<'a>(
+    lines: impl Iterator<Item = &'a str>,
+) -> Result<StackTrace, ParseError> {
     let mut segment = TraceSegment {
         error_kind: Some("panic".to_owned()),
         ..TraceSegment::default()
@@ -85,7 +85,7 @@ mod tests {
 
     #[test]
     fn parses_modern_panic_and_backtrace() {
-        let trace = parse("thread 'main' panicked at src/main.rs:12:5:\nindex out of bounds\nstack backtrace:\n   0: 0xabc - demo::run\n             at ./src/main.rs:12:5\n   1: std::rt::lang_start").unwrap();
+        let trace = Language::Rust.parse_stack("thread 'main' panicked at src/main.rs:12:5:\nindex out of bounds\nstack backtrace:\n   0: 0xabc - demo::run\n             at ./src/main.rs:12:5\n   1: std::rt::lang_start").unwrap();
         let root = &trace.segments()[0];
         assert_eq!(root.error_kind.as_deref(), Some("panic"));
         assert_eq!(root.frames[0].function.as_deref(), Some("demo::run"));
@@ -94,7 +94,7 @@ mod tests {
 
     #[test]
     fn parses_legacy_inline_panic_message() {
-        let trace = parse(
+        let trace = Language::Rust.parse_stack(
             "thread 'worker' panicked at 'boom', lib.rs:3:9\nstack backtrace:\n  0: crate::work",
         )
         .unwrap();
@@ -103,13 +103,14 @@ mod tests {
 
     #[test]
     fn oversized_frame_indices_do_not_overflow() {
-        let result = parse("stack backtrace:\n 999999999999999999999: crate::work");
+        let result =
+            Language::Rust.parse_stack("stack backtrace:\n 999999999999999999999: crate::work");
         assert_eq!(result, Err(ParseError::Unrecognized));
     }
 
     #[test]
     fn ignores_anyhow_numbered_messages_but_keeps_backtrace_frames() {
-        let trace = parse(
+        let trace = Language::Rust.parse_stack(
             "Caused by:\n  0: request 123 failed for user abc\n  1: app::Error for user 123\n\nStack backtrace:\n  0: my_app::client::send",
         )
         .unwrap();
@@ -122,7 +123,7 @@ mod tests {
 
     #[test]
     fn rejects_anyhow_cause_messages_without_a_backtrace() {
-        let result = parse("Caused by:\n  0: app::Error for user 123");
+        let result = Language::Rust.parse_stack("Caused by:\n  0: app::Error for user 123");
 
         assert_eq!(result, Err(ParseError::Unrecognized));
     }

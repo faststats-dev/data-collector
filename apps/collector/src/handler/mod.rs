@@ -778,7 +778,7 @@ async fn process_web_request(
             let occurrence = crate::error_tracking::v3::build_occurrence(
                 crate::error_tracking::v3::OccurrenceInput {
                     project_id: ctx.project_id,
-                    language: crate::error_tracking::ErrorLanguage::Javascript,
+                    language: crate::error_tracking::ErrorLanguage::JavaScript,
                     // The browser SDK sends this as `buildId`; Tinybird stores it as `release`.
                     release: parsed.build_id.as_deref(),
                     identifier: Some(&fallback_identity),
@@ -793,7 +793,7 @@ async fn process_web_request(
             insert_error_occurrence_v3(
                 batch_queue,
                 occurrence,
-                crate::error_tracking::ErrorLanguage::Javascript,
+                crate::error_tracking::ErrorLanguage::JavaScript,
                 Some(tracking_ctx.clone()),
             )
             .map_err(|_| "Failed to queue error occurrence".to_string())?;

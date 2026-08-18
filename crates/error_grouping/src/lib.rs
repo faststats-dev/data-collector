@@ -3,12 +3,10 @@
 //! The caller supplies the authoritative runtime [`Language`].
 //!
 //! ```
-//! use error_grouping::{parse_language, Language};
+//! use error_grouping::Language;
 //!
-//! let trace = parse_language(
-//!     Language::JavaScript,
-//!     "TypeError: bad value\n    at load (/app/main.js:8:2)",
-//! )?;
+//! let trace = Language::JavaScript
+//!     .parse_stack("TypeError: bad value\n    at load (/app/main.js:8:2)")?;
 //! assert_eq!(trace.language(), Language::JavaScript);
 //! assert_eq!(trace.segments()[0].frames[0].function.as_deref(), Some("load"));
 //! # Ok::<(), error_grouping::ParseError>(())
@@ -18,37 +16,15 @@
 
 mod ast;
 pub mod fingerprint;
+mod language;
 mod parser;
 
-pub use ast::{
-    Language, ParseError, ParserOptions, SegmentRelation, StackFrame, StackTrace, TraceSegment,
-};
+pub use ast::{ParseError, ParserOptions, SegmentRelation, StackFrame, StackTrace, TraceSegment};
 pub use fingerprint::{
     FINGERPRINT_VERSION, Fingerprint, FingerprintOptions, fingerprint, fingerprint_error,
     fingerprint_with_kind, fingerprint_with_kind_and_options, fingerprint_with_options,
 };
-
-/// Parse a stack trace for its authoritative runtime language.
-pub fn parse_language(language: Language, input: &str) -> Result<StackTrace, ParseError> {
-    parse_language_with_options(language, input, &ParserOptions::default())
-}
-
-/// Parse a stack trace with explicit resource limits.
-pub fn parse_language_with_options(
-    language: Language,
-    input: &str,
-    options: &ParserOptions,
-) -> Result<StackTrace, ParseError> {
-    match language {
-        Language::Java => parser::java::parse_with_options(input, options),
-        Language::Rust => parser::rust::parse_with_options(input, options),
-        Language::JavaScript => parser::javascript::parse_with_options(input, options),
-        Language::Python => parser::python::parse_with_options(input, options),
-        Language::Php => parser::php::parse_with_options(input, options),
-        Language::Go => parser::go::parse_with_options(input, options),
-        Language::Swift => parser::swift::parse_with_options(input, options),
-    }
-}
+pub use language::{Language, UnsupportedLanguage};
 
 #[cfg(test)]
 mod tests {
@@ -79,10 +55,7 @@ mod tests {
         ];
 
         for (language, input) in cases {
-            assert_eq!(
-                parse_language(language, input).unwrap().language(),
-                language
-            );
+            assert_eq!(language.parse_stack(input).unwrap().language(), language);
         }
     }
 
@@ -93,7 +66,7 @@ mod tests {
             ..ParserOptions::default()
         };
         assert!(matches!(
-            parse_language_with_options(Language::JavaScript, "Error: x", &options),
+            Language::JavaScript.parse_stack_with_options("Error: x", &options),
             Err(ParseError::InputTooLarge { .. })
         ));
     }

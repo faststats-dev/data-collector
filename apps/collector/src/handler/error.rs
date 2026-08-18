@@ -2,7 +2,7 @@ use super::{
     check_ip_allowed, error_response, get_authorization, get_client_ip, insert_error_occurrence_v3,
     load_project_context, success_response,
 };
-use crate::error_tracking::ErrorLanguage;
+use crate::error_tracking::parse_optional;
 use crate::error_tracking::v3::{OccurrenceInput, build_occurrence, empty_context};
 use crate::models::{AppState, ErrorTracking};
 use axum::body::Bytes;
@@ -65,9 +65,9 @@ pub async fn error(
         return error_response(StatusCode::FORBIDDEN, "Error tracking is not enabled");
     }
 
-    let language = match ErrorLanguage::parse_optional(payload.language.as_deref()) {
+    let language = match parse_optional(payload.language.as_deref()) {
         Ok(language) => language,
-        Err(message) => return error_response(StatusCode::BAD_REQUEST, message),
+        Err(error) => return error_response(StatusCode::BAD_REQUEST, &error.to_string()),
     };
 
     let tracking_ctx = ctx.tracking_context(&token);

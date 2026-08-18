@@ -1,9 +1,9 @@
-use crate::ast::{Language, ParseError, StackFrame, StackTrace, TraceSegment};
 use crate::parser::{payload, some, source_file};
+use crate::{Language, ParseError, StackFrame, StackTrace, TraceSegment};
 
-crate::parser::parser_entrypoints!();
-
-fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Result<StackTrace, ParseError> {
+pub(super) fn parse_lines<'a>(
+    lines: impl Iterator<Item = &'a str>,
+) -> Result<StackTrace, ParseError> {
     let mut segment = TraceSegment::default();
     let mut saw_content = false;
 
@@ -78,7 +78,7 @@ mod tests {
 
     #[test]
     fn parses_v8_node_and_async_frames() {
-        let trace = parse("TypeError: nope\n    at async run (/srv/app.js:10:7)\n    at new Worker (node:internal/workers:22:3)\n    at nativeCall (native)").unwrap();
+        let trace = Language::JavaScript.parse_stack("TypeError: nope\n    at async run (/srv/app.js:10:7)\n    at new Worker (node:internal/workers:22:3)\n    at nativeCall (native)").unwrap();
         assert_eq!(trace.segments()[0].error_kind.as_deref(), Some("TypeError"));
         assert_eq!(
             trace.segments()[0].frames[0].function.as_deref(),
@@ -97,10 +97,11 @@ mod tests {
 
     #[test]
     fn parses_spidermonkey_frames() {
-        let trace = parse(
-            "Error: nope\nrun@https://user@example.test/app@2.js:4:9\n@webpack:///boot.js:2:1",
-        )
-        .unwrap();
+        let trace = Language::JavaScript
+            .parse_stack(
+                "Error: nope\nrun@https://user@example.test/app@2.js:4:9\n@webpack:///boot.js:2:1",
+            )
+            .unwrap();
         assert_eq!(
             trace.segments()[0].frames[0].function.as_deref(),
             Some("run")
@@ -114,7 +115,9 @@ mod tests {
 
     #[test]
     fn leading_blank_lines_and_crlf_are_handled() {
-        let trace = parse("\r\n  \r\nRangeError: bad\r\n at run (C:\\app.js:3:4)\r\n").unwrap();
+        let trace = Language::JavaScript
+            .parse_stack("\r\n  \r\nRangeError: bad\r\n at run (C:\\app.js:3:4)\r\n")
+            .unwrap();
         assert_eq!(
             trace.segments()[0].error_kind.as_deref(),
             Some("RangeError")
@@ -127,21 +130,26 @@ mod tests {
 
     #[test]
     fn preserves_promise_indices_without_inventing_a_file() {
-        let trace = parse("Error: bad\n at async Promise.all (index 3)").unwrap();
+        let trace = Language::JavaScript
+            .parse_stack("Error: bad\n at async Promise.all (index 3)")
+            .unwrap();
         let frame = &trace.segments()[0].frames[0];
         assert_eq!(frame.file, None);
     }
 
     #[test]
     fn parses_an_empty_error_message() {
-        let trace = parse("TypeError:\n at run (app.js:1:2)").unwrap();
+        let trace = Language::JavaScript
+            .parse_stack("TypeError:\n at run (app.js:1:2)")
+            .unwrap();
         assert_eq!(trace.segments()[0].error_kind.as_deref(), Some("TypeError"));
     }
 
     #[test]
     fn preserves_node_error_codes_in_headers() {
-        let trace =
-            parse("TypeError [ERR_INVALID_ARG_TYPE]: bad\n at run (/app/main.js:1:2)").unwrap();
+        let trace = Language::JavaScript
+            .parse_stack("TypeError [ERR_INVALID_ARG_TYPE]: bad\n at run (/app/main.js:1:2)")
+            .unwrap();
 
         assert_eq!(
             trace.segments()[0].error_kind.as_deref(),

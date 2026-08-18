@@ -106,7 +106,7 @@ impl MappingResolver {
         if build_id.is_empty() || stacktrace.is_empty() {
             return None;
         }
-        if !matches!(language, ErrorLanguage::Java | ErrorLanguage::Javascript) {
+        if !matches!(language, ErrorLanguage::Java | ErrorLanguage::JavaScript) {
             return None;
         }
 

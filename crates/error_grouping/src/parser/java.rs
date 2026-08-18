@@ -1,9 +1,9 @@
-use crate::ast::{Language, ParseError, SegmentRelation, StackFrame, StackTrace, TraceSegment};
 use crate::parser::{error_kind, looks_like_exception, payload, some, source_file, trim_line};
+use crate::{Language, ParseError, SegmentRelation, StackFrame, StackTrace, TraceSegment};
 
-crate::parser::parser_entrypoints!();
-
-fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Result<StackTrace, ParseError> {
+pub(super) fn parse_lines<'a>(
+    lines: impl Iterator<Item = &'a str>,
+) -> Result<StackTrace, ParseError> {
     let mut segments = Vec::new();
     let mut scopes = Vec::new();
 
@@ -136,15 +136,16 @@ mod tests {
 
     #[test]
     fn parses_modules_native_frames_causes_and_elisions() {
-        let trace = parse(
-            r#"Exception in thread "main" java.lang.RuntimeException: boom
+        let trace = Language::Java
+            .parse_stack(
+                r#"Exception in thread "main" java.lang.RuntimeException: boom
     at app@1.2/com.example.Main.run(Main.java:42)
     at java.base/java.lang.Thread.run(Native Method)
 Caused by: java.lang.IllegalStateException: bad state
     at com.example.Work.go(Work.java:7)
     ... 2 more"#,
-        )
-        .unwrap();
+            )
+            .unwrap();
         assert_eq!(trace.segments().len(), 2);
         assert_eq!(
             trace.segments()[0].error_kind.as_deref(),
@@ -160,15 +161,15 @@ Caused by: java.lang.IllegalStateException: bad state
 
     #[test]
     fn malformed_and_overflowing_frames_are_safe() {
-        let trace =
-            parse("java.lang.Error: bad\n at not-a-java-frame\n ... 999999999999999999 more")
-                .unwrap();
+        let trace = Language::Java
+            .parse_stack("java.lang.Error: bad\n at not-a-java-frame\n ... 999999999999999999 more")
+            .unwrap();
         assert!(trace.segments()[0].frames.is_empty());
     }
 
     #[test]
     fn parses_class_loader_module_and_related_errors() {
-        let trace = parse(
+        let trace = Language::Java.parse_stack(
             "java.lang.Error: root\n at loader/java.base@17/java.lang.Thread.run(Thread.java:1)\n    Suppressed: java.lang.IllegalStateException: suppressed\n        Caused by: java.io.IOException: nested\nCaused by: java.lang.RuntimeException: cause",
         )
         .unwrap();
@@ -186,7 +187,9 @@ Caused by: java.lang.IllegalStateException: bad state
 
     #[test]
     fn caused_by_fragment_is_promoted_to_root() {
-        let trace = parse("Caused by: java.lang.Error: bad\n at a.B.f(B.java:1)").unwrap();
+        let trace = Language::Java
+            .parse_stack("Caused by: java.lang.Error: bad\n at a.B.f(B.java:1)")
+            .unwrap();
         assert_eq!(trace.segments()[0].relation, SegmentRelation::Root);
     }
 }

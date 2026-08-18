@@ -553,7 +553,10 @@ fn sha256(input: &[u8]) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{parse_language, parser};
+
+    fn parse_language(language: Language, input: &str) -> Result<StackTrace, crate::ParseError> {
+        language.parse_stack(input)
+    }
 
     #[test]
     fn ignores_common_deployment_and_runtime_noise() {
@@ -572,8 +575,12 @@ mod tests {
 
     #[test]
     fn stable_application_root_ignores_deployment_prefix() {
-        let first = parser::javascript::parse("at load (/srv/app/main.js:1:2)").unwrap();
-        let second = parser::javascript::parse("at load (/opt/app/main.js:9:8)").unwrap();
+        let first = Language::JavaScript
+            .parse_stack("at load (/srv/app/main.js:1:2)")
+            .unwrap();
+        let second = Language::JavaScript
+            .parse_stack("at load (/opt/app/main.js:9:8)")
+            .unwrap();
         assert_eq!(fingerprint(&first), fingerprint(&second));
     }
 
@@ -594,7 +601,9 @@ mod tests {
 
     #[test]
     fn authoritative_kind_works_with_frame_only_collector_payloads() {
-        let frames = parser::javascript::parse("at load (/app.js:1:2)").unwrap();
+        let frames = Language::JavaScript
+            .parse_stack("at load (/app.js:1:2)")
+            .unwrap();
         let with_header =
             parse_language(Language::JavaScript, "TypeError: x\nat load (/app.js:9:8)").unwrap();
 
@@ -610,7 +619,9 @@ mod tests {
 
     #[test]
     fn fallback_matches_a_parsed_trace_without_frames() {
-        let trace = parser::java::parse("java.lang.RuntimeException: dynamic message").unwrap();
+        let trace = Language::Java
+            .parse_stack("java.lang.RuntimeException: dynamic message")
+            .unwrap();
 
         assert_eq!(
             fingerprint_with_kind(&trace, Some("java.lang.RuntimeException")),
@@ -620,47 +631,50 @@ mod tests {
 
     #[test]
     fn java_exception_topology_affects_the_fingerprint() {
-        let nested = parser::java::parse(
-            "Root: x\n  Suppressed: S: x\n    Caused by: A: x\nCaused by: B: x",
-        )
-        .unwrap();
-        let linear =
-            parser::java::parse("Root: x\n  Suppressed: S: x\nCaused by: A: x\n  Caused by: B: x")
-                .unwrap();
+        let nested = Language::Java
+            .parse_stack("Root: x\n  Suppressed: S: x\n    Caused by: A: x\nCaused by: B: x")
+            .unwrap();
+        let linear = Language::Java
+            .parse_stack("Root: x\n  Suppressed: S: x\nCaused by: A: x\n  Caused by: B: x")
+            .unwrap();
 
         assert_ne!(fingerprint(&nested), fingerprint(&linear));
     }
 
     #[test]
     fn generated_java_symbols_and_asset_hashes_are_deployment_noise() {
-        let lambda_a =
-            parser::java::parse("at app.Work$$Lambda$12/0x0000000800abc123.run(Work.java:1)")
-                .unwrap();
-        let lambda_b =
-            parser::java::parse("at app.Work$$Lambda$99/0x0000000800def456.run(Work.java:9)")
-                .unwrap();
+        let lambda_a = Language::Java
+            .parse_stack("at app.Work$$Lambda$12/0x0000000800abc123.run(Work.java:1)")
+            .unwrap();
+        let lambda_b = Language::Java
+            .parse_stack("at app.Work$$Lambda$99/0x0000000800def456.run(Work.java:9)")
+            .unwrap();
         assert_eq!(fingerprint(&lambda_a), fingerprint(&lambda_b));
 
-        let asset_a =
-            parser::javascript::parse("at run (/assets/app.abcdef123456.js:1:2)").unwrap();
-        let asset_b =
-            parser::javascript::parse("at run (/assets/app.0123456789ab.js:9:8)").unwrap();
+        let asset_a = Language::JavaScript
+            .parse_stack("at run (/assets/app.abcdef123456.js:1:2)")
+            .unwrap();
+        let asset_b = Language::JavaScript
+            .parse_stack("at run (/assets/app.0123456789ab.js:9:8)")
+            .unwrap();
         assert_eq!(fingerprint(&asset_a), fingerprint(&asset_b));
 
-        let chunks_a =
-            parser::javascript::parse("at run (/assets/app.abcdef12-deadbeef.js:1:2)").unwrap();
-        let chunks_b =
-            parser::javascript::parse("at run (/assets/app.12345678-90abcdef.js:9:8)").unwrap();
+        let chunks_a = Language::JavaScript
+            .parse_stack("at run (/assets/app.abcdef12-deadbeef.js:1:2)")
+            .unwrap();
+        let chunks_b = Language::JavaScript
+            .parse_stack("at run (/assets/app.12345678-90abcdef.js:9:8)")
+            .unwrap();
         assert_eq!(fingerprint(&chunks_a), fingerprint(&chunks_b));
     }
 
     #[test]
     fn stable_path_suffix_separates_same_named_source_files() {
-        let controller = parser::python::parse(
+        let controller = Language::Python.parse_stack(
             "Traceback (most recent call last):\n  File \"/srv/app/src/controllers/user.py\", line 1, in load\nValueError: x",
         )
         .unwrap();
-        let model = parser::python::parse(
+        let model = Language::Python.parse_stack(
             "Traceback (most recent call last):\n  File \"/opt/app/src/models/user.py\", line 1, in load\nValueError: x",
         )
         .unwrap();
@@ -669,11 +683,11 @@ mod tests {
 
     #[test]
     fn python_limit_keeps_crash_nearest_frames() {
-        let first = parser::python::parse(
+        let first = Language::Python.parse_stack(
             "Traceback (most recent call last):\n  File \"/app/old.py\", line 1, in old\n  File \"/app/middle.py\", line 2, in middle\n  File \"/app/crash.py\", line 3, in crash\nValueError: x",
         )
         .unwrap();
-        let second = parser::python::parse(
+        let second = Language::Python.parse_stack(
             "Traceback (most recent call last):\n  File \"/app/changed.py\", line 1, in changed\n  File \"/app/middle.py\", line 2, in middle\n  File \"/app/crash.py\", line 3, in crash\nValueError: x",
         )
         .unwrap();
@@ -689,11 +703,11 @@ mod tests {
 
     #[test]
     fn python_limit_distinguishes_different_crash_frames() {
-        let first = parser::python::parse(
+        let first = Language::Python.parse_stack(
             "Traceback (most recent call last):\n  File \"/app/old.py\", line 1, in old\n  File \"/app/crash.py\", line 2, in crash\nValueError: x",
         )
         .unwrap();
-        let second = parser::python::parse(
+        let second = Language::Python.parse_stack(
             "Traceback (most recent call last):\n  File \"/app/old.py\", line 1, in old\n  File \"/app/other.py\", line 2, in other\nValueError: x",
         )
         .unwrap();
@@ -709,11 +723,11 @@ mod tests {
 
     #[test]
     fn segment_limit_keeps_the_terminal_cause() {
-        let first = parser::java::parse(
+        let first = Language::Java.parse_stack(
             "Root: x\nat app.Root.run(Root.java:1)\nCaused by: First: x\nat app.First.run(First.java:1)\nCaused by: Second: x\nat app.Second.run(Second.java:1)\nCaused by: Terminal: x\nat app.Terminal.run(Terminal.java:1)",
         )
         .unwrap();
-        let second = parser::java::parse(
+        let second = Language::Java.parse_stack(
             "Root: x\nat app.Root.run(Root.java:1)\nCaused by: Different: x\nat app.Different.run(Different.java:1)\nCaused by: Other: x\nat app.Other.run(Other.java:1)\nCaused by: Terminal: x\nat app.Terminal.run(Terminal.java:1)",
         )
         .unwrap();
@@ -729,11 +743,11 @@ mod tests {
 
     #[test]
     fn segment_limit_distinguishes_different_terminal_causes() {
-        let first = parser::java::parse(
+        let first = Language::Java.parse_stack(
             "Root: x\nat app.Root.run(Root.java:1)\nCaused by: Middle: x\nat app.Middle.run(Middle.java:1)\nCaused by: Terminal: x\nat app.Terminal.run(Terminal.java:1)",
         )
         .unwrap();
-        let second = parser::java::parse(
+        let second = Language::Java.parse_stack(
             "Root: x\nat app.Root.run(Root.java:1)\nCaused by: Middle: x\nat app.Middle.run(Middle.java:1)\nCaused by: Other: x\nat app.Other.run(Other.java:1)",
         )
         .unwrap();
@@ -749,11 +763,11 @@ mod tests {
 
     #[test]
     fn segment_limit_ignores_the_number_of_omitted_segments() {
-        let short = parser::java::parse(
+        let short = Language::Java.parse_stack(
             "Root: x\nat app.Root.run(Root.java:1)\n    Suppressed: Omitted: x\n    Caused by: Terminal: x\n    at app.Terminal.run(Terminal.java:1)",
         )
         .unwrap();
-        let long = parser::java::parse(
+        let long = Language::Java.parse_stack(
             "Root: x\nat app.Root.run(Root.java:1)\n    Suppressed: Omitted: x\n    Caused by: AlsoOmitted: x\n    Caused by: Terminal: x\n    at app.Terminal.run(Terminal.java:1)",
         )
         .unwrap();
@@ -770,15 +784,19 @@ mod tests {
 
     #[test]
     fn php_identity_is_case_insensitive_and_ids_are_versioned() {
-        let upper = parser::php::parse("#0 /APP/src/User.php(1): APP\\USER->RUN()").unwrap();
-        let lower = parser::php::parse("#0 /app/src/user.php(9): app\\user->run()").unwrap();
+        let upper = Language::Php
+            .parse_stack("#0 /APP/src/User.php(1): APP\\USER->RUN()")
+            .unwrap();
+        let lower = Language::Php
+            .parse_stack("#0 /app/src/user.php(9): app\\user->run()")
+            .unwrap();
         assert_eq!(fingerprint(&upper), fingerprint(&lower));
         assert!(fingerprint(&upper).to_string().starts_with("eg1_"));
     }
 
     #[test]
     fn v1_semantic_identity_is_stable() {
-        let trace = parser::java::parse(
+        let trace = Language::Java.parse_stack(
             "RootError: dynamic message\nat app.Root.run(Root.java:42)\nCaused by: CauseError: other message\nat app.Work.run(Work.java:7)",
         )
         .unwrap();

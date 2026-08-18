@@ -3,19 +3,8 @@
 //! The AST retains only stable inputs used for error grouping. Runtime-specific
 //! diagnostics and volatile values belong in the original stack trace.
 
+use crate::Language;
 use std::{error::Error, fmt};
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-#[non_exhaustive]
-pub enum Language {
-    Java,
-    Rust,
-    JavaScript,
-    Python,
-    Php,
-    Go,
-    Swift,
-}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StackTrace {

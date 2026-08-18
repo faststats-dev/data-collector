@@ -254,7 +254,7 @@ pub async fn web(
             let occurrence = build_occurrence(
                 OccurrenceInput {
                     project_id: ctx.project_id,
-                    language: ErrorLanguage::Javascript,
+                    language: ErrorLanguage::JavaScript,
                     // The browser SDK sends this as `buildId`; Tinybird stores it as `release`.
                     release: build_id.as_deref(),
                     identifier: Some(&fallback_identity),
@@ -269,7 +269,7 @@ pub async fn web(
             if let Err(e) = insert_error_occurrence_v3(
                 &state.batch_queue,
                 occurrence,
-                ErrorLanguage::Javascript,
+                ErrorLanguage::JavaScript,
                 Some(tracking_ctx.clone()),
             ) {
                 return e;

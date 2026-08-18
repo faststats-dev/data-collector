@@ -17,12 +17,10 @@ The collector supplies the authoritative runtime language, avoiding ambiguous la
 ## Usage
 
 ```rust
-use error_grouping::{Language, fingerprint_with_kind, parse_language};
+use error_grouping::{Language, fingerprint_with_kind};
 
-let trace = parse_language(
-    Language::JavaScript,
-    "TypeError: bad value\n    at load (/app/main.js:8:2)",
-)?;
+let trace = Language::JavaScript
+    .parse_stack("TypeError: bad value\n    at load (/app/main.js:8:2)")?;
 assert_eq!(trace.language(), Language::JavaScript);
 
 let group = fingerprint_with_kind(&trace, Some("TypeError"));

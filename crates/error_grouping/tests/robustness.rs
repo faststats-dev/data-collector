@@ -1,7 +1,4 @@
-use error_grouping::{
-    Language, ParseError, ParserOptions, SegmentRelation, StackTrace, parse_language,
-    parse_language_with_options,
-};
+use error_grouping::{Language, ParseError, ParserOptions, SegmentRelation, StackTrace};
 
 const LANGUAGES: [Language; 7] = [
     Language::Java,
@@ -42,7 +39,7 @@ fn generated_inputs_never_panic_and_successes_preserve_ast_invariants() {
         }
         let input = String::from_utf8_lossy(&bytes);
         for language in LANGUAGES {
-            if let Ok(trace) = parse_language(language, &input) {
+            if let Ok(trace) = language.parse_stack(&input) {
                 assert_trace_invariants(&trace);
             }
         }
@@ -58,11 +55,11 @@ fn configured_limits_fail_at_the_first_observed_violation() {
     };
 
     assert_eq!(
-        parse_language_with_options(Language::Java, "a\nb\nc\nd", &options),
+        Language::Java.parse_stack_with_options("a\nb\nc\nd", &options),
         Err(ParseError::TooManyLines { limit: 2 })
     );
     assert_eq!(
-        parse_language_with_options(Language::Java, "abcde", &options),
+        Language::Java.parse_stack_with_options("abcde", &options),
         Err(ParseError::LineTooLong {
             line: 1,
             actual: 5,

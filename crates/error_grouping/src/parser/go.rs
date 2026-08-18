@@ -1,9 +1,9 @@
-use crate::ast::{Language, ParseError, StackFrame, StackTrace, TraceSegment};
 use crate::parser::{payload, some, source_file, trim_line};
+use crate::{Language, ParseError, StackFrame, StackTrace, TraceSegment};
 
-crate::parser::parser_entrypoints!();
-
-fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Result<StackTrace, ParseError> {
+pub(super) fn parse_lines<'a>(
+    lines: impl Iterator<Item = &'a str>,
+) -> Result<StackTrace, ParseError> {
     let mut segment = TraceSegment::default();
     let mut saw_goroutine = false;
     let mut skip_goroutine = false;
@@ -86,7 +86,7 @@ mod tests {
 
     #[test]
     fn parses_panic_goroutine_and_created_by_frames() {
-        let trace = parse("panic: send on closed channel\n\ngoroutine 18 [running]:\nmain.worker(0x1)\n\t/work/main.go:14 +0x4f\ncreated by main.main in goroutine 1\n\t/work/main.go:8 +0x20").unwrap();
+        let trace = Language::Go.parse_stack("panic: send on closed channel\n\ngoroutine 18 [running]:\nmain.worker(0x1)\n\t/work/main.go:14 +0x4f\ncreated by main.main in goroutine 1\n\t/work/main.go:8 +0x20").unwrap();
         assert_eq!(trace.segments()[0].error_kind.as_deref(), Some("panic"));
         assert_eq!(
             trace.segments()[0].frames[0].file.as_deref(),
@@ -100,13 +100,13 @@ mod tests {
 
     #[test]
     fn does_not_merge_additional_goroutines() {
-        let trace = parse("panic: bad\n\ngoroutine 1 [running]:\nmain.main()\n\t/app.go:3 +0x1\n\ngoroutine 2 [sleep]:\nother.work()\n\t/other.go:9 +0x2").unwrap();
+        let trace = Language::Go.parse_stack("panic: bad\n\ngoroutine 1 [running]:\nmain.main()\n\t/app.go:3 +0x1\n\ngoroutine 2 [sleep]:\nother.work()\n\t/other.go:9 +0x2").unwrap();
         assert_eq!(trace.segments()[0].frames.len(), 1);
     }
 
     #[test]
     fn parses_runtime_fatal_errors() {
-        let trace = parse("fatal error: concurrent map writes\n\ngoroutine 7 [running]:\nmain.write()\n\t/app.go:4 +0x2").unwrap();
+        let trace = Language::Go.parse_stack("fatal error: concurrent map writes\n\ngoroutine 7 [running]:\nmain.write()\n\t/app.go:4 +0x2").unwrap();
         assert_eq!(
             trace.segments()[0].error_kind.as_deref(),
             Some("fatal error")
@@ -119,9 +119,9 @@ mod tests {
 
     #[test]
     fn preserves_receiver_method_names() {
-        let trace =
-            parse("goroutine 1 [running]:\nexample/pkg.(*Server).Serve()\n\t/app.go:9 +0x2")
-                .unwrap();
+        let trace = Language::Go
+            .parse_stack("goroutine 1 [running]:\nexample/pkg.(*Server).Serve()\n\t/app.go:9 +0x2")
+            .unwrap();
         assert_eq!(
             trace.segments()[0].frames[0].function.as_deref(),
             Some("example/pkg.(*Server).Serve")
@@ -130,9 +130,9 @@ mod tests {
 
     #[test]
     fn accepts_spaces_inside_rendered_arguments() {
-        let trace =
-            parse("panic: bad\n\ngoroutine 1 [running]:\nmain.f(0x1, 0x2)\n\t/app.go:3 +0x1")
-                .unwrap();
+        let trace = Language::Go
+            .parse_stack("panic: bad\n\ngoroutine 1 [running]:\nmain.f(0x1, 0x2)\n\t/app.go:3 +0x1")
+            .unwrap();
         assert_eq!(
             trace.segments()[0].frames[0].function.as_deref(),
             Some("main.f")

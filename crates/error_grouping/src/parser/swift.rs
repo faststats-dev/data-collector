@@ -1,9 +1,9 @@
-use crate::ast::{Language, ParseError, StackFrame, StackTrace, TraceSegment};
 use crate::parser::{some, source_file};
+use crate::{Language, ParseError, StackFrame, StackTrace, TraceSegment};
 
-crate::parser::parser_entrypoints!();
-
-fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Result<StackTrace, ParseError> {
+pub(super) fn parse_lines<'a>(
+    lines: impl Iterator<Item = &'a str>,
+) -> Result<StackTrace, ParseError> {
     let mut segment = TraceSegment::default();
     let mut saw_swift_header = false;
     let mut saw_thread_headers = false;
@@ -125,7 +125,7 @@ mod tests {
 
     #[test]
     fn parses_runtime_failure_and_only_the_crashed_thread() {
-        let trace = parse(
+        let trace = Language::Swift.parse_stack(
             "Swift/ErrorType.swift:254: Fatal error: Error raised at top level\n\nProgram crashed: System trap at 0x0001\n\nThread 0 crashed:\n  0 0x0001 _assertionFailure(_:_:file:line:flags:) + 176 in libswiftCore.dylib\n  1 [async] 0x0002 run() + 41 in demo at /work/Sources/demo/main.swift:35:11\n\nThread 1:\n  0 0x0003 worker() + 8 in demo",
         )
         .unwrap();
@@ -147,7 +147,7 @@ mod tests {
 
     #[test]
     fn parses_legacy_markers_and_closure_names() {
-        let trace = parse("*** Signal 4: Backtracing from 0x1... done ***\n*** Program crashed: Illegal instruction at 0x1 ***\nThread 0 \"demo\" crashed:\n0 0x1 closure #1 in load() + 21 in demo").unwrap();
+        let trace = Language::Swift.parse_stack("*** Signal 4: Backtracing from 0x1... done ***\n*** Program crashed: Illegal instruction at 0x1 ***\nThread 0 \"demo\" crashed:\n0 0x1 closure #1 in load() + 21 in demo").unwrap();
 
         assert_eq!(
             trace.segments()[0].error_kind.as_deref(),
@@ -165,9 +165,11 @@ mod tests {
 
     #[test]
     fn accepts_authoritative_frame_only_input() {
-        let trace =
-            parse("0 [inlined] [system] 0x1 App.main() + 4 in demo at C:\\work\\main.swift:9:2")
-                .unwrap();
+        let trace = Language::Swift
+            .parse_stack(
+                "0 [inlined] [system] 0x1 App.main() + 4 in demo at C:\\work\\main.swift:9:2",
+            )
+            .unwrap();
 
         assert_eq!(
             trace.segments()[0].frames[0].function.as_deref(),

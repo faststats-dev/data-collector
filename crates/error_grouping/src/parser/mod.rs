@@ -1,35 +1,34 @@
 //! Stack trace parsers. The public functions return owned ASTs, so results do
 //! not borrow potentially large or short-lived log buffers.
 
-pub(crate) mod go;
-pub(crate) mod java;
-pub(crate) mod javascript;
-pub(crate) mod php;
-pub(crate) mod python;
-pub(crate) mod rust;
-pub(crate) mod swift;
+mod go;
+mod java;
+mod javascript;
+mod php;
+mod python;
+mod rust;
+mod swift;
 
-macro_rules! parser_entrypoints {
-    () => {
-        #[cfg(test)]
-        pub(crate) fn parse(input: &str) -> Result<$crate::StackTrace, $crate::ParseError> {
-            parse_with_options(input, &$crate::ParserOptions::default())
-        }
+use crate::{Language, ParseError, ParserOptions, StackTrace};
 
-        pub(crate) fn parse_with_options(
-            input: &str,
-            options: &$crate::ParserOptions,
-        ) -> Result<$crate::StackTrace, $crate::ParseError> {
-            let mut lines = $crate::parser::CheckedLines::new(input, options)?;
-            let result = parse_lines(&mut lines);
-            lines.finish()?;
-            result
-        }
+pub(crate) fn parse(
+    language: Language,
+    input: &str,
+    options: &ParserOptions,
+) -> Result<StackTrace, ParseError> {
+    let mut lines = CheckedLines::new(input, options)?;
+    let result = match language {
+        Language::Java => java::parse_lines(&mut lines),
+        Language::Rust => rust::parse_lines(&mut lines),
+        Language::JavaScript => javascript::parse_lines(&mut lines),
+        Language::Python => python::parse_lines(&mut lines),
+        Language::Php => php::parse_lines(&mut lines),
+        Language::Go => go::parse_lines(&mut lines),
+        Language::Swift => swift::parse_lines(&mut lines),
     };
+    lines.finish()?;
+    result
 }
-pub(crate) use parser_entrypoints;
-
-use crate::ast::{ParseError, ParserOptions};
 
 pub(crate) fn trim_line(line: &str) -> (&str, usize) {
     let trimmed_start = line.trim_start();
@@ -191,12 +190,13 @@ mod tests {
             max_line_bytes: 1_024,
         };
         assert_eq!(
-            java::parse_with_options(
+            parse(
+                Language::Java,
                 "java.lang.Error: bad\n at app.Main.run(Main.java:1)\ntrailing",
                 &options,
             ),
             Err(ParseError::TooManyLines { limit: 2 })
         );
-        assert_eq!(java::parse(" \t"), Err(ParseError::Empty));
+        assert_eq!(Language::Java.parse_stack(" \t"), Err(ParseError::Empty));
     }
 }

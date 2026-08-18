@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::error_tracking::ErrorLanguage;
+use crate::error_tracking::group_hash;
 
 pub struct OccurrenceInput<'a> {
     pub project_id: Uuid,
@@ -54,7 +55,7 @@ pub fn build_occurrence(input: OccurrenceInput<'_>, error: ErrorTracking) -> Err
         environment: "prod".to_string(),
         language: input.language.as_str().to_owned(),
         release: build_id.unwrap_or_else(|| input.release.unwrap_or_default().to_owned()),
-        group_hash: input.language.fingerprint(&error_type, source_stack),
+        group_hash: group_hash(input.language, &error_type, source_stack),
         exact_hash: exact_hash(&error_type, &error_message, source_stack),
         error_type,
         error_message,
@@ -83,7 +84,7 @@ pub async fn enrich_with_mapping(
         .await;
 
     if let Some(mapped) = mapped {
-        row.group_hash = language.fingerprint(&row.error_type, &mapped.stacktrace);
+        row.group_hash = group_hash(language, &row.error_type, &mapped.stacktrace);
         row.exact_hash = exact_hash(&row.error_type, &row.error_message, &mapped.stacktrace);
         row.mapped_stacktrace = Some(mapped.stacktrace);
         row.mapping_used = Some(mapped.mapping_used);
@@ -171,8 +172,10 @@ fn merge_context_values(base_context: Value, error_context: Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::{
-        ErrorLanguage, OccurrenceInput, build_occurrence, empty_context, occurrence_context,
+        ErrorLanguage, OccurrenceInput, build_occurrence, empty_context, group_hash,
+        occurrence_context,
     };
+    use crate::error_tracking::parse_optional;
     use crate::models::{Error, ErrorTracking};
     use serde_json::json;
     use uuid::Uuid;
@@ -213,7 +216,8 @@ mod tests {
 
         assert_eq!(
             row.group_hash,
-            ErrorLanguage::Java.fingerprint(
+            group_hash(
+                ErrorLanguage::Java,
                 "java.lang.RuntimeException",
                 "\tat plugin-1.2.3.jar//com.example.Plugin.handle(Plugin.java:42)"
             )
@@ -294,10 +298,7 @@ mod tests {
 
     #[test]
     fn parses_php_language() {
-        assert_eq!(
-            ErrorLanguage::parse_optional(Some(" PHP ")).unwrap(),
-            ErrorLanguage::Php
-        );
+        assert_eq!(parse_optional(Some(" PHP ")).unwrap(), ErrorLanguage::Php);
     }
 
     #[test]
@@ -336,7 +337,8 @@ mod tests {
 
         assert_eq!(
             row.group_hash,
-            ErrorLanguage::Php.fingerprint(
+            group_hash(
+                ErrorLanguage::Php,
                 "RuntimeException",
                 "#0 /var/www/app/src/UserService.php(42): App\\Service\\UserService->find('abc', 123)"
             )
@@ -380,7 +382,7 @@ mod tests {
 
         assert_eq!(
             row.group_hash,
-            ErrorLanguage::Rust.fingerprint("panic", stacktrace)
+            group_hash(ErrorLanguage::Rust, "panic", stacktrace)
         );
         assert_eq!(row.language, "rust");
     }

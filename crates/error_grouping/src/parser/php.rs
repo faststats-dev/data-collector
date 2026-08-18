@@ -1,9 +1,9 @@
-use crate::ast::{Language, ParseError, StackFrame, StackTrace, TraceSegment};
 use crate::parser::{error_kind, some};
+use crate::{Language, ParseError, StackFrame, StackTrace, TraceSegment};
 
-crate::parser::parser_entrypoints!();
-
-fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Result<StackTrace, ParseError> {
+pub(super) fn parse_lines<'a>(
+    lines: impl Iterator<Item = &'a str>,
+) -> Result<StackTrace, ParseError> {
     let mut segment = TraceSegment::default();
 
     for original in lines {
@@ -67,7 +67,7 @@ mod tests {
 
     #[test]
     fn parses_php_fatal_trace() {
-        let trace = parse("PHP Fatal error: Uncaught TypeError: bad in /app/index.php:12\nStack trace:\n#0 /app/index.php(8): App\\Worker->run()\n#1 [internal function]: App\\Runner::call()\n#2 {main}\n  thrown in /app/index.php on line 12").unwrap();
+        let trace = Language::Php.parse_stack("PHP Fatal error: Uncaught TypeError: bad in /app/index.php:12\nStack trace:\n#0 /app/index.php(8): App\\Worker->run()\n#1 [internal function]: App\\Runner::call()\n#2 {main}\n  thrown in /app/index.php on line 12").unwrap();
         assert_eq!(trace.segments()[0].error_kind.as_deref(), Some("TypeError"));
         assert_eq!(trace.segments()[0].frames.len(), 3);
         assert_eq!(
@@ -82,8 +82,9 @@ mod tests {
 
     #[test]
     fn accepts_messages_containing_in() {
-        let trace =
-            parse("Fatal error: Uncaught RuntimeException: failure in parser\n#0 {main}").unwrap();
+        let trace = Language::Php
+            .parse_stack("Fatal error: Uncaught RuntimeException: failure in parser\n#0 {main}")
+            .unwrap();
         assert_eq!(
             trace.segments()[0].error_kind.as_deref(),
             Some("RuntimeException")

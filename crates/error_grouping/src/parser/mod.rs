@@ -7,6 +7,7 @@ pub mod javascript;
 pub mod php;
 pub mod python;
 pub mod rust;
+pub mod swift;
 
 macro_rules! parser_entrypoints {
     () => {
@@ -96,6 +97,7 @@ pub(crate) struct DetectionHints<'a> {
     php_frame: bool,
     rust_marker: bool,
     javascript_frame: bool,
+    swift_marker: bool,
     complete: bool,
 }
 
@@ -141,6 +143,10 @@ impl DetectionHints<'_> {
             .map_or(self.header, |(kind, _)| kind);
         kind.ends_with("Error") && self.javascript_frame
     }
+
+    pub(crate) fn looks_like_swift(&self) -> bool {
+        self.header.starts_with("Swift runtime failure:") || self.swift_marker
+    }
 }
 
 pub(crate) fn validate_and_detect<'a>(
@@ -176,6 +182,7 @@ impl<'a> DetectionHints<'a> {
                 || self.header.starts_with("PHP Fatal error:")
                 || self.header.starts_with("Fatal error:")
                 || self.header.starts_with("Uncaught ")
+                || self.looks_like_swift()
                 || (self.header.starts_with("thread '") && self.header.contains("panicked at"));
             if self.complete {
                 return;
@@ -183,6 +190,11 @@ impl<'a> DetectionHints<'a> {
         }
 
         self.rust_marker |= trimmed == "stack backtrace:";
+        self.swift_marker |= trimmed.contains("Program crashed:");
+        if self.swift_marker {
+            self.complete = true;
+            return;
+        }
         if !is_header {
             match trimmed.as_bytes().first() {
                 Some(b'#') => self.php_frame |= trimmed.starts_with("#0 "),

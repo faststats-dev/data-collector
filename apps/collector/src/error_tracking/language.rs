@@ -1,5 +1,5 @@
 pub const UNSUPPORTED_LANGUAGE_MESSAGE: &str =
-    "Unsupported language. Expected java, javascript, python, php, go, or rust";
+    "Unsupported language. Expected java, javascript, python, php, go, rust, or swift";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize, Default)]
 pub enum ErrorLanguage {
@@ -10,6 +10,7 @@ pub enum ErrorLanguage {
     Php,
     Go,
     Rust,
+    Swift,
 }
 
 impl ErrorLanguage {
@@ -21,6 +22,7 @@ impl ErrorLanguage {
             Self::Php => "php",
             Self::Go => "go",
             Self::Rust => "rust",
+            Self::Swift => "swift",
         }
     }
 
@@ -38,6 +40,8 @@ impl ErrorLanguage {
             Ok(Self::Go)
         } else if value.eq_ignore_ascii_case("rust") || value.eq_ignore_ascii_case("rs") {
             Ok(Self::Rust)
+        } else if value.eq_ignore_ascii_case("swift") {
+            Ok(Self::Swift)
         } else {
             Err(UnsupportedLanguage(value.to_ascii_lowercase()))
         }
@@ -77,6 +81,7 @@ impl From<ErrorLanguage> for error_grouping::Language {
             ErrorLanguage::Php => Self::Php,
             ErrorLanguage::Go => Self::Go,
             ErrorLanguage::Rust => Self::Rust,
+            ErrorLanguage::Swift => Self::Swift,
         }
     }
 }
@@ -104,6 +109,7 @@ mod tests {
         assert_eq!(ErrorLanguage::parse("golang").unwrap(), ErrorLanguage::Go);
         assert_eq!(ErrorLanguage::parse("Rust").unwrap(), ErrorLanguage::Rust);
         assert_eq!(ErrorLanguage::parse("rs").unwrap(), ErrorLanguage::Rust);
+        assert_eq!(ErrorLanguage::parse("Swift").unwrap(), ErrorLanguage::Swift);
     }
 
     #[test]
@@ -114,6 +120,7 @@ mod tests {
         assert_eq!(ErrorLanguage::Php.as_str(), "php");
         assert_eq!(ErrorLanguage::Go.as_str(), "go");
         assert_eq!(ErrorLanguage::Rust.as_str(), "rust");
+        assert_eq!(ErrorLanguage::Swift.as_str(), "swift");
     }
 
     #[test]
@@ -175,6 +182,14 @@ mod tests {
         assert!(python.starts_with("eg1_"));
         assert!(go.starts_with("eg1_"));
         assert_ne!(python, go);
+    }
+
+    #[test]
+    fn supports_swift_grouping() {
+        let stack = "Program crashed: System trap at 0x1\n\nThread 0 crashed:\n0 0x1 App.run() + 8 in demo at /app/main.swift:3:1";
+        let fingerprint = ErrorLanguage::Swift.fingerprint("Fatal error", stack);
+
+        assert!(fingerprint.starts_with("eg1_"));
     }
 
     #[test]

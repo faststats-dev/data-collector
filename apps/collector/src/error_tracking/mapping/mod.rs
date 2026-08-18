@@ -108,7 +108,11 @@ impl MappingResolver {
         }
         if matches!(
             language,
-            ErrorLanguage::Python | ErrorLanguage::Php | ErrorLanguage::Go | ErrorLanguage::Rust
+            ErrorLanguage::Python
+                | ErrorLanguage::Php
+                | ErrorLanguage::Go
+                | ErrorLanguage::Rust
+                | ErrorLanguage::Swift
         ) {
             return None;
         }
@@ -130,7 +134,8 @@ impl MappingResolver {
             ErrorLanguage::Python
             | ErrorLanguage::Php
             | ErrorLanguage::Go
-            | ErrorLanguage::Rust => return None,
+            | ErrorLanguage::Rust
+            | ErrorLanguage::Swift => return None,
         };
 
         Some(MappedStacktrace {

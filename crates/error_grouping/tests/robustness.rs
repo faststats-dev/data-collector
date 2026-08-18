@@ -2,7 +2,7 @@ use error_grouping::{ParseError, ParserOptions, StackTrace, parse, parse_with_op
 
 type Parser = fn(&str) -> Result<StackTrace, ParseError>;
 
-const PARSERS: [Parser; 7] = [
+const PARSERS: [Parser; 8] = [
     parse,
     parser::java::parse,
     parser::rust::parse,
@@ -10,15 +10,17 @@ const PARSERS: [Parser; 7] = [
     parser::python::parse,
     parser::php::parse,
     parser::go::parse,
+    parser::swift::parse,
 ];
 
-const SEEDS: [&str; 8] = [
+const SEEDS: [&str; 9] = [
     "Error: bad\n at run (app.js:1:2)",
     "java.lang.Error: bad\n at app.Main.run(Main.java:1)",
     "stack backtrace:\n 0: crate::run",
     "Traceback (most recent call last):\n  File \"app.py\", line 1, in run\nValueError: bad",
     "Fatal error: Uncaught TypeError: bad in /app.php:2\n#0 {main}",
     "panic: bad\n\ngoroutine 1 [running]:\nmain.main()\n\t/app.go:3 +0x1",
+    "Program crashed: Illegal instruction at 0x1\n\nThread 0 crashed:\n0 0x1 run() + 8 in app at /app/main.swift:3:1",
     "\0\r\n\t::::@@@@####((((999999999999999999999999",
     "🦀 λ 日本語 \u{2003}\n",
 ];

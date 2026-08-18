@@ -58,6 +58,11 @@ pub fn parse_with_options(input: &str, options: &ParserOptions) -> Result<StackT
     {
         return Ok(trace);
     }
+    if hints.looks_like_swift()
+        && let Ok(trace) = parser::swift::parse_validated(input)
+    {
+        return Ok(trace);
+    }
     if hints.looks_like_javascript()
         && let Ok(trace) = parser::javascript::parse_validated(input)
     {
@@ -75,6 +80,7 @@ pub fn parse_language(language: Language, input: &str) -> Result<StackTrace, Par
         Language::Python => parser::python::parse(input),
         Language::Php => parser::php::parse(input),
         Language::Go => parser::go::parse(input),
+        Language::Swift => parser::swift::parse(input),
     }
 }
 
@@ -123,6 +129,12 @@ mod tests {
                 .unwrap()
                 .language(),
             Language::Go
+        );
+        assert_eq!(
+            parse("Swift/ErrorType.swift:254: Fatal error: Error raised at top level\n\nProgram crashed: Illegal instruction at 0x1\n\nThread 0 crashed:\n0 0x1 run() + 8 in app at /app/main.swift:3:1")
+                .unwrap()
+                .language(),
+            Language::Swift
         );
     }
 

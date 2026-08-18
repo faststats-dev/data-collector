@@ -9,6 +9,7 @@ const JAVASCRIPT: &str = "TypeError: nope\n    at async run (/srv/app.js:10:7)\n
 const PYTHON: &str = "Traceback (most recent call last):\n  File \"/app.py\", line 3, in load\n    int('x')\nValueError: invalid";
 const PHP: &str = "PHP Fatal error: Uncaught TypeError: bad in /app/index.php:12\nStack trace:\n#0 /app/index.php(8): App\\Worker->run()\n#1 {main}";
 const GO: &str = "panic: send on closed channel\n\ngoroutine 18 [running]:\nmain.worker(0x1, 0x2)\n\t/work/main.go:14 +0x4f\ncreated by main.main in goroutine 1\n\t/work/main.go:8 +0x20";
+const SWIFT: &str = "Swift/ErrorType.swift:254: Fatal error: Error raised at top level\n\nProgram crashed: System trap at 0x1\n\nThread 0 crashed:\n0 0x1 _assertionFailure(_:_:file:line:flags:) + 176 in libswiftCore.dylib\n1 0x2 App.run() + 41 in demo at /work/Sources/demo/main.swift:35:11";
 
 fn main() {
     if cfg!(debug_assertions) {
@@ -67,7 +68,7 @@ where
 }
 
 fn bench_mixed() {
-    const CASES: [&str; 6] = [JAVA, RUST, JAVASCRIPT, PYTHON, PHP, GO];
+    const CASES: [&str; 7] = [JAVA, RUST, JAVASCRIPT, PYTHON, PHP, GO, SWIFT];
     const ITERATIONS: usize = 500_000;
     for index in 0..ITERATIONS / 20 {
         let _ = black_box(parse(black_box(CASES[index % CASES.len()])));

@@ -435,6 +435,15 @@ fn is_runtime_frame(language: Language, frame: &StackFrame) -> bool {
         Language::Go => ["runtime.", "runtime/", "testing."]
             .iter()
             .any(|prefix| function.starts_with(prefix)),
+        Language::Swift => {
+            frame
+                .module
+                .as_deref()
+                .is_some_and(|module| module.starts_with("libswift"))
+                || function.starts_with("Swift.")
+                || function.starts_with("swift_")
+                || function.starts_with("_assertionFailure")
+        }
     }
 }
 
@@ -446,6 +455,7 @@ const fn language_tag(language: Language) -> u8 {
         Language::Python => 4,
         Language::Php => 5,
         Language::Go => 6,
+        Language::Swift => 7,
     }
 }
 

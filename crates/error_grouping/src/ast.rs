@@ -14,6 +14,7 @@ pub enum Language {
     Python,
     Php,
     Go,
+    Swift,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

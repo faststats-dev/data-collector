@@ -173,7 +173,6 @@ mod tests {
     use super::{
         ErrorLanguage, OccurrenceInput, build_occurrence, empty_context, occurrence_context,
     };
-    use crate::error_tracking::group_hash;
     use crate::models::{Error, ErrorTracking};
     use serde_json::json;
     use uuid::Uuid;
@@ -214,7 +213,7 @@ mod tests {
 
         assert_eq!(
             row.group_hash,
-            group_hash::java::group_hash(
+            ErrorLanguage::Java.group_hash(
                 "java.lang.RuntimeException",
                 "\tat plugin-1.2.3.jar//com.example.Plugin.handle(Plugin.java:42)"
             )
@@ -337,7 +336,7 @@ mod tests {
 
         assert_eq!(
             row.group_hash,
-            group_hash::php::group_hash(
+            ErrorLanguage::Php.group_hash(
                 "RuntimeException",
                 "#0 /var/www/app/src/UserService.php(42): App\\Service\\UserService->find('abc', 123)"
             )
@@ -381,7 +380,7 @@ mod tests {
 
         assert_eq!(
             row.group_hash,
-            group_hash::rust::group_hash("panic", stacktrace)
+            ErrorLanguage::Rust.group_hash("panic", stacktrace)
         );
         assert_eq!(row.language, "rust");
     }

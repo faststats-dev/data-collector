@@ -1,4 +1,3 @@
-mod group_hash;
 mod language;
 pub mod mapping;
 pub mod v3;

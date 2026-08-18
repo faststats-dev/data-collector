@@ -106,7 +106,10 @@ impl MappingResolver {
         if build_id.is_empty() || stacktrace.is_empty() {
             return None;
         }
-        if matches!(language, ErrorLanguage::Php | ErrorLanguage::Rust) {
+        if matches!(
+            language,
+            ErrorLanguage::Python | ErrorLanguage::Php | ErrorLanguage::Go | ErrorLanguage::Rust
+        ) {
             return None;
         }
 
@@ -124,7 +127,10 @@ impl MappingResolver {
                 sourcemap::apply(self, project_id, build_id, stacktrace).await?,
                 "javascript",
             ),
-            ErrorLanguage::Php | ErrorLanguage::Rust => return None,
+            ErrorLanguage::Python
+            | ErrorLanguage::Php
+            | ErrorLanguage::Go
+            | ErrorLanguage::Rust => return None,
         };
 
         Some(MappedStacktrace {

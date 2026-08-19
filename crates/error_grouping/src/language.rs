@@ -3,7 +3,6 @@ use std::{error::Error, fmt, str::FromStr};
 use crate::ParseError;
 use crate::ast::{ParserLimits, StackTrace};
 
-/// Runtime language of a stack trace.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
@@ -21,7 +20,6 @@ pub enum Language {
 }
 
 impl Language {
-    /// Canonical lowercase name used in storage and metrics.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Java => "java",
@@ -64,7 +62,6 @@ impl FromStr for Language {
     }
 }
 
-/// Error returned when a language name is not supported.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UnsupportedLanguage;
 

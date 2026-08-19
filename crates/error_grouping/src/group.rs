@@ -1,4 +1,4 @@
-use crate::fingerprint;
+use crate::fingerprint::{self, FingerprintOptions};
 use crate::{Fingerprint, Language, ParseError};
 
 /// Complete input needed to derive an error-group identifier.
@@ -35,9 +35,16 @@ pub struct GroupingResult {
 /// Unrecognized non-empty stacks are hashed exactly rather than collapsing all
 /// errors of the same kind into one low-confidence group.
 pub fn group(input: GroupingInput<'_>) -> GroupingResult {
+    group_with_options(input, FingerprintOptions::default())
+}
+
+pub(crate) fn group_with_options(
+    input: GroupingInput<'_>,
+    options: FingerprintOptions<'_>,
+) -> GroupingResult {
     if input.stack.trim().is_empty() {
         return GroupingResult {
-            fingerprint: fingerprint::kind_only(input.language, input.error_kind),
+            fingerprint: fingerprint::kind_only(input.language, input.error_kind, options),
             evidence: GroupingEvidence::ErrorKind,
             parse_error: None,
         };
@@ -45,12 +52,17 @@ pub fn group(input: GroupingInput<'_>) -> GroupingResult {
 
     match input.language.parse_stack(input.stack) {
         Ok(trace) => GroupingResult {
-            fingerprint: fingerprint::parsed(&trace, input.error_kind),
+            fingerprint: fingerprint::parsed(&trace, input.error_kind, options),
             evidence: GroupingEvidence::ParsedStack,
             parse_error: None,
         },
         Err(error) => GroupingResult {
-            fingerprint: fingerprint::raw_stack(input.language, input.error_kind, input.stack),
+            fingerprint: fingerprint::raw_stack(
+                input.language,
+                input.error_kind,
+                input.stack,
+                options,
+            ),
             evidence: GroupingEvidence::RawStack,
             parse_error: Some(error),
         },
@@ -107,5 +119,41 @@ mod tests {
             stack: "second unsupported stack",
         });
         assert_ne!(first.fingerprint, second.fingerprint);
+    }
+
+    #[test]
+    fn options_can_ignore_error_kind() {
+        let input = |error_kind| GroupingInput {
+            language: Language::JavaScript,
+            error_kind,
+            stack: "at load (/app.js:1:1)",
+        };
+        let options = FingerprintOptions {
+            include_error_kind: false,
+            ..FingerprintOptions::default()
+        };
+
+        assert_eq!(
+            group_with_options(input("TypeError"), options).fingerprint,
+            group_with_options(input("RangeError"), options).fingerprint
+        );
+    }
+
+    #[test]
+    fn options_can_ignore_raw_stack_fallback() {
+        let input = |stack| GroupingInput {
+            language: Language::Java,
+            error_kind: "Error",
+            stack,
+        };
+        let options = FingerprintOptions {
+            include_raw_stack: false,
+            ..FingerprintOptions::default()
+        };
+
+        assert_eq!(
+            group_with_options(input("first unsupported stack"), options).fingerprint,
+            group_with_options(input("second unsupported stack"), options).fingerprint
+        );
     }
 }

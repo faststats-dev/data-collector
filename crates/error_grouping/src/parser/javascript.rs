@@ -1,21 +1,17 @@
 use crate::ast::{StackFrame, StackTrace, TraceSegment};
-use crate::parser::{payload, some, source_file};
-use crate::{Language, ParseError};
+use crate::parser::{nonempty, payload, source_file};
 
-pub(super) fn parse_lines<'a>(
-    lines: impl Iterator<Item = Result<&'a str, ParseError>>,
-) -> Result<StackTrace<'a>, ParseError> {
+pub(super) fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Option<StackTrace<'a>> {
     let mut segment = TraceSegment::default();
     let mut saw_content = false;
 
     for original in lines {
-        let original = original?;
         let line = original.trim();
         if line.is_empty() {
             continue;
         }
         if !saw_content && let Some(kind) = error_header_kind(line) {
-            segment.error_kind = some(kind);
+            segment.error_kind = nonempty(kind);
         } else if let Some(body) = payload(line, "at ") {
             segment.frames.push(parse_frame(body));
         } else if let Some(frame) = parse_spidermonkey_frame(line) {
@@ -24,9 +20,9 @@ pub(super) fn parse_lines<'a>(
         saw_content = true;
     }
     if segment.frames.is_empty() {
-        return Err(ParseError::Unrecognized);
+        return None;
     }
-    Ok(StackTrace::new(Language::JavaScript, vec![segment]))
+    Some(StackTrace::single(segment))
 }
 
 fn error_header_kind(line: &str) -> Option<&str> {
@@ -43,9 +39,9 @@ fn parse_spidermonkey_frame(line: &str) -> Option<StackFrame<'_>> {
         return None;
     }
     Some(StackFrame {
-        function: some(function),
-        module: None,
+        function: nonempty(function),
         file: Some(source_file(location)),
+        ..StackFrame::default()
     })
 }
 
@@ -56,7 +52,7 @@ fn parse_frame(body: &str) -> StackFrame<'_> {
         body.rsplit_once(" (")
             .map_or((None, body), |(function, location)| {
                 (
-                    some(function),
+                    nonempty(function),
                     location.strip_suffix(')').unwrap_or(location),
                 )
             })
@@ -69,14 +65,14 @@ fn parse_frame(body: &str) -> StackFrame<'_> {
     let file = (location_text != "native" && !synthetic_index).then(|| source_file(location_text));
     StackFrame {
         function,
-        module: None,
         file,
+        ..StackFrame::default()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::Language;
 
     #[test]
     fn parses_v8_node_and_async_frames() {

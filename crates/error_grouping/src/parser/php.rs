@@ -1,14 +1,10 @@
 use crate::ast::{StackFrame, StackTrace, TraceSegment};
-use crate::parser::{error_kind, some};
-use crate::{Language, ParseError};
+use crate::parser::{error_kind, nonempty};
 
-pub(super) fn parse_lines<'a>(
-    lines: impl Iterator<Item = Result<&'a str, ParseError>>,
-) -> Result<StackTrace<'a>, ParseError> {
+pub(super) fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Option<StackTrace<'a>> {
     let mut segment = TraceSegment::default();
 
     for original in lines {
-        let original = original?;
         let line = original.trim();
         if line.is_empty() || line == "Stack trace:" {
             continue;
@@ -21,10 +17,7 @@ pub(super) fn parse_lines<'a>(
             segment.frames.push(frame);
         }
     }
-    if segment.frames.is_empty() && segment.error_kind.is_none() {
-        return Err(ParseError::Unrecognized);
-    }
-    Ok(StackTrace::new(Language::Php, vec![segment]))
+    StackTrace::nonempty(segment)
 }
 
 fn parse_error_header(line: &str) -> Option<&str> {
@@ -57,15 +50,15 @@ fn parse_frame(line: &str) -> Option<StackFrame<'_>> {
 fn frame<'a>(callable: &'a str, file: Option<&'a str>) -> StackFrame<'a> {
     let callable = callable.split_once('(').map_or(callable, |(name, _)| name);
     StackFrame {
-        function: some(callable),
-        module: None,
+        function: nonempty(callable),
         file,
+        ..StackFrame::default()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::Language;
 
     #[test]
     fn parses_php_fatal_trace() {

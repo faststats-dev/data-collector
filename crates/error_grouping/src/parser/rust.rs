@@ -1,10 +1,7 @@
 use crate::ast::{StackFrame, StackTrace, TraceSegment};
-use crate::parser::{payload, some, source_file};
-use crate::{Language, ParseError};
+use crate::parser::{nonempty, payload, source_file};
 
-pub(super) fn parse_lines<'a>(
-    lines: impl Iterator<Item = Result<&'a str, ParseError>>,
-) -> Result<StackTrace<'a>, ParseError> {
+pub(super) fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Option<StackTrace<'a>> {
     let mut segment = TraceSegment {
         error_kind: Some("panic"),
         ..TraceSegment::default()
@@ -13,7 +10,6 @@ pub(super) fn parse_lines<'a>(
     let mut in_cause_list = false;
 
     for original in lines {
-        let original = original?;
         let line = original.trim();
         if line.is_empty() {
             continue;
@@ -34,9 +30,9 @@ pub(super) fn parse_lines<'a>(
         }
     }
     if segment.frames.is_empty() && !saw_panic_header {
-        return Err(ParseError::Unrecognized);
+        return None;
     }
-    Ok(StackTrace::new(Language::Rust, vec![segment]))
+    Some(StackTrace::single(segment))
 }
 
 fn is_panic_header(line: &str) -> bool {
@@ -68,22 +64,21 @@ fn indexed_frame(line: &str) -> Option<&str> {
 
 fn parse_frame(body: &str) -> StackFrame<'_> {
     let function = if let Some((_, function)) = body.split_once(" - ") {
-        some(function)
+        nonempty(function)
     } else if body.starts_with("0x") {
         None
     } else {
-        some(body)
+        nonempty(body)
     };
     StackFrame {
         function,
-        module: None,
-        file: None,
+        ..StackFrame::default()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::{Language, ParseError};
 
     #[test]
     fn parses_modern_panic_and_backtrace() {

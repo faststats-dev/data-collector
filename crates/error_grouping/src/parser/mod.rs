@@ -24,22 +24,23 @@ pub(crate) fn parse<'a>(
         return Err(ParseError::Empty);
     }
 
-    let lines = ValidatingLines::new(input, limits);
-    match language {
-        Language::Java => java::parse_lines(lines),
-        Language::Rust => rust::parse_lines(lines),
-        Language::JavaScript => javascript::parse_lines(lines),
-        Language::Python => python::parse_lines(lines),
-        Language::Php => php::parse_lines(lines),
-        Language::Go => go::parse_lines(lines),
-        Language::Swift => swift::parse_lines(lines),
-    }
+    let mut lines = ValidatingLines::new(input, limits);
+    let trace = match language {
+        Language::Java => java::parse_lines(&mut lines),
+        Language::Rust => rust::parse_lines(&mut lines),
+        Language::JavaScript => javascript::parse_lines(&mut lines),
+        Language::Python => python::parse_lines(&mut lines),
+        Language::Php => php::parse_lines(&mut lines),
+        Language::Go => go::parse_lines(&mut lines),
+        Language::Swift => swift::parse_lines(&mut lines),
+    };
+    lines.finish(trace)
 }
 
 struct ValidatingLines<'input, 'limits> {
     lines: std::iter::Enumerate<std::str::Lines<'input>>,
     limits: &'limits ParserLimits,
-    failed: bool,
+    error: Option<ParseError>,
 }
 
 impl<'input, 'limits> ValidatingLines<'input, 'limits> {
@@ -47,36 +48,43 @@ impl<'input, 'limits> ValidatingLines<'input, 'limits> {
         Self {
             lines: input.lines().enumerate(),
             limits,
-            failed: false,
+            error: None,
+        }
+    }
+
+    fn finish<T>(self, value: Option<T>) -> Result<T, ParseError> {
+        match self.error {
+            Some(error) => Err(error),
+            None => value.ok_or(ParseError::Unrecognized),
         }
     }
 }
 
 impl<'input> Iterator for ValidatingLines<'input, '_> {
-    type Item = Result<&'input str, ParseError>;
+    type Item = &'input str;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.failed {
+        if self.error.is_some() {
             return None;
         }
 
         let (index, line) = self.lines.next()?;
         let line_number = index + 1;
         if line_number > self.limits.max_lines {
-            self.failed = true;
-            return Some(Err(ParseError::TooManyLines {
+            self.error = Some(ParseError::TooManyLines {
                 limit: self.limits.max_lines,
-            }));
+            });
+            return None;
         }
         if line.len() > self.limits.max_line_bytes {
-            self.failed = true;
-            return Some(Err(ParseError::LineTooLong {
+            self.error = Some(ParseError::LineTooLong {
                 line: line_number,
                 actual: line.len(),
                 limit: self.limits.max_line_bytes,
-            }));
+            });
+            return None;
         }
-        Some(Ok(line))
+        Some(line)
     }
 }
 
@@ -103,25 +111,21 @@ pub(crate) fn payload<'a>(line: &'a str, prefix: &'static str) -> Option<&'a str
 
 pub(crate) fn source_file(text: &str) -> &str {
     let text = text.trim();
-    let (before_last_number, _) = take_numeric_suffix(text);
-    let (before_line, line) = take_numeric_suffix(before_last_number);
-    line.map_or(before_last_number, |_| before_line)
+    let text = strip_numeric_suffix(text).unwrap_or(text);
+    strip_numeric_suffix(text).unwrap_or(text)
 }
 
-fn take_numeric_suffix(text: &str) -> (&str, Option<u32>) {
-    let Some((head, tail)) = text.rsplit_once(':') else {
-        return (text, None);
-    };
-    tail.parse::<u32>()
-        .map_or((text, None), |value| (head, Some(value)))
+fn strip_numeric_suffix(text: &str) -> Option<&str> {
+    let (head, tail) = text.rsplit_once(':')?;
+    tail.parse::<u32>().is_ok().then_some(head)
 }
 
 pub(crate) fn error_kind(text: &str) -> Option<&str> {
     let text = text.trim();
-    some(text.split_once(':').map_or(text, |(kind, _)| kind).trim())
+    nonempty(text.split_once(':').map_or(text, |(kind, _)| kind).trim())
 }
 
-pub(crate) fn some(value: &str) -> Option<&str> {
+pub(crate) fn nonempty(value: &str) -> Option<&str> {
     (!value.is_empty()).then_some(value)
 }
 

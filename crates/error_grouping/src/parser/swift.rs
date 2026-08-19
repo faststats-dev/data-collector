@@ -1,15 +1,11 @@
 use crate::ast::{StackFrame, StackTrace, TraceSegment};
-use crate::parser::{some, source_file};
-use crate::{Language, ParseError};
+use crate::parser::{nonempty, source_file};
 
-pub(super) fn parse_lines<'a>(
-    lines: impl Iterator<Item = Result<&'a str, ParseError>>,
-) -> Result<StackTrace<'a>, ParseError> {
+pub(super) fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Option<StackTrace<'a>> {
     let mut segment = TraceSegment::default();
     let mut include_thread = None;
 
     for original in lines {
-        let original = original?;
         let line = original.trim();
         if line.is_empty() {
             continue;
@@ -29,10 +25,7 @@ pub(super) fn parse_lines<'a>(
         }
     }
 
-    if segment.frames.is_empty() && segment.error_kind.is_none() {
-        return Err(ParseError::Unrecognized);
-    }
-    Ok(StackTrace::new(Language::Swift, vec![segment]))
+    StackTrace::nonempty(segment)
 }
 
 fn runtime_failure_kind(line: &str) -> Option<&str> {
@@ -98,7 +91,7 @@ fn strip_address(mut body: &str) -> Option<(&str, Option<&str>)> {
             .next_back()
             .is_some_and(char::is_whitespace)
     {
-        module = some(body[..address].trim());
+        module = nonempty(body[..address].trim());
         body = &body[address..];
     }
     if body.starts_with("0x") {
@@ -138,7 +131,7 @@ fn split_symbol<'a>(
     let (function, module) = symbol
         .rsplit_once(" in ")
         .map_or((symbol, leading_module), |(function, swift_module)| {
-            (function, some(swift_module))
+            (function, nonempty(swift_module))
         });
     let function = strip_offset(function).trim();
     let function = (function != "<unknown>" && !function.starts_with("0x")).then_some(function);
@@ -161,6 +154,7 @@ fn has_source_position(location: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Language;
 
     #[test]
     fn parses_runtime_failure_and_only_the_crashed_thread() {

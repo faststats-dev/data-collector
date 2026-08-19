@@ -52,26 +52,22 @@ impl fmt::Display for Fingerprint {
 }
 
 pub(crate) fn parsed(
+    language: Language,
     trace: &StackTrace<'_>,
     authoritative_kind: &str,
     options: FingerprintOptions<'_>,
 ) -> Fingerprint {
-    let mut canonical = header(
-        trace.language,
-        authoritative_kind,
-        root_kind(trace),
-        options,
-    );
+    let mut canonical = header(language, authoritative_kind, root_kind(trace), options);
 
     if options.max_segments > 0
         && let Some(root) = trace.segments.first()
     {
-        write_segment(&mut canonical, trace.language, root, false, options);
+        write_segment(&mut canonical, language, root, false, options);
 
         if options.max_segments > 1
             && let Some(cause) = terminal_cause(trace)
         {
-            write_segment(&mut canonical, trace.language, cause, true, options);
+            write_segment(&mut canonical, language, cause, true, options);
         }
     } else {
         write_empty_root(&mut canonical);

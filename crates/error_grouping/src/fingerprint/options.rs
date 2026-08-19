@@ -21,12 +21,12 @@ impl Default for FingerprintOptions<'_> {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct FrameOptions<'a> {
-    pub max_frames: usize,
-    pub fields: FrameFields,
-    pub filter_runtime: bool,
-    pub deduplicate_adjacent: bool,
-    pub exclusions: &'a [FrameExclusion<'a>],
+pub(crate) struct FrameOptions<'a> {
+    pub(super) max_frames: usize,
+    pub(super) fields: FrameFields,
+    pub(super) filter_runtime: bool,
+    pub(super) deduplicate_adjacent: bool,
+    pub(super) exclusions: &'a [FrameExclusion<'a>],
 }
 
 impl FrameOptions<'_> {
@@ -64,10 +64,10 @@ impl Default for FrameOptions<'_> {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct FrameFields {
-    pub function: bool,
-    pub module: bool,
-    pub file: bool,
+pub(super) struct FrameFields {
+    function: bool,
+    module: bool,
+    file: bool,
 }
 
 #[cfg_attr(
@@ -96,11 +96,9 @@ impl FrameFields {
 
     pub(super) fn values<'a>(self, identity: &'a FrameIdentity<'_>) -> [Option<&'a str>; 3] {
         [
-            self.function
-                .then_some(identity.function.as_deref())
-                .flatten(),
-            self.module.then_some(identity.module.as_deref()).flatten(),
-            self.file.then_some(identity.file.as_deref()).flatten(),
+            identity.function.as_deref().filter(|_| self.function),
+            identity.module.as_deref().filter(|_| self.module),
+            identity.file.as_deref().filter(|_| self.file),
         ]
     }
 }
@@ -110,7 +108,7 @@ impl FrameFields {
     not(test),
     expect(dead_code, reason = "reserved for internal fingerprint policies")
 )]
-pub enum FrameField {
+pub(super) enum FrameField {
     Function,
     Module,
     File,
@@ -132,7 +130,7 @@ impl FrameField {
     expect(dead_code, reason = "reserved for internal fingerprint policies")
 )]
 /// A match against a normalized frame field. Empty patterns never match.
-pub enum FrameExclusion<'a> {
+pub(super) enum FrameExclusion<'a> {
     Exact(FrameField, &'a str),
     Prefix(FrameField, &'a str),
     Suffix(FrameField, &'a str),

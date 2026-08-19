@@ -50,7 +50,7 @@ fn normalize_function(language: Language, function: &str) -> Cow<'_, str> {
 }
 
 fn normalized_file(language: Language, file: &str) -> Option<Cow<'_, str>> {
-    let file = file.trim().split(['?', '#']).next().unwrap_or("");
+    let file = file.trim().split(['?', '#']).next()?;
     let file = file.trim_end_matches(['/', '\\']);
     if file.is_empty() {
         return None;

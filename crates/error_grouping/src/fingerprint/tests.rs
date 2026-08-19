@@ -12,7 +12,7 @@ fn fingerprint_with_options(
     options: FingerprintOptions<'_>,
 ) -> Fingerprint {
     let trace = language.parse_stack(stack).unwrap();
-    parsed(&trace, kind, options)
+    parsed(language, &trace, kind, options)
 }
 
 fn fingerprints(
@@ -76,6 +76,7 @@ fn parsed_header_without_frames_matches_kind_only_identity() {
         .unwrap();
     assert_eq!(
         parsed(
+            Language::Java,
             &trace,
             "java.lang.RuntimeException",
             FingerprintOptions::default()

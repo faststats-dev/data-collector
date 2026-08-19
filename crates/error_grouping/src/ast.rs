@@ -1,16 +1,21 @@
 use std::{error::Error, fmt};
 
-use crate::Language;
-
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct StackTrace<'a> {
     pub(crate) segments: Vec<TraceSegment<'a>>,
-    pub(crate) language: Language,
 }
 
 impl<'a> StackTrace<'a> {
-    pub(crate) const fn new(language: Language, segments: Vec<TraceSegment<'a>>) -> Self {
-        Self { segments, language }
+    pub(crate) const fn new(segments: Vec<TraceSegment<'a>>) -> Self {
+        Self { segments }
+    }
+
+    pub(crate) fn single(segment: TraceSegment<'a>) -> Self {
+        Self::new(vec![segment])
+    }
+
+    pub(crate) fn nonempty(segment: TraceSegment<'a>) -> Option<Self> {
+        (!segment.is_empty()).then(|| Self::single(segment))
     }
 
     #[cfg(test)]
@@ -27,6 +32,12 @@ pub(crate) struct TraceSegment<'a> {
     pub(crate) frames: Vec<StackFrame<'a>>,
 }
 
+impl TraceSegment<'_> {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.frames.is_empty() && self.error_kind.is_none()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub(crate) enum SegmentRelation {
     #[default]
@@ -37,7 +48,7 @@ pub(crate) enum SegmentRelation {
     Suppressed,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct StackFrame<'a> {
     pub(crate) function: Option<&'a str>,
     pub(crate) module: Option<&'a str>,

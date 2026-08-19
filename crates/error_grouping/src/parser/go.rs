@@ -1,15 +1,11 @@
 use crate::ast::{StackFrame, StackTrace, TraceSegment};
-use crate::parser::{payload, some, source_file};
-use crate::{Language, ParseError};
+use crate::parser::{nonempty, payload, source_file};
 
-pub(super) fn parse_lines<'a>(
-    lines: impl Iterator<Item = Result<&'a str, ParseError>>,
-) -> Result<StackTrace<'a>, ParseError> {
+pub(super) fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Option<StackTrace<'a>> {
     let mut segment = TraceSegment::default();
     let mut goroutines = 0;
 
     for original in lines {
-        let original = original?;
         let line = original.trim();
         if line.is_empty() {
             continue;
@@ -36,10 +32,7 @@ pub(super) fn parse_lines<'a>(
             segment.frames.push(go_frame(line));
         }
     }
-    if segment.frames.is_empty() && segment.error_kind.is_none() {
-        return Err(ParseError::Unrecognized);
-    }
-    Ok(StackTrace::new(Language::Go, vec![segment]))
+    StackTrace::nonempty(segment)
 }
 
 fn is_goroutine(line: &str) -> bool {
@@ -63,9 +56,8 @@ fn go_frame(line: &str) -> StackFrame<'_> {
     // Receiver types may contain parentheses, as in `pkg.(*Server).Serve()`.
     let function = line.rsplit_once('(').map_or(line, |(function, _)| function);
     StackFrame {
-        function: some(function),
-        module: None,
-        file: None,
+        function: nonempty(function),
+        ..StackFrame::default()
     }
 }
 
@@ -78,6 +70,7 @@ fn parse_file(line: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Language;
 
     #[test]
     fn parses_panic_goroutine_and_created_by_frames() {

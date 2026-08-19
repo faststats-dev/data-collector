@@ -1,10 +1,7 @@
 use crate::ast::{SegmentRelation, StackFrame, StackTrace, TraceSegment};
-use crate::parser::{error_kind, looks_like_exception, some, trim_line};
-use crate::{Language, ParseError};
+use crate::parser::{error_kind, looks_like_exception, nonempty, trim_line};
 
-pub(super) fn parse_lines<'a>(
-    lines: impl Iterator<Item = Result<&'a str, ParseError>>,
-) -> Result<StackTrace<'a>, ParseError> {
+pub(super) fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Option<StackTrace<'a>> {
     let mut segments = Vec::new();
     let mut current = None;
     let mut expect_context = false;
@@ -13,7 +10,6 @@ pub(super) fn parse_lines<'a>(
     let mut saw_traceback = false;
 
     for original in lines {
-        let original = original?;
         let (raw, indent) = trim_line(original);
         if skip_group_children {
             if chain_relation(raw).is_none() {
@@ -58,7 +54,7 @@ pub(super) fn parse_lines<'a>(
     }
     finish_segment(&mut segments, &mut current);
     if !saw_traceback || segments.is_empty() {
-        return Err(ParseError::Unrecognized);
+        return None;
     }
 
     // Python prints the oldest cause first. The common AST keeps the root first.
@@ -69,7 +65,7 @@ pub(super) fn parse_lines<'a>(
             segment.relation = SegmentRelation::Root;
         }
     }
-    Ok(StackTrace::new(Language::Python, segments))
+    Some(StackTrace::new(segments))
 }
 
 fn finish_segment<'a>(
@@ -77,7 +73,7 @@ fn finish_segment<'a>(
     current: &mut Option<TraceSegment<'a>>,
 ) {
     if let Some(segment) = current.take()
-        && (!segment.frames.is_empty() || segment.error_kind.is_some())
+        && !segment.is_empty()
     {
         segments.push(segment);
     }
@@ -123,18 +119,19 @@ fn parse_frame(line: &str) -> Option<StackFrame<'_>> {
     let (file, rest) = rest.split_once("\", line ")?;
     let (line, function) = rest
         .split_once(", in ")
-        .map_or((rest, None), |(line, function)| (line, some(function)));
+        .map_or((rest, None), |(line, function)| (line, nonempty(function)));
     line.parse::<u32>().ok()?;
     Some(StackFrame {
         function,
-        module: None,
         file: Some(file),
+        ..StackFrame::default()
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Language;
 
     #[test]
     fn parses_frames_context_and_chained_exceptions() {

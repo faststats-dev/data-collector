@@ -1,14 +1,10 @@
 use crate::ast::{SegmentRelation, StackFrame, StackTrace, TraceSegment};
-use crate::parser::{error_kind, looks_like_exception, payload, some, source_file, trim_line};
-use crate::{Language, ParseError};
+use crate::parser::{error_kind, looks_like_exception, nonempty, payload, source_file, trim_line};
 
-pub(super) fn parse_lines<'a>(
-    lines: impl Iterator<Item = Result<&'a str, ParseError>>,
-) -> Result<StackTrace<'a>, ParseError> {
+pub(super) fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Option<StackTrace<'a>> {
     let mut trace = JavaTraceBuilder::default();
 
     for original in lines {
-        let original = original?;
         let (line, _) = trim_line(original);
         if line.is_empty() {
             continue;
@@ -60,15 +56,11 @@ impl<'a> JavaTraceBuilder<'a> {
         }
     }
 
-    fn finish(self) -> Result<StackTrace<'a>, ParseError> {
-        if self
-            .segments
-            .iter()
-            .any(|segment| !segment.frames.is_empty() || segment.error_kind.is_some())
-        {
-            Ok(StackTrace::new(Language::Java, self.segments))
+    fn finish(self) -> Option<StackTrace<'a>> {
+        if self.segments.iter().any(|segment| !segment.is_empty()) {
+            Some(StackTrace::new(self.segments))
         } else {
-            Err(ParseError::Unrecognized)
+            None
         }
     }
 }
@@ -97,7 +89,7 @@ fn parse_frame(body: &str) -> Option<StackFrame<'_>> {
                 let module = prefix.rsplit('/').next().and_then(|module| {
                     module
                         .split_once('@')
-                        .map_or_else(|| some(module), |(name, _)| some(name))
+                        .map_or_else(|| nonempty(module), |(name, _)| nonempty(name))
                 });
                 (module, callable)
             })
@@ -107,7 +99,7 @@ fn parse_frame(body: &str) -> Option<StackFrame<'_>> {
     let unknown_source = source == "Unknown Source";
     let file = (!native && !unknown_source).then(|| source_file(source));
     Some(StackFrame {
-        function: some(callable),
+        function: nonempty(callable),
         module,
         file,
     })
@@ -116,6 +108,7 @@ fn parse_frame(body: &str) -> Option<StackFrame<'_>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Language;
 
     #[test]
     fn parses_modules_native_frames_causes_and_elisions() {

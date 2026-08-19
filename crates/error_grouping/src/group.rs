@@ -52,7 +52,7 @@ pub(crate) fn group_with_options(
 
     match input.language.parse_stack(input.stack) {
         Ok(trace) => GroupingResult {
-            fingerprint: fingerprint::parsed(&trace, input.error_kind, options),
+            fingerprint: fingerprint::parsed(input.language, &trace, input.error_kind, options),
             evidence: GroupingEvidence::ParsedStack,
             parse_error: None,
         },

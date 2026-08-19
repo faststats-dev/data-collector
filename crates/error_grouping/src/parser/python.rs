@@ -8,19 +8,34 @@ pub(super) fn parse_lines<'a>(
     let mut segments = Vec::new();
     let mut current = None;
     let mut expect_context = false;
+    let mut exception_group = false;
+    let mut skip_group_children = false;
     let mut saw_traceback = false;
 
     for original in lines {
         let original = original?;
-        let (line, indent) = trim_line(original);
+        let (raw, indent) = trim_line(original);
+        if skip_group_children {
+            if chain_relation(raw).is_none() {
+                continue;
+            }
+            skip_group_children = false;
+            exception_group = false;
+        }
+        let (line, indent) = traceback_line(raw, indent);
         if line.is_empty() {
             continue;
         }
-        if is_traceback_header(line) {
+        // Sibling exception trees do not fit the linear AST. Keep the stable
+        // outer group stack and ignore its message-heavy child rendering.
+        if exception_group && line.starts_with("+-+") {
+            skip_group_children = true;
+        } else if let Some(group) = traceback_header(line) {
             saw_traceback = true;
             finish_segment(&mut segments, &mut current);
             current = Some(TraceSegment::default());
             expect_context = false;
+            exception_group = group;
         } else if let Some(relation) = chain_relation(line) {
             finish_segment(&mut segments, &mut current);
             if let Some(segment) = segments.last_mut() {
@@ -68,8 +83,27 @@ fn finish_segment<'a>(
     }
 }
 
-fn is_traceback_header(line: &str) -> bool {
-    line == "Traceback (most recent call last):"
+fn traceback_header(line: &str) -> Option<bool> {
+    match line {
+        "Traceback (most recent call last):" => Some(false),
+        "Exception Group Traceback (most recent call last):" => Some(true),
+        _ => None,
+    }
+}
+
+fn traceback_line(mut line: &str, mut indent: usize) -> (&str, usize) {
+    if let Some(header) = line.strip_prefix("+ ")
+        && header.starts_with("Exception Group Traceback ")
+    {
+        line = header;
+        indent = 0;
+    }
+    loop {
+        let Some(rest) = line.strip_prefix("| ") else {
+            return (line, indent);
+        };
+        (line, indent) = trim_line(rest);
+    }
 }
 
 fn chain_relation(line: &str) -> Option<SegmentRelation> {
@@ -133,5 +167,27 @@ mod tests {
             .unwrap();
 
         assert_eq!(trace.segments()[0].frames[0].function, Some("crash"));
+    }
+
+    #[test]
+    fn parses_exception_group_outer_traceback() {
+        let trace = Language::Python
+            .parse_stack(
+                " + Exception Group Traceback (most recent call last):\n |   File \"app.py\", line 8, in run\n | ExceptionGroup: failures (2 sub-exceptions)\n +-+---------------- 1 ----------------\n   | Traceback (most recent call last):\n   |   File \"worker.py\", line 3, in first\n   | ValueError: one\n   +---------------- 2 ----------------\n   | TypeError: two\n   +------------------------------------",
+            )
+            .unwrap();
+
+        assert_eq!(
+            &trace.segments()[0],
+            &TraceSegment {
+                relation: SegmentRelation::Root,
+                error_kind: Some("ExceptionGroup"),
+                frames: vec![StackFrame {
+                    function: Some("run"),
+                    module: None,
+                    file: Some("app.py"),
+                }],
+            }
+        );
     }
 }

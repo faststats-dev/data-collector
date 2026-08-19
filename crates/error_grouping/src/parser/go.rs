@@ -1,21 +1,20 @@
 use crate::ast::{StackFrame, StackTrace, TraceSegment};
-use crate::parser::{payload, some, source_file, trim_line};
+use crate::parser::{payload, some, source_file};
 use crate::{Language, ParseError};
 
 pub(super) fn parse_lines<'a>(
     lines: impl Iterator<Item = Result<&'a str, ParseError>>,
 ) -> Result<StackTrace<'a>, ParseError> {
     let mut segment = TraceSegment::default();
-    let mut saw_goroutine = false;
-    let mut skip_goroutine = false;
+    let mut goroutines = 0;
 
     for original in lines {
         let original = original?;
-        let (line, indent) = trim_line(original);
+        let line = original.trim();
         if line.is_empty() {
             continue;
         }
-        if skip_goroutine {
+        if goroutines == 2 {
             continue;
         }
         if payload(line, "panic: ").is_some() {
@@ -23,20 +22,14 @@ pub(super) fn parse_lines<'a>(
         } else if payload(line, "fatal error: ").is_some() {
             segment.error_kind = Some("fatal error");
         } else if is_goroutine(line) {
-            if saw_goroutine {
-                skip_goroutine = true;
-                continue;
-            }
-            saw_goroutine = true;
+            goroutines += 1;
         } else if let Some(function) = line.strip_prefix("created by ") {
             let function = function
                 .split_once(" in goroutine ")
                 .map_or(function, |(function, _)| function);
             segment.frames.push(go_frame(function));
-        } else if indent > 0 {
-            if let Some(frame) = segment.frames.last_mut()
-                && let Some(file) = parse_file(line)
-            {
+        } else if let Some(file) = parse_file(line) {
+            if let Some(frame) = segment.frames.last_mut() {
                 frame.file = Some(file);
             }
         } else if is_function_line(line) {
@@ -125,5 +118,23 @@ mod tests {
             .unwrap();
         assert_eq!(trace.segments()[0].frames[0].function, Some("main.f"));
         assert_eq!(trace.segments()[0].frames[0].file.unwrap(), "/app.go");
+    }
+
+    #[test]
+    fn parses_uniformly_indented_traces() {
+        let trace = Language::Go
+            .parse_stack(
+                "  panic: bad\n  goroutine 1 [running]:\n  main.work()\n    /app.go:3 +0x1",
+            )
+            .unwrap();
+
+        assert_eq!(
+            trace.segments()[0].frames[0],
+            StackFrame {
+                function: Some("main.work"),
+                module: None,
+                file: Some("/app.go"),
+            }
+        );
     }
 }

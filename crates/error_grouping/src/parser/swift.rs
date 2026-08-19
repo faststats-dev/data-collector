@@ -6,9 +6,7 @@ pub(super) fn parse_lines<'a>(
     lines: impl Iterator<Item = Result<&'a str, ParseError>>,
 ) -> Result<StackTrace<'a>, ParseError> {
     let mut segment = TraceSegment::default();
-    let mut saw_swift_header = false;
-    let mut saw_thread_headers = false;
-    let mut in_crashed_thread = false;
+    let mut include_thread = None;
 
     for original in lines {
         let original = original?;
@@ -17,24 +15,21 @@ pub(super) fn parse_lines<'a>(
             continue;
         }
         if let Some(kind) = runtime_failure_kind(line) {
-            saw_swift_header = true;
             segment.error_kind = Some(kind);
         } else if let Some(kind) = crash_kind(line) {
-            saw_swift_header = true;
             if segment.error_kind.is_none() {
                 segment.error_kind = Some(kind);
             }
         } else if let Some(crashed) = crashed_thread(line) {
-            saw_thread_headers = true;
-            in_crashed_thread = crashed;
-        } else if (!saw_thread_headers || in_crashed_thread)
+            include_thread = Some(crashed);
+        } else if include_thread.unwrap_or(true)
             && let Some(frame) = parse_frame(line)
         {
             segment.frames.push(frame);
         }
     }
 
-    if !saw_swift_header && segment.frames.is_empty() {
+    if segment.frames.is_empty() && segment.error_kind.is_none() {
         return Err(ParseError::Unrecognized);
     }
     Ok(StackTrace::new(Language::Swift, vec![segment]))
@@ -60,13 +55,12 @@ fn crash_kind(line: &str) -> Option<&str> {
 }
 
 fn crashed_thread(line: &str) -> Option<bool> {
-    let header = line.strip_prefix("Thread ")?.strip_suffix(':')?;
-    Some(
-        header
-            .split_ascii_whitespace()
-            .next_back()
-            .is_some_and(|word| word.eq_ignore_ascii_case("crashed")),
-    )
+    let header = line.strip_prefix("Thread ")?;
+    let id_end = header.find([' ', ':'])?;
+    header[..id_end].parse::<u64>().ok()?;
+    Some(header.split_ascii_whitespace().any(|word| {
+        word.ends_with(':') && word.trim_end_matches(':').eq_ignore_ascii_case("crashed")
+    }))
 }
 
 fn parse_frame(line: &str) -> Option<StackFrame<'_>> {
@@ -224,5 +218,23 @@ mod tests {
         assert_eq!(frame.module, Some("TouchCanvas"));
         assert_eq!(frame.function, Some("CanvasView.update()"));
         assert_eq!(frame.file, Some("CanvasView.swift"));
+    }
+
+    #[test]
+    fn parses_crashed_thread_with_inline_queue_metadata() {
+        let trace = Language::Swift
+            .parse_stack(
+                "Thread 0:\n0 libsystem 0x1 idle + 8\nThread 5 \"worker:io\" Crashed:: Dispatch queue: com.example.worker\n0 Demo 0x2 App.run() + 4 (App.swift:9)\nThread 6:\n0 libsystem 0x3 worker + 8",
+            )
+            .unwrap();
+
+        assert_eq!(
+            trace.segments()[0].frames[0],
+            StackFrame {
+                function: Some("App.run()"),
+                module: Some("Demo"),
+                file: Some("App.swift"),
+            }
+        );
     }
 }

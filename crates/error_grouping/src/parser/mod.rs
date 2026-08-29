@@ -9,7 +9,7 @@ mod swift;
 use crate::ast::{ParserLimits, StackTrace};
 use crate::{Language, ParseError};
 
-pub(crate) fn parse<'a>(
+pub(super) fn parse<'a>(
     language: Language,
     input: &'a str,
     limits: &ParserLimits,
@@ -88,12 +88,12 @@ impl<'input> Iterator for ValidatingLines<'input, '_> {
     }
 }
 
-pub(crate) fn trim_line(line: &str) -> (&str, usize) {
+pub(super) fn trim_line(line: &str) -> (&str, usize) {
     let trimmed_start = line.trim_start();
     (trimmed_start.trim_end(), line.len() - trimmed_start.len())
 }
 
-pub(crate) fn looks_like_exception(line: &str, extra_kind_chars: &[char]) -> bool {
+pub(super) fn looks_like_exception(line: &str, extra_kind_chars: &[char]) -> bool {
     let kind = line.split_once(':').map_or(line, |(kind, _)| kind);
     !kind.is_empty()
         && kind.chars().all(|character| {
@@ -104,12 +104,12 @@ pub(crate) fn looks_like_exception(line: &str, extra_kind_chars: &[char]) -> boo
 }
 
 /// Parse a required prefix and return the remaining non-empty payload.
-pub(crate) fn payload<'a>(line: &'a str, prefix: &'static str) -> Option<&'a str> {
+pub(super) fn payload<'a>(line: &'a str, prefix: &'static str) -> Option<&'a str> {
     line.strip_prefix(prefix)
         .filter(|payload| !payload.is_empty())
 }
 
-pub(crate) fn source_file(text: &str) -> &str {
+pub(super) fn source_file(text: &str) -> &str {
     let text = text.trim();
     let text = strip_numeric_suffix(text).unwrap_or(text);
     strip_numeric_suffix(text).unwrap_or(text)
@@ -120,12 +120,12 @@ fn strip_numeric_suffix(text: &str) -> Option<&str> {
     tail.parse::<u32>().is_ok().then_some(head)
 }
 
-pub(crate) fn error_kind(text: &str) -> Option<&str> {
+pub(super) fn error_kind(text: &str) -> Option<&str> {
     let text = text.trim();
     nonempty(text.split_once(':').map_or(text, |(kind, _)| kind).trim())
 }
 
-pub(crate) fn nonempty(value: &str) -> Option<&str> {
+pub(super) fn nonempty(value: &str) -> Option<&str> {
     (!value.is_empty()).then_some(value)
 }
 

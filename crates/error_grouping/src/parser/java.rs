@@ -31,7 +31,7 @@ struct JavaTraceBuilder<'a> {
 }
 
 impl<'a> JavaTraceBuilder<'a> {
-    fn is_empty(&self) -> bool {
+    const fn is_empty(&self) -> bool {
         self.segments.is_empty()
     }
 

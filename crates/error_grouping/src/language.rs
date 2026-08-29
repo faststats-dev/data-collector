@@ -3,23 +3,33 @@ use std::{error::Error, fmt, str::FromStr};
 use crate::ParseError;
 use crate::ast::{ParserLimits, StackTrace};
 
+/// Runtime stack-trace syntax supported by the grouping engine.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
 pub enum Language {
+    /// Java and JVM stack traces.
     Java,
+    /// Rust panic backtraces.
     Rust,
+    /// JavaScript stacks in V8 or SpiderMonkey form.
     #[serde(alias = "js")]
     JavaScript,
+    /// Python tracebacks, including chained exceptions and exception groups.
     #[serde(alias = "py")]
     Python,
+    /// PHP fatal-error stack traces.
     Php,
+    /// Go panic and fatal-error traces.
     #[serde(alias = "golang")]
     Go,
+    /// Swift runtime and Apple crash-report traces.
     Swift,
 }
 
 impl Language {
+    /// Return the canonical lowercase storage name.
+    #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Java => "java",
@@ -32,8 +42,17 @@ impl Language {
         }
     }
 
-    pub(crate) fn parse_stack<'a>(self, input: &'a str) -> Result<StackTrace<'a>, ParseError> {
-        crate::parser::parse(self, input, &ParserLimits::default())
+    #[cfg(test)]
+    pub(super) fn parse_stack(self, input: &str) -> Result<StackTrace<'_>, ParseError> {
+        self.parse_stack_with_limits(input, &ParserLimits::default())
+    }
+
+    pub(super) fn parse_stack_with_limits<'a>(
+        self,
+        input: &'a str,
+        limits: &ParserLimits,
+    ) -> Result<StackTrace<'a>, ParseError> {
+        crate::parser::parse(self, input, limits)
     }
 }
 
@@ -62,6 +81,7 @@ impl FromStr for Language {
     }
 }
 
+/// Error returned when a language name is not supported.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UnsupportedLanguage;
 

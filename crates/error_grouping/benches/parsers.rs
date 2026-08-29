@@ -24,6 +24,15 @@ fn main() {
             stack: black_box(JAVA),
         })
     });
+    bench("group-and-format/java", JAVA, || {
+        group(GroupingInput {
+            language: Language::Java,
+            error_kind: "java.lang.RuntimeException",
+            stack: black_box(JAVA),
+        })
+        .fingerprint
+        .to_string()
+    });
     bench("group/java-nested", JAVA_NESTED, || {
         group(GroupingInput {
             language: Language::Java,

@@ -14,16 +14,22 @@ use crate::Language;
 use crate::ast::{SegmentRelation, StackTrace, TraceSegment};
 
 const DOMAIN: &[u8] = b"error-grouping/fingerprint/v1";
+/// Prefix identifying the canonical fingerprint format.
 pub const FINGERPRINT_VERSION: &str = "eg1";
 
+/// A stable SHA-256 error-group identity.
 #[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Fingerprint([u8; 32]);
 
 impl Fingerprint {
+    /// Return the raw SHA-256 digest.
+    #[must_use]
     pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
 
+    /// Encode the digest as lowercase hexadecimal without the version prefix.
+    #[must_use]
     pub fn to_hex(self) -> String {
         const HEX: &[u8; 16] = b"0123456789abcdef";
         let mut output = String::with_capacity(64);
@@ -43,15 +49,21 @@ impl fmt::Debug for Fingerprint {
 
 impl fmt::Display for Fingerprint {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{FINGERPRINT_VERSION}_")?;
-        for byte in self.0 {
-            write!(f, "{byte:02x}")?;
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        const PREFIX_LEN: usize = FINGERPRINT_VERSION.len() + 1;
+        let mut output = [0_u8; PREFIX_LEN + 64];
+        output[..FINGERPRINT_VERSION.len()].copy_from_slice(FINGERPRINT_VERSION.as_bytes());
+        output[FINGERPRINT_VERSION.len()] = b'_';
+        for (index, byte) in self.0.iter().copied().enumerate() {
+            output[PREFIX_LEN + index * 2] = HEX[usize::from(byte >> 4)];
+            output[PREFIX_LEN + index * 2 + 1] = HEX[usize::from(byte & 0x0f)];
         }
-        Ok(())
+        let output = str::from_utf8(&output).map_err(|_| fmt::Error)?;
+        f.write_str(output)
     }
 }
 
-pub(crate) fn parsed(
+pub(super) fn parsed(
     language: Language,
     trace: &StackTrace<'_>,
     authoritative_kind: &str,
@@ -76,7 +88,7 @@ pub(crate) fn parsed(
     finish(canonical)
 }
 
-pub(crate) fn kind_only(
+pub(super) fn kind_only(
     language: Language,
     error_kind: &str,
     options: FingerprintOptions<'_>,
@@ -86,7 +98,7 @@ pub(crate) fn kind_only(
     finish(canonical)
 }
 
-pub(crate) fn raw_stack(
+pub(super) fn raw_stack(
     language: Language,
     error_kind: &str,
     stack: &str,

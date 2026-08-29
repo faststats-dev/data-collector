@@ -1,45 +1,45 @@
 use std::{error::Error, fmt};
 
 #[derive(Debug, Eq, PartialEq)]
-pub(crate) struct StackTrace<'a> {
-    pub(crate) segments: Vec<TraceSegment<'a>>,
+pub(super) struct StackTrace<'a> {
+    pub(super) segments: Vec<TraceSegment<'a>>,
 }
 
 impl<'a> StackTrace<'a> {
-    pub(crate) const fn new(segments: Vec<TraceSegment<'a>>) -> Self {
+    pub(super) const fn new(segments: Vec<TraceSegment<'a>>) -> Self {
         Self { segments }
     }
 
-    pub(crate) fn single(segment: TraceSegment<'a>) -> Self {
+    pub(super) fn single(segment: TraceSegment<'a>) -> Self {
         Self::new(vec![segment])
     }
 
-    pub(crate) fn nonempty(segment: TraceSegment<'a>) -> Option<Self> {
+    pub(super) fn nonempty(segment: TraceSegment<'a>) -> Option<Self> {
         (!segment.is_empty()).then(|| Self::single(segment))
     }
 
     #[cfg(test)]
-    pub(crate) fn segments(&self) -> &[TraceSegment<'a>] {
+    pub(super) fn segments(&self) -> &[TraceSegment<'a>] {
         &self.segments
     }
 }
 
 #[derive(Debug, Default, Eq, PartialEq)]
-pub(crate) struct TraceSegment<'a> {
-    pub(crate) relation: SegmentRelation,
-    pub(crate) error_kind: Option<&'a str>,
+pub(super) struct TraceSegment<'a> {
+    pub(super) relation: SegmentRelation,
+    pub(super) error_kind: Option<&'a str>,
     /// Frames are ordered from the crash site toward the oldest caller.
-    pub(crate) frames: Vec<StackFrame<'a>>,
+    pub(super) frames: Vec<StackFrame<'a>>,
 }
 
 impl TraceSegment<'_> {
-    pub(crate) fn is_empty(&self) -> bool {
+    pub(super) const fn is_empty(&self) -> bool {
         self.frames.is_empty() && self.error_kind.is_none()
     }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
-pub(crate) enum SegmentRelation {
+pub(super) enum SegmentRelation {
     #[default]
     Root,
     Cause,
@@ -49,17 +49,17 @@ pub(crate) enum SegmentRelation {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct StackFrame<'a> {
-    pub(crate) function: Option<&'a str>,
-    pub(crate) module: Option<&'a str>,
-    pub(crate) file: Option<&'a str>,
+pub(super) struct StackFrame<'a> {
+    pub(super) function: Option<&'a str>,
+    pub(super) module: Option<&'a str>,
+    pub(super) file: Option<&'a str>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct ParserLimits {
-    pub(crate) max_input_bytes: usize,
-    pub(crate) max_lines: usize,
-    pub(crate) max_line_bytes: usize,
+pub(super) struct ParserLimits {
+    pub(super) max_input_bytes: usize,
+    pub(super) max_lines: usize,
+    pub(super) max_line_bytes: usize,
 }
 
 impl Default for ParserLimits {
@@ -93,6 +93,7 @@ pub enum ParseError {
 
 impl ParseError {
     /// Stable low-cardinality label suitable for metrics.
+    #[must_use]
     pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Empty => "empty",

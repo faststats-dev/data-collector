@@ -26,12 +26,13 @@ println!("{}", result.fingerprint); // eg1_<sha256>
 
 Parsing is iterative and bounded to 1 MiB, 16,384 lines, and 64 KiB per line. Supported runtimes are Java, JavaScript, Python, PHP, Go, Rust, and Swift.
 
-## Internal fingerprint options
+## Internal grouping options
 
-The public `group` function always uses `FingerprintOptions::default()`. The
-option types remain crate-private until a stable customization API is designed,
-but they provide the internal policy boundary for adding project-specific rules
-without changing parsing or canonical hashing.
+The public `group` function always uses the default `GroupingOptions`. The
+option types remain crate-private until a stable customization API is designed.
+Parser resource limits and fingerprint selection live behind that single policy
+boundary, which can later borrow compiled project rules without cloning them for
+every event.
 
 | Option | Default | Effect |
 | --- | --- | --- |

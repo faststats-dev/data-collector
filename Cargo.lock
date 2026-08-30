@@ -755,6 +755,7 @@ dependencies = [
  "moka",
  "regex",
  "reqwest",
+ "rrweb-types",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -2643,6 +2644,14 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "rrweb-types"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

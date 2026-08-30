@@ -17,38 +17,8 @@ use sqlx::types::Uuid as SqlxUuid;
 use std::collections::HashMap;
 use tracing::{error, warn};
 
-fn rrweb_timestamp_ms(value: &Value) -> Option<u64> {
-    let v = value.get("timestamp")?;
-    if let Some(u) = v.as_u64() {
-        return Some(u);
-    }
-    if let Some(i) = v.as_i64() {
-        return u64::try_from(i).ok();
-    }
-    let f = v.as_f64()?;
-    if f.is_finite() && f >= 0.0 {
-        Some(f.round() as u64)
-    } else {
-        None
-    }
-}
-
-fn rrweb_event_type(value: &Value) -> Option<u64> {
-    let v = value.get("type")?;
-    v.as_u64()
-        .or_else(|| v.as_i64().and_then(|i| u64::try_from(i).ok()))
-}
-
 pub(crate) fn is_valid_rrweb_event(event: &Value) -> bool {
-    if !event.is_object() {
-        return false;
-    }
-
-    if rrweb_timestamp_ms(event).is_none() {
-        return false;
-    }
-
-    matches!(rrweb_event_type(event), Some(t) if t <= 32)
+    rrweb_types::is_valid_event(event)
 }
 
 pub(crate) fn normalize_window_id(window_id: Option<String>, session_id: &str) -> String {
@@ -371,7 +341,19 @@ pub async fn replay(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_replay_origin_allowed, normalize_window_id};
+    use super::{is_replay_origin_allowed, is_valid_rrweb_event, normalize_window_id};
+    use serde_json::json;
+
+    #[test]
+    fn replay_event_validation_checks_the_event_payload() {
+        let invalid = json!({
+            "type": 2,
+            "timestamp": 1,
+            "data": { "node": {}, "initialOffset": { "top": 0, "left": 0 } }
+        });
+
+        assert!(!is_valid_rrweb_event(&invalid));
+    }
 
     #[test]
     fn normalize_window_id_trims_and_falls_back_to_session_id() {

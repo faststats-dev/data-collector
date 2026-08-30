@@ -2,7 +2,7 @@ use super::{
     check_ip_allowed, error_response, get_authorization, get_client_ip, insert_error_occurrence_v3,
     load_project_context, success_response,
 };
-use crate::error_tracking::ErrorLanguage;
+use crate::error_tracking::parse_optional_language;
 use crate::error_tracking::v3::{OccurrenceInput, build_occurrence, empty_context};
 use crate::models::{AppState, ErrorTracking};
 use axum::body::Bytes;
@@ -32,7 +32,8 @@ pub(crate) struct ErrorRequest {
     sdk_name: Option<String>,
     #[serde(default, alias = "sdk_version")]
     sdk_version: Option<String>,
-    language: ErrorLanguage,
+    #[serde(default)]
+    language: Option<String>,
 }
 
 pub async fn error(
@@ -64,7 +65,10 @@ pub async fn error(
         return error_response(StatusCode::FORBIDDEN, "Error tracking is not enabled");
     }
 
-    let language = payload.language;
+    let language = match parse_optional_language(payload.language.as_deref()) {
+        Ok(language) => language,
+        Err(error) => return error_response(StatusCode::BAD_REQUEST, &error.to_string()),
+    };
 
     let tracking_ctx = ctx.tracking_context(&token);
 
@@ -120,20 +124,11 @@ pub async fn error(
 #[cfg(test)]
 mod tests {
     use super::ErrorRequest;
-    use crate::error_tracking::ErrorLanguage;
 
     #[test]
-    fn request_requires_language() {
-        let result = serde_json::from_str::<ErrorRequest>(r#"{"errors": []}"#);
+    fn request_without_language_is_accepted() {
+        let request = serde_json::from_str::<ErrorRequest>(r#"{"errors": []}"#).unwrap();
 
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn request_language_uses_shared_alias_parsing() {
-        let request =
-            serde_json::from_str::<ErrorRequest>(r#"{"errors": [], "language": " RS "}"#).unwrap();
-
-        assert_eq!(request.language, ErrorLanguage::Rust);
+        assert_eq!(request.language, None);
     }
 }

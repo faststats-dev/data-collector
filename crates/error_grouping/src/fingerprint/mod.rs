@@ -28,6 +28,11 @@ pub struct Fingerprint {
     digest: [u8; 32],
 }
 
+pub(super) struct FingerprintOutput {
+    pub(super) fingerprint: Fingerprint,
+    pub(super) used_stack: bool,
+}
+
 impl Fingerprint {
     /// Return the raw SHA-256 digest.
     #[must_use]
@@ -79,7 +84,7 @@ impl fmt::Display for Hex<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         const HEX: &[u8; 16] = b"0123456789abcdef";
         let mut output = [0_u8; 64];
-        for (byte, encoded) in self.0.iter().zip(output.chunks_exact_mut(2)) {
+        for (byte, encoded) in self.0.iter().zip(output.as_chunks_mut::<2>().0) {
             encoded[0] = HEX[usize::from(byte >> 4)];
             encoded[1] = HEX[usize::from(byte & 0x0f)];
         }
@@ -94,18 +99,19 @@ pub(super) fn parsed(
     authoritative_kind: &str,
     policy: GroupingPolicy<'_>,
     policy_id: GroupingPolicyId,
-) -> Fingerprint {
+) -> FingerprintOutput {
     let mut canonical = header(language, authoritative_kind, root_kind(trace), policy);
+    let mut used_frames = false;
 
     match policy.segments {
         SegmentSelection::ErrorKindOnly => write_empty_root(&mut canonical),
         SegmentSelection::Root | SegmentSelection::RootAndTerminalCause => {
             if let Some(root) = trace.segments.first() {
-                write_segment(&mut canonical, language, root, false, policy);
+                used_frames |= write_segment(&mut canonical, language, root, false, policy);
                 if policy.segments == SegmentSelection::RootAndTerminalCause
                     && let Some(cause) = terminal_cause(trace)
                 {
-                    write_segment(&mut canonical, language, cause, true, policy);
+                    used_frames |= write_segment(&mut canonical, language, cause, true, policy);
                 }
             } else {
                 write_empty_root(&mut canonical);
@@ -113,7 +119,10 @@ pub(super) fn parsed(
         }
     }
 
-    finish(canonical, policy_id)
+    FingerprintOutput {
+        fingerprint: finish(canonical, policy_id),
+        used_stack: used_frames,
+    }
 }
 
 pub(super) fn kind_only(
@@ -133,15 +142,22 @@ pub(super) fn raw_stack(
     stack: &str,
     policy: GroupingPolicy<'_>,
     policy_id: GroupingPolicyId,
-) -> Fingerprint {
+) -> FingerprintOutput {
     let mut canonical = header(language, error_kind, None, policy);
-    match policy.raw_stack {
+    let used_raw_stack = match policy.raw_stack {
         RawStackPolicy::Bounded { max_bytes } => {
-            write_bounded_raw_stack(&mut canonical, stack, max_bytes)
+            write_bounded_raw_stack(&mut canonical, stack, max_bytes);
+            true
         }
-        RawStackPolicy::ErrorKindOnly => write_empty_root(&mut canonical),
+        RawStackPolicy::ErrorKindOnly => {
+            write_empty_root(&mut canonical);
+            false
+        }
+    };
+    FingerprintOutput {
+        fingerprint: finish(canonical, policy_id),
+        used_stack: used_raw_stack,
     }
-    finish(canonical, policy_id)
 }
 
 fn header(
@@ -190,7 +206,7 @@ fn write_segment(
     segment: &TraceSegment<'_>,
     include_kind: bool,
     policy: GroupingPolicy<'_>,
-) {
+) -> bool {
     canonical.tag(Tag::Segment);
     canonical.byte(relation_tag(segment.relation));
     let kind = (include_kind && policy.error_kind == ErrorKindPolicy::Include)
@@ -201,7 +217,7 @@ fn write_segment(
     let frames = policy.frames;
     if !frames.includes_frames() {
         canonical.tag(Tag::EndSegment);
-        return;
+        return false;
     }
 
     let filter_runtime = frames.runtime_frames
@@ -240,6 +256,7 @@ fn write_segment(
         included += 1;
     }
     canonical.tag(Tag::EndSegment);
+    included > 0
 }
 
 fn write_bounded_raw_stack(canonical: &mut Canonical, stack: &str, max_bytes: usize) {

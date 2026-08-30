@@ -204,13 +204,7 @@ impl MappingResolver {
     }
 
     async fn fetch_proguard_mapping(&self, prefix: &str) -> Option<Arc<ProguardMapping>> {
-        let mut keys = self
-            .list_keys(prefix)
-            .await
-            .map_err(|error| {
-                warn!(prefix, %error, "Failed to list proguard mappings");
-            })
-            .ok()?;
+        let mut keys = self.list_keys(prefix).await?;
         keys.sort_unstable();
         if keys.is_empty() {
             return None;
@@ -229,10 +223,7 @@ impl MappingResolver {
             .ok()
     }
 
-    async fn list_keys(
-        &self,
-        prefix: &str,
-    ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+    async fn list_keys(&self, prefix: &str) -> Option<Vec<String>> {
         let mut keys = Vec::new();
         let mut continuation_token: Option<String> = None;
 
@@ -247,7 +238,13 @@ impl MappingResolver {
                 req = req.continuation_token(token);
             }
 
-            let resp = req.send().await?;
+            let resp = req
+                .send()
+                .await
+                .map_err(|error| {
+                    warn!(prefix, %error, "Failed to list proguard mappings");
+                })
+                .ok()?;
             for object in resp.contents() {
                 if let Some(key) = object.key() {
                     keys.push(key.to_string());
@@ -260,7 +257,7 @@ impl MappingResolver {
             continuation_token = resp.next_continuation_token().map(Into::into);
         }
 
-        Ok(keys)
+        Some(keys)
     }
 
     async fn fetch_mapping_bytes(&self, key: &str) -> Option<Vec<u8>> {

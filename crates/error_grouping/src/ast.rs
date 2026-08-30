@@ -18,12 +18,6 @@ impl<'a> StackTrace<'a> {
         (!segment.is_empty()).then(|| Self::single(segment))
     }
 
-    pub(super) fn has_frames(&self) -> bool {
-        self.segments
-            .iter()
-            .any(|segment| !segment.frames.is_empty())
-    }
-
     #[cfg(test)]
     pub(super) fn segments(&self) -> &[TraceSegment<'a>] {
         &self.segments

@@ -15,7 +15,7 @@ fn fingerprint_with_policy(
     policy: GroupingPolicy<'_>,
 ) -> Fingerprint {
     let trace = language.parse_stack(stack).unwrap();
-    parsed(language, &trace, kind, policy, policy.id())
+    parsed(language, &trace, kind, policy, policy.id()).fingerprint
 }
 
 fn fingerprints(
@@ -86,7 +86,8 @@ fn parsed_header_without_frames_matches_kind_only_identity() {
             "java.lang.RuntimeException",
             policy,
             policy_id,
-        ),
+        )
+        .fingerprint,
         kind_only(
             Language::Java,
             "java.lang.RuntimeException",
@@ -195,7 +196,8 @@ fn raw_stack_fallback_separates_different_unparsed_stacks() {
             "first unsupported stack",
             policy,
             policy_id,
-        ),
+        )
+        .fingerprint,
         raw_stack(
             Language::Java,
             "Error",
@@ -203,6 +205,7 @@ fn raw_stack_fallback_separates_different_unparsed_stacks() {
             policy,
             policy_id,
         )
+        .fingerprint
     );
 }
 

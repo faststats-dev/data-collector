@@ -231,7 +231,10 @@ impl MappingResolver {
             .ok()
     }
 
-    async fn list_keys(&self, prefix: &str) -> Result<Vec<String>, aws_sdk_s3::Error> {
+    async fn list_keys(
+        &self,
+        prefix: &str,
+    ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
         let mut keys = Vec::new();
         let mut continuation_token: Option<String> = None;
 

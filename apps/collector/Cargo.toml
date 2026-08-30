@@ -5,15 +5,16 @@ edition.workspace = true
 
 [dependencies]
 user-agent = { path = "../../crates/user-agent" }
+rrweb-types = { path = "../../crates/rrweb-types" }
 dotenvy = "0.15.7"
 axum = "0.8.9"
 chrono = { version = "0.4.45", features = ["serde"] }
-flate2 = "1.1.9"
-regex = "1.13.1"
-serde = "1.0.229"
-serde_json = "1.0.151"
+flate2 = "1.1.10"
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 sha2 = "0.11.0"
-aes-gcm = "0.11.0"
+aes-gcm = "0.11.1"
 hex = "0.4.3"
 sourcemap = "9.3.2"
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "sqlite", "macros", "uuid", "json"] }
@@ -23,12 +24,12 @@ tower-http = { version = "0.7.0", features = ["cors", "decompression-gzip", "dec
 url = "2.5.8"
 moka = { version = "0.12.16", features = ["sync", "future"] }
 reqwest = { version = "0.13.4", features = ["json"] }
-uuid = { version = "1.24.1", features = ["serde", "v4"] }
+uuid = { version = "1.26.0", features = ["serde", "v4"] }
 metrics = "0.24.6"
 metrics-exporter-prometheus = "0.18.3"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-aws-sdk-s3 = { version = "1.142.0", features = ["behavior-version-latest"] }
+aws-sdk-s3 = { version = "1.144.0", features = ["behavior-version-latest"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"

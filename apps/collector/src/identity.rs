@@ -32,8 +32,6 @@ pub(crate) async fn upsert_person_and_alias(
     let clear_name = patch.clear_fields.iter().any(|field| field == "name");
     let clear_phone = patch.clear_fields.iter().any(|field| field == "phone");
     let clear_avatar = patch.clear_fields.iter().any(|field| field == "avatarUrl");
-    let traits = Value::Object(patch.traits.clone());
-
     let person_id: Uuid = sqlx::query_scalar(
         r#"
         INSERT INTO project_persons (
@@ -69,7 +67,7 @@ pub(crate) async fn upsert_person_and_alias(
     .bind(&patch.name)
     .bind(&patch.phone)
     .bind(&patch.avatar_url)
-    .bind(&traits)
+    .bind(sqlx::types::Json(&patch.traits))
     .bind(clear_email)
     .bind(clear_name)
     .bind(clear_phone)
@@ -90,23 +88,22 @@ pub(crate) async fn upsert_person_and_alias(
     aliases.sort();
     aliases.dedup();
 
-    for alias in &aliases {
-        sqlx::query(
-            r#"
+    sqlx::query(
+        r#"
             INSERT INTO project_person_aliases (
                 project_id, person_id, distinct_id, created_at, updated_at
             )
-            VALUES ($1, $2, $3, NOW(), NOW())
+            SELECT $1, $2, distinct_id, NOW(), NOW()
+            FROM UNNEST($3::text[]) AS aliases(distinct_id)
             ON CONFLICT (project_id, distinct_id)
             DO UPDATE SET person_id = EXCLUDED.person_id, updated_at = NOW()
             "#,
-        )
-        .bind(project_id)
-        .bind(person_id)
-        .bind(alias)
-        .execute(&mut *transaction)
-        .await?;
-    }
+    )
+    .bind(project_id)
+    .bind(person_id)
+    .bind(&aliases)
+    .execute(&mut *transaction)
+    .await?;
 
     transaction.commit().await?;
     Ok(person_id)

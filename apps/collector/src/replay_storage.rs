@@ -186,7 +186,7 @@ impl ReplayStorage {
     pub async fn store_replay_chunk(
         &self,
         pool: &sqlx::PgPool,
-        input: &mut ReplayChunkInput,
+        mut input: ReplayChunkInput,
     ) -> Result<ReplayStoreOutcome, ReplayStorageError> {
         if !replay_events_are_ordered(&input.events) {
             input.events.sort_by(replay_event_order_cmp);
@@ -244,7 +244,7 @@ impl ReplayStorage {
             input.sequence,
             first_event_timestamp_ms.unwrap_or(0),
         );
-        let (compressed, uncompressed_bytes) = compress_replay_events(input.events.clone()).await?;
+        let (compressed, uncompressed_bytes) = compress_replay_events(input.events).await?;
         let compressed_bytes = i64::try_from(compressed.len()).unwrap_or(i64::MAX);
 
         let bucket = self.bucket_for_project(input.project_id);

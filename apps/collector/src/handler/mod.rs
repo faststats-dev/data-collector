@@ -94,14 +94,7 @@ pub fn get_authorization(headers: &HeaderMap) -> Option<String> {
     headers
         .get("Authorization")
         .and_then(|value| value.to_str().ok())
-        .map(|auth| {
-            if auth.starts_with("Bearer ") {
-                auth.trim_start_matches("Bearer ")
-            } else {
-                auth
-            }
-        })
-        .map(String::from)
+        .map(|auth| auth.strip_prefix("Bearer ").unwrap_or(auth).to_owned())
 }
 
 pub fn error_response(status: StatusCode, message: &str) -> HandlerResponse {
@@ -158,6 +151,16 @@ pub struct ProjectContext {
     pub ip_rules: Vec<IpRule>,
 }
 
+impl ProjectContext {
+    fn tracking_context(&self, token: &str) -> TrackingContext {
+        TrackingContext {
+            owner_id: self.billing_customer_id.as_str().into(),
+            token: token.into(),
+            organization_id: self.organization_id.as_deref().map(Into::into),
+        }
+    }
+}
+
 pub async fn load_project_context(
     pool: &sqlx::PgPool,
     token: &str,
@@ -197,7 +200,7 @@ pub async fn load_project_context(
     for row in &rows {
         if let Ok(Some(ref_id)) = row.try_get::<Option<String>, _>("reference_id") {
             datasources.insert(
-                ref_id.clone(),
+                ref_id,
                 DataSource {
                     data_type: row.try_get::<String, _>("data_type").unwrap_or_default(),
                     regex: row.try_get("regex").ok(),
@@ -723,11 +726,7 @@ async fn process_web_request(
     }
     known.insert("device".into(), Value::String(ua_info.device.to_string()));
 
-    let tracking_ctx = TrackingContext {
-        owner_id: ctx.billing_customer_id.as_str().into(),
-        token: token.into(),
-        organization_id: ctx.organization_id.as_deref().map(Into::into),
-    };
+    let tracking_ctx = ctx.tracking_context(&token);
     let fallback_identity = resolved_user_id.to_string();
     let event_row = build_web_event_row(
         ctx.project_id,
@@ -833,11 +832,7 @@ async fn process_vitals_request(
     let req: WebVitalRequest =
         serde_json::from_slice(&request.body).map_err(|_| "Invalid JSON".to_string())?;
 
-    let tracking_ctx = TrackingContext {
-        owner_id: ctx.billing_customer_id.as_str().into(),
-        token: request.token.as_str().into(),
-        organization_id: ctx.organization_id.as_deref().map(Into::into),
-    };
+    let tracking_ctx = ctx.tracking_context(&request.token);
 
     let ua_info = user_agent::parse(request.user_agent.as_deref().unwrap_or(""));
     let rows = vitals::build_web_vital_rows(
@@ -908,14 +903,14 @@ async fn process_replay_request(
         request.country.as_deref(),
     )?;
 
-    let mut input = built.input;
+    let input = built.input;
     let stored = if input.events.is_empty() {
         replay_storage
             .finalize_replay_session(pool, input.project_id, &input.session_id, &input.window_id)
             .await
             .map(|()| Default::default())
     } else {
-        replay_storage.store_replay_chunk(pool, &mut input).await
+        replay_storage.store_replay_chunk(pool, input).await
     }
     .map_err(|error| error.to_string())?;
 

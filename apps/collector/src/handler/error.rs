@@ -2,7 +2,6 @@ use super::{
     check_ip_allowed, error_response, get_authorization, get_client_ip, insert_error_occurrence_v3,
     load_project_context, success_response,
 };
-use crate::batch_queue::TrackingContext;
 use crate::error_tracking::ErrorLanguage;
 use crate::error_tracking::v3::{OccurrenceInput, build_occurrence, empty_context};
 use crate::models::{AppState, ErrorTracking};
@@ -71,11 +70,7 @@ pub async fn error(
         Err(message) => return error_response(StatusCode::BAD_REQUEST, message),
     };
 
-    let tracking_ctx = TrackingContext {
-        owner_id: ctx.billing_customer_id.as_str().into(),
-        token: token.into(),
-        organization_id: ctx.organization_id.as_deref().map(Into::into),
-    };
+    let tracking_ctx = ctx.tracking_context(&token);
 
     let context = payload.context.unwrap_or_else(empty_context);
 

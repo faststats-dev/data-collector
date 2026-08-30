@@ -17,40 +17,6 @@ use sqlx::types::Uuid as SqlxUuid;
 use std::collections::HashMap;
 use tracing::{error, warn};
 
-fn rrweb_timestamp_ms(value: &Value) -> Option<u64> {
-    let v = value.get("timestamp")?;
-    if let Some(u) = v.as_u64() {
-        return Some(u);
-    }
-    if let Some(i) = v.as_i64() {
-        return u64::try_from(i).ok();
-    }
-    let f = v.as_f64()?;
-    if f.is_finite() && f >= 0.0 {
-        Some(f.round() as u64)
-    } else {
-        None
-    }
-}
-
-fn rrweb_event_type(value: &Value) -> Option<u64> {
-    let v = value.get("type")?;
-    v.as_u64()
-        .or_else(|| v.as_i64().and_then(|i| u64::try_from(i).ok()))
-}
-
-pub(crate) fn is_valid_rrweb_event(event: &Value) -> bool {
-    if !event.is_object() {
-        return false;
-    }
-
-    if rrweb_timestamp_ms(event).is_none() {
-        return false;
-    }
-
-    matches!(rrweb_event_type(event), Some(t) if t <= 32)
-}
-
 pub(crate) fn normalize_window_id(window_id: Option<String>, session_id: &str) -> String {
     window_id
         .map(|value| value.trim().to_owned())
@@ -134,18 +100,14 @@ pub(crate) fn build_replay_chunk_input(
     let user_agent_info = user_agent::parse(user_agent);
 
     let received_event_count = events.len();
-    events.retain(is_valid_rrweb_event);
+    events.retain(rrweb_types::is_valid_event);
     let dropped_event_count = received_event_count - events.len();
 
     if events.is_empty() && !is_final {
         return Err("No valid events".to_string());
     }
 
-    let tracking = TrackingContext {
-        owner_id: context.billing_customer_id.as_str().into(),
-        token: token.into(),
-        organization_id: context.organization_id.as_deref().map(Into::into),
-    };
+    let tracking = context.tracking_context(token);
 
     Ok(BuiltReplayChunk {
         session_id: session_id.clone(),
@@ -294,7 +256,7 @@ pub async fn replay(
         Err(message) => return error_response(StatusCode::BAD_REQUEST, &message),
     };
 
-    let mut input = built.input;
+    let input = built.input;
     let stored = if input.events.is_empty() {
         replay_storage
             .finalize_replay_session(
@@ -306,9 +268,7 @@ pub async fn replay(
             .await
             .map(|()| Default::default())
     } else {
-        replay_storage
-            .store_replay_chunk(&state.pool, &mut input)
-            .await
+        replay_storage.store_replay_chunk(&state.pool, input).await
     };
     match stored {
         Ok(stored) => {

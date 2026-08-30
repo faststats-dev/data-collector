@@ -3,7 +3,7 @@ use super::{
     get_client_ip, get_country, get_request_origin, load_project_context, queue_error_response,
     success_response, validate_hostname,
 };
-use crate::batch_queue::{FailedRequest, QueuedEvent, RequestType, TrackingContext};
+use crate::batch_queue::{FailedRequest, QueuedEvent, RequestType};
 use crate::models::AppState;
 use crate::tinybird::WebVitalRow;
 use axum::body::Bytes;
@@ -217,11 +217,7 @@ pub async fn vitals(
         return error_response(StatusCode::FORBIDDEN, msg);
     }
 
-    let tracking_ctx = TrackingContext {
-        owner_id: ctx.billing_customer_id.as_str().into(),
-        token: token.into(),
-        organization_id: ctx.organization_id.as_deref().map(Into::into),
-    };
+    let tracking_ctx = ctx.tracking_context(&token);
 
     let user_agent = headers
         .get("User-Agent")

@@ -107,11 +107,7 @@ pub(crate) fn build_replay_chunk_input(
         return Err("No valid events".to_string());
     }
 
-    let tracking = TrackingContext {
-        owner_id: context.billing_customer_id.as_str().into(),
-        token: token.into(),
-        organization_id: context.organization_id.as_deref().map(Into::into),
-    };
+    let tracking = context.tracking_context(token);
 
     Ok(BuiltReplayChunk {
         session_id: session_id.clone(),
@@ -260,7 +256,7 @@ pub async fn replay(
         Err(message) => return error_response(StatusCode::BAD_REQUEST, &message),
     };
 
-    let mut input = built.input;
+    let input = built.input;
     let stored = if input.events.is_empty() {
         replay_storage
             .finalize_replay_session(
@@ -272,9 +268,7 @@ pub async fn replay(
             .await
             .map(|()| Default::default())
     } else {
-        replay_storage
-            .store_replay_chunk(&state.pool, &mut input)
-            .await
+        replay_storage.store_replay_chunk(&state.pool, input).await
     };
     match stored {
         Ok(stored) => {

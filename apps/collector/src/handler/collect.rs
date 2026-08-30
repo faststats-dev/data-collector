@@ -125,11 +125,7 @@ pub(crate) fn build_collect_events(
     let mut known = extract_known_fields(&mut data, MODS_EVENT_FIELDS);
     let (valid_custom, warnings) = validate_and_filter_payload(data, &ctx.datasources);
 
-    let tracking = TrackingContext {
-        owner_id: ctx.billing_customer_id.as_str().into(),
-        token: token.into(),
-        organization_id: ctx.organization_id.as_deref().map(Into::into),
-    };
+    let tracking = ctx.tracking_context(token);
 
     let event_row = build_mods_event_row(
         ctx.project_id,

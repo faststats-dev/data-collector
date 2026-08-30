@@ -177,11 +177,7 @@ impl InMemoryBatch {
     }
 
     fn aggregate_usage(&self) -> AggregatedUsage {
-        let estimated_owners = (self.web_events.len()
-            + self.mods_events.len()
-            + self.error_occurrences_v3.len()
-            + self.web_vitals.len())
-        .min(100);
+        let estimated_owners = self.total_count().min(100);
 
         let mut usage: AggregatedUsage = HashMap::with_capacity(estimated_owners);
 
@@ -236,10 +232,7 @@ struct BatchSendResult {
 
 impl BatchSendResult {
     fn has_failures(&self) -> bool {
-        !self.failed_web_events.is_empty()
-            || !self.failed_mods_events.is_empty()
-            || !self.failed_error_occurrences_v3.is_empty()
-            || !self.failed_web_vitals.is_empty()
+        self.failure_count() > 0
     }
 
     fn into_in_memory_batch(self) -> InMemoryBatch {
@@ -473,12 +466,13 @@ impl BatchQueue {
             }
 
             if result.had_permanent_failure {
+                let error_summary = result.error_summary();
                 error!(
-                    errors = %result.error_summary(),
+                    errors = %error_summary,
                     "Permanent failure, backing up {} events",
                     result.failure_count(),
                 );
-                let backup_reason = format!("Permanent API error: {}", result.error_summary());
+                let backup_reason = format!("Permanent API error: {error_summary}");
                 self.backup_events(result.into_in_memory_batch(), &backup_reason)
                     .await;
                 return;
@@ -487,13 +481,14 @@ impl BatchQueue {
             retry_count += 1;
 
             if retry_count >= MAX_RETRIES {
+                let error_summary = result.error_summary();
                 error!(
-                    errors = %result.error_summary(),
+                    errors = %error_summary,
                     "Batch failed after {} retries, backing up {} events",
                     retry_count,
                     result.failure_count()
                 );
-                let backup_reason = format!("Max retries exceeded: {}", result.error_summary());
+                let backup_reason = format!("Max retries exceeded: {error_summary}");
                 self.backup_events(result.into_in_memory_batch(), &backup_reason)
                     .await;
                 return;

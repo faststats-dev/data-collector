@@ -4,7 +4,7 @@ use super::{
     insert_error_occurrence_v3, insert_web_event, load_project_context, success_response,
     validate_hostname,
 };
-use crate::batch_queue::{FailedRequest, RequestType, TrackingContext};
+use crate::batch_queue::{FailedRequest, RequestType};
 use crate::error_tracking::ErrorLanguage;
 use crate::error_tracking::v3::{OccurrenceInput, build_occurrence, web_context};
 use crate::identity::resolve_person_for_distinct_id;
@@ -203,11 +203,7 @@ pub async fn web(
     let has_errors = errors.as_ref().is_some_and(|items| !items.is_empty());
     let is_debounced = !has_errors && should_debounce(resolved_user_id, url, event);
 
-    let tracking_ctx = TrackingContext {
-        owner_id: ctx.billing_customer_id.as_str().into(),
-        token: token.into(),
-        organization_id: ctx.organization_id.as_deref().map(Into::into),
-    };
+    let tracking_ctx = ctx.tracking_context(&token);
     let fallback_identity = resolved_user_id.to_string();
     let event_row = super::build_web_event_row(
         ctx.project_id,

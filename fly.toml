@@ -19,3 +19,7 @@ primary_region = 'fra'
 [metrics]
   port = 9091
   path = "/metrics"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

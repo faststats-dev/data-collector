@@ -17,10 +17,6 @@ use sqlx::types::Uuid as SqlxUuid;
 use std::collections::HashMap;
 use tracing::{error, warn};
 
-pub(crate) fn is_valid_rrweb_event(event: &Value) -> bool {
-    rrweb_types::is_valid_event(event)
-}
-
 pub(crate) fn normalize_window_id(window_id: Option<String>, session_id: &str) -> String {
     window_id
         .map(|value| value.trim().to_owned())
@@ -104,7 +100,7 @@ pub(crate) fn build_replay_chunk_input(
     let user_agent_info = user_agent::parse(user_agent);
 
     let received_event_count = events.len();
-    events.retain(is_valid_rrweb_event);
+    events.retain(rrweb_types::is_valid_event);
     let dropped_event_count = received_event_count - events.len();
 
     if events.is_empty() && !is_final {
@@ -341,19 +337,7 @@ pub async fn replay(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_replay_origin_allowed, is_valid_rrweb_event, normalize_window_id};
-    use serde_json::json;
-
-    #[test]
-    fn replay_event_validation_checks_the_event_payload() {
-        let invalid = json!({
-            "type": 2,
-            "timestamp": 1,
-            "data": { "node": {}, "initialOffset": { "top": 0, "left": 0 } }
-        });
-
-        assert!(!is_valid_rrweb_event(&invalid));
-    }
+    use super::{is_replay_origin_allowed, normalize_window_id};
 
     #[test]
     fn normalize_window_id_trims_and_falls_back_to_session_id() {

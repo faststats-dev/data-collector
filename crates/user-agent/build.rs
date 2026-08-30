@@ -44,7 +44,7 @@ fn main() {
     let source = Path::new(UAP_CORE_RULES);
     let yaml = fs::read_to_string(source)
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", source.display()));
-    let rules: Rules = serde_yaml::from_str(&yaml)
+    let rules: Rules = serde_yaml_ng::from_str(&yaml)
         .unwrap_or_else(|error| panic!("failed to parse {}: {error}", source.display()));
     let generated = generate(&rules);
     let output =

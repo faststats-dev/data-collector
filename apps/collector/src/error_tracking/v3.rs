@@ -8,7 +8,8 @@ use serde_json::{Map, Value};
 use std::collections::HashMap;
 use uuid::Uuid;
 
-use crate::error_tracking::ErrorLanguage;
+use crate::error_tracking::group_hash;
+use crate::error_tracking::{ErrorLanguage, ProjectGrouping};
 
 pub struct OccurrenceInput<'a> {
     pub project_id: Uuid,
@@ -20,6 +21,7 @@ pub struct OccurrenceInput<'a> {
     pub sdk_name: Option<&'a str>,
     pub sdk_version: Option<&'a str>,
     pub context: &'a Value,
+    pub grouping: &'a ProjectGrouping,
 }
 
 pub fn build_occurrence(input: OccurrenceInput<'_>, error: ErrorTracking) -> ErrorOccurrenceV3Row {
@@ -54,7 +56,7 @@ pub fn build_occurrence(input: OccurrenceInput<'_>, error: ErrorTracking) -> Err
         environment: "prod".to_string(),
         language: input.language.as_str().to_owned(),
         release: build_id.unwrap_or_else(|| input.release.unwrap_or_default().to_owned()),
-        group_hash: input.language.group_hash(&error_type, source_stack),
+        group_hash: group_hash(input.language, &error_type, source_stack, input.grouping),
         exact_hash: exact_hash(&error_type, &error_message, source_stack),
         error_type,
         error_message,
@@ -77,13 +79,14 @@ pub async fn enrich_with_mapping(
     resolver: &MappingResolver,
     mut row: ErrorOccurrenceV3Row,
     language: ErrorLanguage,
+    grouping: &ProjectGrouping,
 ) -> ErrorOccurrenceV3Row {
     let mapped = resolver
         .apply(language, row.project_id, &row.release, &row.stacktrace)
         .await;
 
     if let Some(mapped) = mapped {
-        row.group_hash = language.group_hash(&row.error_type, &mapped.stacktrace);
+        row.group_hash = group_hash(language, &row.error_type, &mapped.stacktrace, grouping);
         row.exact_hash = exact_hash(&row.error_type, &row.error_message, &mapped.stacktrace);
         row.mapped_stacktrace = Some(mapped.stacktrace);
         row.mapping_used = Some(mapped.mapping_used);
@@ -171,15 +174,19 @@ fn merge_context_values(base_context: Value, error_context: Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::{
-        ErrorLanguage, OccurrenceInput, build_occurrence, empty_context, occurrence_context,
+        ErrorLanguage, OccurrenceInput, build_occurrence, empty_context, group_hash,
+        occurrence_context,
     };
-    use crate::error_tracking::group_hash;
     use crate::models::{Error, ErrorTracking};
     use serde_json::json;
+    use std::sync::LazyLock;
     use uuid::Uuid;
 
+    static GROUPING: LazyLock<crate::error_tracking::ProjectGrouping> =
+        LazyLock::new(crate::error_tracking::ProjectGrouping::default);
+
     #[test]
-    fn mods_occurrences_use_java_group_hash() {
+    fn mods_occurrences_use_java_fingerprint() {
         let error = ErrorTracking {
             error: Error {
                 error: "java.lang.RuntimeException".to_string(),
@@ -208,15 +215,18 @@ mod tests {
                 sdk_name: Some("minecraft-plugin"),
                 sdk_version: None,
                 context: &context,
+                grouping: &GROUPING,
             },
             error,
         );
 
         assert_eq!(
             row.group_hash,
-            group_hash::java::group_hash(
+            group_hash(
+                ErrorLanguage::Java,
                 "java.lang.RuntimeException",
-                "\tat plugin-1.2.3.jar//com.example.Plugin.handle(Plugin.java:42)"
+                "\tat plugin-1.2.3.jar//com.example.Plugin.handle(Plugin.java:42)",
+                &GROUPING,
             )
         );
         assert_eq!(row.count, 3);
@@ -237,6 +247,7 @@ mod tests {
                 sdk_name: None,
                 sdk_version: Some("request-sdk"),
                 context: &context,
+                grouping: &GROUPING,
             },
             ErrorTracking {
                 error: Error {
@@ -272,6 +283,7 @@ mod tests {
                 sdk_name: None,
                 sdk_version: Some("request-sdk"),
                 context: &context,
+                grouping: &GROUPING,
             },
             ErrorTracking {
                 error: Error {
@@ -295,14 +307,11 @@ mod tests {
 
     #[test]
     fn parses_php_language() {
-        assert_eq!(
-            ErrorLanguage::parse_optional(Some(" PHP ")).unwrap(),
-            ErrorLanguage::Php
-        );
+        assert_eq!(" PHP ".parse(), Ok(ErrorLanguage::Php));
     }
 
     #[test]
-    fn error_only_occurrences_can_use_php_group_hash() {
+    fn error_only_occurrences_can_use_php_fingerprint() {
         let error = ErrorTracking {
             error: Error {
                 error: "RuntimeException".to_string(),
@@ -331,22 +340,25 @@ mod tests {
                 sdk_name: None,
                 sdk_version: None,
                 context: &context,
+                grouping: &GROUPING,
             },
             error,
         );
 
         assert_eq!(
             row.group_hash,
-            group_hash::php::group_hash(
+            group_hash(
+                ErrorLanguage::Php,
                 "RuntimeException",
-                "#0 /var/www/app/src/UserService.php(42): App\\Service\\UserService->find('abc', 123)"
+                "#0 /var/www/app/src/UserService.php(42): App\\Service\\UserService->find('abc', 123)",
+                &GROUPING,
             )
         );
         assert_eq!(row.language, "php");
     }
 
     #[test]
-    fn error_only_occurrences_can_use_rust_group_hash() {
+    fn error_only_occurrences_can_use_rust_fingerprint() {
         let stacktrace =
             "0: my_app::worker::run::h0123456789abcdef\n   at /srv/my-app/src/worker.rs:42:17";
         let error = ErrorTracking {
@@ -375,13 +387,14 @@ mod tests {
                 sdk_name: None,
                 sdk_version: None,
                 context: &context,
+                grouping: &GROUPING,
             },
             error,
         );
 
         assert_eq!(
             row.group_hash,
-            group_hash::rust::group_hash("panic", stacktrace)
+            group_hash(ErrorLanguage::Rust, "panic", stacktrace, &GROUPING)
         );
         assert_eq!(row.language, "rust");
     }

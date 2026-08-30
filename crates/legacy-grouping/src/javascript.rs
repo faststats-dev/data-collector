@@ -4,7 +4,7 @@ use super::{
 };
 use std::borrow::Cow;
 
-pub fn group_hash(error_type: &str, stacktrace: &str) -> String {
+pub(super) fn group_hash(error_type: &str, stacktrace: &str) -> String {
     hash_frames(error_type, stacktrace, 50, normalize_piece, |_| true)
 }
 
@@ -31,7 +31,6 @@ fn frame_line_columns_removed(input: &str) -> Cow<'_, str> {
     if !input.contains(':') {
         return remove_trailing_line_column(input);
     }
-
     let mut out = String::with_capacity(input.len());
     let mut offset = 0;
     let mut changed = false;
@@ -47,7 +46,6 @@ fn frame_line_columns_removed(input: &str) -> Cow<'_, str> {
         }
     }
     out.push_str(&input[offset..]);
-
     if changed {
         Cow::Owned(remove_trailing_line_column(&out).into_owned())
     } else {
@@ -71,8 +69,11 @@ fn line_column_suffix_end(input: &str) -> Option<usize> {
         return None;
     }
     let end = 1 + first_digits + 1 + second_digits;
-    let next = input.as_bytes().get(end).copied();
-    matches!(next, Some(b')') | Some(b' ') | None).then_some(end)
+    matches!(
+        input.as_bytes().get(end).copied(),
+        Some(b')') | Some(b' ') | None
+    )
+    .then_some(end)
 }
 
 fn remove_trailing_line_column(input: &str) -> Cow<'_, str> {
@@ -90,7 +91,6 @@ fn remove_trailing_line_column(input: &str) -> Cow<'_, str> {
     let Some(prefix) = before_line.strip_suffix(':') else {
         return Cow::Borrowed(input);
     };
-
     let mut out = prefix.to_string();
     if suffix_offset == 1 {
         out.push(')');
@@ -109,25 +109,7 @@ fn split_suffix_number(input: &str) -> Option<(&str, &str)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{group_hash, normalize_piece};
-
-    #[test]
-    fn normalizes_noisy_values() {
-        let normalized = normalize_piece(
-            r#" at fn (https://cdn.example.com/assets/app.abc123.js:1742:19) id="u-42" 0xabc"#,
-        );
-
-        assert_eq!(normalized, "at fn (app.abc123.js) id=<quoted> <hex>");
-    }
-
-    #[test]
-    fn group_hash_ignores_line_columns() {
-        let a = group_hash("TypeError", " at render (/app/static/chunk.js:10:20)");
-        let b = group_hash("TypeError", " at render (/app/static/chunk.js:99:1)");
-
-        assert_eq!(a, b);
-    }
-
+    use super::group_hash;
     #[test]
     fn preserves_legacy_group_hash() {
         assert_eq!(

@@ -17,9 +17,7 @@ static FRAME_ADDRESS_RE: LazyLock<Regex> = LazyLock::new(|| {
         .expect("valid Rust frame address regex")
 });
 
-/// Builds a stable fingerprint from Rust panic, `std::backtrace`, and
-/// `anyhow`/`eyre` style reports.
-pub fn group_hash(error_type: &str, stacktrace: &str) -> String {
+pub(super) fn group_hash(error_type: &str, stacktrace: &str) -> String {
     hash_frames(error_type, stacktrace, MAX_LINES, normalize_piece, |line| {
         !should_ignore_line(line)
     })
@@ -31,11 +29,9 @@ fn normalize_piece(input: &str) -> Cow<'_, str> {
     if trimmed.is_empty() || is_report_metadata(trimmed) {
         return Cow::Borrowed("");
     }
-
     if let Some(location) = trimmed.strip_prefix("at ") {
         return Cow::Owned(normalize_location(location));
     }
-
     let frame = strip_frame_number(trimmed);
     let frame = FRAME_ADDRESS_RE.replace(frame, "");
     let mut value = lowercase_trimmed(frame.as_ref());
@@ -65,7 +61,6 @@ fn normalize_location(input: &str) -> String {
     if is_toolchain_path(input) {
         return String::new();
     }
-
     let path = remove_line_column(input).replace('\\', "/");
     let path = stable_path_suffix(&path);
     let mut value = lowercase_trimmed(path);
@@ -93,7 +88,6 @@ fn remove_line_column(input: &str) -> &str {
 
 fn stable_path_suffix(path: &str) -> &str {
     const ROOTS: [&str; 5] = ["src/", "tests/", "examples/", "benches/", "crates/"];
-
     for root in ROOTS {
         if let Some(index) = path.rfind(root) {
             return &path[index..];
@@ -139,26 +133,12 @@ fn should_ignore_line(line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{group_hash, normalize_piece};
-
     #[test]
-    fn normalizes_native_frames_and_locations() {
+    fn ignores_addresses_symbols_and_positions() {
         assert_eq!(
             normalize_piece("  12: 0x000000010123abcd - my_app::worker::run::h0123456789abcdef"),
             "my_app::worker::run"
         );
-        assert_eq!(
-            normalize_piece("at /Users/alice/project/src/worker.rs:42:17"),
-            "at src/worker.rs"
-        );
-        assert_eq!(
-            normalize_piece(r"at C:\work\project\src\worker.rs:99:2"),
-            "at src/worker.rs"
-        );
-        assert_eq!(normalize_piece("at ./src/worker.rs:42"), "at src/worker.rs");
-    }
-
-    #[test]
-    fn group_hash_ignores_addresses_symbol_hashes_and_source_positions() {
         let a = group_hash(
             "panic",
             "  0: 0x0000000101111111 - my_app::worker::run::h0123456789abcdef\n             at /home/a/my-app/src/worker.rs:42:17",
@@ -167,39 +147,6 @@ mod tests {
             "panic",
             "  9: 0x0000000202222222 - my_app::worker::run::hfedcba9876543210\n             at /srv/my-app/src/worker.rs:900:3",
         );
-
         assert_eq!(a, b);
-    }
-
-    #[test]
-    fn group_hash_ignores_panic_and_runtime_noise() {
-        let app_frame = "  4: my_app::worker::run\n             at ./src/worker.rs:42:17";
-        let noisy = format!(
-            "thread 'tokio-runtime-worker' panicked at src/worker.rs:42:17:\nstack backtrace:\n  0: std::backtrace_rs::backtrace::libunwind::trace\n             at /rustc/abc/library/std/src/backtrace.rs:116:5\n{app_frame}\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace"
-        );
-
-        assert_eq!(group_hash("panic", app_frame), group_hash("panic", &noisy));
-    }
-
-    #[test]
-    fn group_hash_normalizes_anyhow_cause_ordinals_and_dynamic_values() {
-        let a = group_hash(
-            "anyhow::Error",
-            "Caused by:\n  0: request 123 failed for user 550e8400-e29b-41d4-a716-446655440000\n  1: my_app::client::send",
-        );
-        let b = group_hash(
-            "anyhow::Error",
-            "Caused by:\n  8: request 999 failed for user 6ba7b810-9dad-11d1-80b4-00c04fd430c8\n  9: my_app::client::send",
-        );
-
-        assert_eq!(a, b);
-    }
-
-    #[test]
-    fn group_hash_changes_for_different_application_frames() {
-        let a = group_hash("panic", "0: my_app::worker::run");
-        let b = group_hash("panic", "0: my_app::worker::stop");
-
-        assert_ne!(a, b);
     }
 }

@@ -15,6 +15,7 @@ pub use web::web;
 use crate::batch_queue::{
     BatchQueue, FailedRequest, QueueError, QueuedEvent, RequestType, TrackingContext,
 };
+use crate::error_tracking::ProjectGrouping;
 use crate::models::DataSource;
 use crate::tinybird::{ErrorOccurrenceV3Row, ModsEventRow, WebEventRow};
 use axum::Json;
@@ -149,6 +150,7 @@ pub struct ProjectContext {
     pub session_replays_enabled: bool,
     pub cookieless_mode: Option<bool>,
     pub ip_rules: Vec<IpRule>,
+    pub error_grouping: ProjectGrouping,
 }
 
 impl ProjectContext {
@@ -222,13 +224,16 @@ pub async fn load_project_context(
     .await
     .unwrap_or_default();
 
+    let project_id = first.get::<Uuid, _>("id");
+    let error_grouping = load_error_grouping(pool, project_id).await;
+
     let owner_id: String = first.get("owner_id");
     let organization_id: Option<String> = first.get("organization_id");
     let org_owner_user_id: Option<String> = first.get("org_owner_user_id");
     let billing_customer_id = org_owner_user_id.unwrap_or(owner_id);
 
     let ctx = Arc::new(ProjectContext {
-        project_id: first.get("id"),
+        project_id,
         replay_storage_generation: first.get("replay_storage_generation"),
         replay_storage_active: first.get::<String, _>("replay_storage_state") == "active",
         billing_customer_id,
@@ -244,11 +249,86 @@ pub async fn load_project_context(
         session_replays_enabled: first.get("session_replays_enabled"),
         cookieless_mode: first.get("cookieless_mode"),
         ip_rules,
+        error_grouping,
     });
     PROJECT_CACHE
         .insert(token.to_string(), Arc::clone(&ctx))
         .await;
     Ok(ctx)
+}
+
+async fn load_error_grouping(pool: &sqlx::PgPool, project_id: Uuid) -> ProjectGrouping {
+    let settings = sqlx::query(
+        r#"
+        SELECT mode::text, parser_max_input_bytes, parser_max_lines, parser_max_line_bytes,
+               segment_selection::text, include_error_kind, raw_stack_policy::text,
+               raw_stack_max_bytes, max_frames, include_function, include_module, include_file,
+               runtime_frame_policy::text, adjacent_frame_policy::text
+        FROM project_error_grouping_settings
+        WHERE project_id = $1
+        "#,
+    )
+    .bind(project_id)
+    .fetch_optional(pool)
+    .await;
+
+    let Ok(Some(settings)) = settings else {
+        warn!(%project_id, "Missing error grouping settings; using modern defaults");
+        return ProjectGrouping::default();
+    };
+    let exclusions = sqlx::query(
+        r#"
+        SELECT field::text, matcher::text, pattern
+        FROM project_error_grouping_frame_exclusions
+        WHERE project_id = $1
+        ORDER BY position
+        "#,
+    )
+    .bind(project_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(|row| crate::error_tracking::OwnedFrameExclusion {
+        field: row.get("field"),
+        matcher: row.get("matcher"),
+        pattern: row.get("pattern"),
+    })
+    .collect();
+
+    ProjectGrouping {
+        mode: if settings.get::<String, _>("mode") == "legacy" {
+            crate::error_tracking::GroupingMode::Legacy
+        } else {
+            crate::error_tracking::GroupingMode::Modern
+        },
+        parser_max_input_bytes: positive_usize(&settings, "parser_max_input_bytes", 1_048_576),
+        parser_max_lines: positive_usize(&settings, "parser_max_lines", 16_384),
+        parser_max_line_bytes: positive_usize(&settings, "parser_max_line_bytes", 65_536),
+        segment_selection: settings.get("segment_selection"),
+        include_error_kind: settings.get("include_error_kind"),
+        raw_stack_policy: settings.get("raw_stack_policy"),
+        raw_stack_max_bytes: positive_usize(&settings, "raw_stack_max_bytes", 1_048_576),
+        max_frames: settings
+            .get::<i32, _>("max_frames")
+            .max(0)
+            .try_into()
+            .unwrap_or(8),
+        include_function: settings.get("include_function"),
+        include_module: settings.get("include_module"),
+        include_file: settings.get("include_file"),
+        runtime_frame_policy: settings.get("runtime_frame_policy"),
+        adjacent_frame_policy: settings.get("adjacent_frame_policy"),
+        exclusions,
+    }
+}
+
+fn positive_usize(row: &sqlx::postgres::PgRow, column: &str, fallback: usize) -> usize {
+    row.get::<i32, _>(column)
+        .try_into()
+        .ok()
+        .filter(|value| *value > 0)
+        .unwrap_or(fallback)
 }
 
 pub fn get_request_origin(headers: &HeaderMap) -> Option<String> {
@@ -566,12 +646,14 @@ pub fn insert_error_occurrence_v3(
     batch_queue: &BatchQueue,
     row: ErrorOccurrenceV3Row,
     language: crate::error_tracking::ErrorLanguage,
+    grouping: &crate::error_tracking::ProjectGrouping,
     tracking: Option<TrackingContext>,
 ) -> Result<(), HandlerResponse> {
     batch_queue
         .queue_event(QueuedEvent::ErrorOccurrenceV3 {
             row: Box::new(row),
             language,
+            grouping: grouping.clone(),
             tracking,
         })
         .map_err(|e| queue_error_response(e, "error occurrence"))?;
@@ -623,6 +705,7 @@ async fn process_collect_request(
             batch_queue,
             occurrence,
             crate::error_tracking::ErrorLanguage::Java,
+            &ctx.error_grouping,
             Some(built.tracking.clone()),
         )
         .map_err(|_| "Failed to queue error".to_string())?;
@@ -778,7 +861,7 @@ async fn process_web_request(
             let occurrence = crate::error_tracking::v3::build_occurrence(
                 crate::error_tracking::v3::OccurrenceInput {
                     project_id: ctx.project_id,
-                    language: crate::error_tracking::ErrorLanguage::Javascript,
+                    language: crate::error_tracking::ErrorLanguage::JavaScript,
                     // The browser SDK sends this as `buildId`; Tinybird stores it as `release`.
                     release: parsed.build_id.as_deref(),
                     identifier: Some(&fallback_identity),
@@ -787,13 +870,15 @@ async fn process_web_request(
                     sdk_name: parsed.sdk_name.as_deref(),
                     sdk_version: parsed.sdk_version.as_deref(),
                     context: error_v3_context,
+                    grouping: &ctx.error_grouping,
                 },
                 error,
             );
             insert_error_occurrence_v3(
                 batch_queue,
                 occurrence,
-                crate::error_tracking::ErrorLanguage::Javascript,
+                crate::error_tracking::ErrorLanguage::JavaScript,
+                &ctx.error_grouping,
                 Some(tracking_ctx.clone()),
             )
             .map_err(|_| "Failed to queue error occurrence".to_string())?;

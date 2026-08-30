@@ -88,6 +88,7 @@ pub async fn collect(
             &state.batch_queue,
             occurrence,
             ErrorLanguage::Java,
+            &ctx.error_grouping,
             Some(built.tracking.clone()),
         ) {
             return e;
@@ -154,6 +155,7 @@ pub(crate) fn build_collect_events(
                     sdk_name: Some("minecraft-plugin"),
                     sdk_version: sdk_version.as_deref(),
                     context: &error_context,
+                    grouping: &ctx.error_grouping,
                 },
                 error,
             ));

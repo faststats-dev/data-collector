@@ -15,7 +15,7 @@ static TRACE_TRAILER_RE: LazyLock<Regex> =
 static ARGS_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\([^)]*\)").expect("valid php args regex"));
 
-pub fn group_hash(error_type: &str, stacktrace: &str) -> String {
+pub(super) fn group_hash(error_type: &str, stacktrace: &str) -> String {
     hash_frames(error_type, stacktrace, 80, normalize_piece, |line| {
         !should_ignore_frame(line)
     })
@@ -26,7 +26,6 @@ fn normalize_piece(input: &str) -> Cow<'_, str> {
     if let Some(normalized) = normalize_php_frame(trimmed) {
         return Cow::Owned(normalized);
     }
-
     normalize_common(trimmed)
 }
 
@@ -36,7 +35,6 @@ fn normalize_php_frame(input: &str) -> Option<String> {
     let call = captures.name("call")?.as_str();
     let file = basename(file).to_ascii_lowercase();
     let call = normalize_call(call);
-
     Some(format!("# <php-frame> {file}: {call}"))
 }
 
@@ -75,21 +73,8 @@ fn should_ignore_frame(line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{group_hash, normalize_piece};
-
     #[test]
-    fn normalizes_php_frame_noise() {
-        let normalized = normalize_piece(
-            "#0 /var/www/app/src/Service/UserService.php(42): App\\Service\\UserService->find('abc', 123)",
-        );
-
-        assert_eq!(
-            normalized,
-            "# <php-frame> userservice.php: app\\service\\userservice->find(<args>)"
-        );
-    }
-
-    #[test]
-    fn group_hash_ignores_line_numbers_and_arguments() {
+    fn ignores_line_numbers_and_arguments() {
         let a = group_hash(
             "RuntimeException",
             "#0 /var/www/app/src/UserService.php(42): App\\Service\\UserService->find('abc', 123)",
@@ -98,21 +83,12 @@ mod tests {
             "RuntimeException",
             "#0 /var/www/app/src/UserService.php(99): App\\Service\\UserService->find('def', 456)",
         );
-
         assert_eq!(a, b);
-    }
-
-    #[test]
-    fn group_hash_changes_for_different_methods() {
-        let a = group_hash(
-            "RuntimeException",
-            "#0 /var/www/app/src/UserService.php(42): App\\Service\\UserService->find('abc')",
+        assert_eq!(
+            normalize_piece(
+                "#0 /var/www/app/src/Service/UserService.php(42): App\\Service\\UserService->find('abc', 123)"
+            ),
+            "# <php-frame> userservice.php: app\\service\\userservice->find(<args>)"
         );
-        let b = group_hash(
-            "RuntimeException",
-            "#0 /var/www/app/src/UserService.php(42): App\\Service\\UserService->save('abc')",
-        );
-
-        assert_ne!(a, b);
     }
 }

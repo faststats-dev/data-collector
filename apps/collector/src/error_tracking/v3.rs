@@ -175,7 +175,6 @@ mod tests {
         ErrorLanguage, OccurrenceInput, build_occurrence, empty_context, group_hash,
         occurrence_context,
     };
-    use crate::error_tracking::parse_optional;
     use crate::models::{Error, ErrorTracking};
     use serde_json::json;
     use uuid::Uuid;
@@ -298,7 +297,7 @@ mod tests {
 
     #[test]
     fn parses_php_language() {
-        assert_eq!(parse_optional(Some(" PHP ")).unwrap(), ErrorLanguage::Php);
+        assert_eq!(" PHP ".parse(), Ok(ErrorLanguage::Php));
     }
 
     #[test]

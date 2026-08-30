@@ -18,6 +18,12 @@ impl<'a> StackTrace<'a> {
         (!segment.is_empty()).then(|| Self::single(segment))
     }
 
+    pub(super) fn has_frames(&self) -> bool {
+        self.segments
+            .iter()
+            .any(|segment| !segment.frames.is_empty())
+    }
+
     #[cfg(test)]
     pub(super) fn segments(&self) -> &[TraceSegment<'a>] {
         &self.segments
@@ -55,11 +61,15 @@ pub(super) struct StackFrame<'a> {
     pub(super) file: Option<&'a str>,
 }
 
+/// Resource limits applied before and while parsing untrusted stack text.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct ParserLimits {
-    pub(super) max_input_bytes: usize,
-    pub(super) max_lines: usize,
-    pub(super) max_line_bytes: usize,
+pub struct ParserLimits {
+    /// Maximum total UTF-8 input bytes.
+    pub max_input_bytes: usize,
+    /// Maximum number of input lines.
+    pub max_lines: usize,
+    /// Maximum UTF-8 bytes in one line.
+    pub max_line_bytes: usize,
 }
 
 impl Default for ParserLimits {

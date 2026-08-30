@@ -1,4 +1,7 @@
-use error_grouping::{GroupingEvidence, GroupingInput, Language, ParseError, group};
+use error_grouping::{
+    GroupingEvidence, GroupingInput, GroupingPolicy, Language, ParseError, ParserLimits,
+    RawStackPolicy, group, group_with_policy,
+};
 
 const LANGUAGES: [Language; 7] = [
     Language::Java,
@@ -63,6 +66,30 @@ fn oversized_inputs_use_observable_raw_stack_fallback() {
         result.parse_error,
         Some(ParseError::InputTooLarge { .. })
     ));
+}
+
+#[test]
+fn oversized_fallback_samples_only_a_bounded_prefix_and_suffix() {
+    let policy = GroupingPolicy::default()
+        .with_parser_limits(ParserLimits {
+            max_input_bytes: 4,
+            ..ParserLimits::default()
+        })
+        .with_raw_stack(RawStackPolicy::Bounded { max_bytes: 4 });
+    let fingerprint = |stack| {
+        group_with_policy(
+            GroupingInput {
+                language: Language::Java,
+                error_kind: "Error",
+                stack,
+            },
+            &policy,
+        )
+        .fingerprint
+    };
+
+    assert_eq!(fingerprint("ab1111yz"), fingerprint("ab2222yz"));
+    assert_ne!(fingerprint("ab1111yz"), fingerprint("ab1111zz"));
 }
 
 fn random_index(state: &mut u64, upper_bound: usize) -> usize {

@@ -1,16 +1,5 @@
-use crate::ast::ParserLimits;
-use crate::fingerprint::{self, FingerprintOptions};
-use crate::{Fingerprint, Language, ParseError};
-
-/// Internal policy boundary for grouping behavior.
-///
-/// Keeping parsing and fingerprint selection together lets a future compiled
-/// user configuration borrow its rules for each event without cloning them.
-#[derive(Debug, Default)]
-struct GroupingOptions<'a> {
-    parser_limits: ParserLimits,
-    fingerprint: FingerprintOptions<'a>,
-}
+use crate::fingerprint;
+use crate::{Fingerprint, GroupingPolicy, Language, ParseError};
 
 /// Complete input needed to derive an error-group identifier.
 #[derive(Clone, Copy, Debug)]
@@ -47,21 +36,27 @@ pub struct GroupingResult {
     pub parse_error: Option<ParseError>,
 }
 
-/// Group an error using a fixed, bounded policy.
+/// Group an error using the default bounded policy.
 ///
-/// Unrecognized non-empty stacks are hashed exactly rather than collapsing all
-/// errors of the same kind into one low-confidence group.
+/// Unrecognized non-empty stacks contribute bounded raw evidence rather than
+/// collapsing all errors of the same kind into one low-confidence group.
 pub fn group(input: GroupingInput<'_>) -> GroupingResult {
-    group_with_options(input, &GroupingOptions::default())
+    group_with_policy(input, &GroupingPolicy::default())
 }
 
-fn group_with_options(input: GroupingInput<'_>, options: &GroupingOptions<'_>) -> GroupingResult {
+/// Group an error with an explicit, borrow-friendly policy.
+///
+/// The policy identity is encoded in the returned fingerprint, so changing any
+/// option cannot silently reuse identifiers produced by another policy.
+pub fn group_with_policy(input: GroupingInput<'_>, policy: &GroupingPolicy<'_>) -> GroupingResult {
+    let policy_id = policy.id();
     if input.stack.trim().is_empty() {
         return GroupingResult {
             fingerprint: fingerprint::kind_only(
                 input.language,
                 input.error_kind,
-                options.fingerprint,
+                *policy,
+                policy_id,
             ),
             evidence: GroupingEvidence::ErrorKind,
             parse_error: None,
@@ -70,24 +65,33 @@ fn group_with_options(input: GroupingInput<'_>, options: &GroupingOptions<'_>) -
 
     match input
         .language
-        .parse_stack_with_limits(input.stack, &options.parser_limits)
+        .parse_stack_with_limits(input.stack, &policy.parser_limits)
     {
-        Ok(trace) => GroupingResult {
-            fingerprint: fingerprint::parsed(
-                input.language,
-                &trace,
-                input.error_kind,
-                options.fingerprint,
-            ),
-            evidence: GroupingEvidence::ParsedStack,
-            parse_error: None,
-        },
+        Ok(trace) => {
+            let evidence = if trace.has_frames() {
+                GroupingEvidence::ParsedStack
+            } else {
+                GroupingEvidence::ErrorKind
+            };
+            GroupingResult {
+                fingerprint: fingerprint::parsed(
+                    input.language,
+                    &trace,
+                    input.error_kind,
+                    *policy,
+                    policy_id,
+                ),
+                evidence,
+                parse_error: None,
+            }
+        }
         Err(error) => GroupingResult {
             fingerprint: fingerprint::raw_stack(
                 input.language,
                 input.error_kind,
                 input.stack,
-                options.fingerprint,
+                *policy,
+                policy_id,
             ),
             evidence: GroupingEvidence::RawStack,
             parse_error: Some(error),
@@ -148,49 +152,74 @@ mod tests {
     }
 
     #[test]
-    fn options_can_ignore_error_kind() {
+    fn arbitrary_java_identifiers_use_raw_stack_fallback() {
+        let input = |stack| GroupingInput {
+            language: Language::Java,
+            error_kind: "java.lang.RuntimeException",
+            stack,
+        };
+        let first = group(input("alpha"));
+        let second = group(input("beta"));
+
+        assert_eq!(first.evidence, GroupingEvidence::RawStack);
+        assert_ne!(first.fingerprint, second.fingerprint);
+    }
+
+    #[test]
+    fn header_only_stack_reports_error_kind_evidence() {
+        let result = group(GroupingInput {
+            language: Language::Java,
+            error_kind: "java.lang.RuntimeException",
+            stack: "java.lang.RuntimeException: dynamic message",
+        });
+
+        assert_eq!(result.evidence, GroupingEvidence::ErrorKind);
+    }
+
+    #[test]
+    fn policy_can_ignore_error_kind() {
         let input = |error_kind| GroupingInput {
             language: Language::JavaScript,
             error_kind,
             stack: "at load (/app.js:1:1)",
         };
-        let mut options = GroupingOptions::default();
-        options.fingerprint.include_error_kind = false;
+        let policy = GroupingPolicy::default().with_error_kind(crate::ErrorKindPolicy::Ignore);
 
         assert_eq!(
-            group_with_options(input("TypeError"), &options).fingerprint,
-            group_with_options(input("RangeError"), &options).fingerprint
+            group_with_policy(input("TypeError"), &policy).fingerprint,
+            group_with_policy(input("RangeError"), &policy).fingerprint
         );
     }
 
     #[test]
-    fn options_can_ignore_raw_stack_fallback() {
+    fn policy_can_ignore_raw_stack_fallback() {
         let input = |stack| GroupingInput {
             language: Language::Java,
             error_kind: "Error",
             stack,
         };
-        let mut options = GroupingOptions::default();
-        options.fingerprint.include_raw_stack = false;
+        let policy = GroupingPolicy::default().with_raw_stack(crate::RawStackPolicy::ErrorKindOnly);
 
         assert_eq!(
-            group_with_options(input("first unsupported stack"), &options).fingerprint,
-            group_with_options(input("second unsupported stack"), &options).fingerprint
+            group_with_policy(input("first unsupported stack"), &policy).fingerprint,
+            group_with_policy(input("second unsupported stack"), &policy).fingerprint
         );
     }
 
     #[test]
-    fn parser_limits_are_part_of_grouping_options() {
-        let mut options = GroupingOptions::default();
-        options.parser_limits.max_input_bytes = 4;
+    fn parser_limits_are_part_of_grouping_policy() {
+        let policy = GroupingPolicy::default().with_parser_limits(crate::ParserLimits {
+            max_input_bytes: 4,
+            ..crate::ParserLimits::default()
+        });
 
-        let result = group_with_options(
+        let result = group_with_policy(
             GroupingInput {
                 language: Language::Java,
                 error_kind: "Error",
                 stack: "at a.B.run(B.java:1)",
             },
-            &options,
+            &policy,
         );
 
         assert_eq!(result.evidence, GroupingEvidence::RawStack);

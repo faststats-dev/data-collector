@@ -4,7 +4,7 @@ use crate::ParseError;
 use crate::ast::{ParserLimits, StackTrace};
 
 /// Runtime stack-trace syntax supported by the grouping engine.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
 pub enum Language {
@@ -13,15 +13,12 @@ pub enum Language {
     /// Rust panic backtraces.
     Rust,
     /// JavaScript stacks in V8 or SpiderMonkey form.
-    #[serde(alias = "js")]
     JavaScript,
     /// Python tracebacks, including chained exceptions and exception groups.
-    #[serde(alias = "py")]
     Python,
     /// PHP fatal-error stack traces.
     Php,
     /// Go panic and fatal-error traces.
-    #[serde(alias = "golang")]
     Go,
     /// Swift runtime and Apple crash-report traces.
     Swift,
@@ -81,6 +78,32 @@ impl FromStr for Language {
     }
 }
 
+impl<'de> serde::Deserialize<'de> for Language {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct LanguageVisitor;
+
+        impl serde::de::Visitor<'_> for LanguageVisitor {
+            type Value = Language;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a supported runtime language name")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                value.parse().map_err(E::custom)
+            }
+        }
+
+        deserializer.deserialize_str(LanguageVisitor)
+    }
+}
+
 /// Error returned when a language name is not supported.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UnsupportedLanguage;
@@ -129,6 +152,18 @@ mod tests {
             let json = serde_json::to_string(&language).unwrap();
             assert_eq!(json, format!("\"{}\"", language.as_str()));
             assert_eq!(serde_json::from_str::<Language>(&json).unwrap(), language);
+        }
+    }
+
+    #[test]
+    fn serde_uses_the_same_trimmed_case_insensitive_aliases_as_from_str() {
+        for (json, expected) in [
+            (r#"" JS ""#, Language::JavaScript),
+            (r#""Py""#, Language::Python),
+            (r#""golang""#, Language::Go),
+            (r#""RS""#, Language::Rust),
+        ] {
+            assert_eq!(serde_json::from_str::<Language>(json).unwrap(), expected);
         }
     }
 }

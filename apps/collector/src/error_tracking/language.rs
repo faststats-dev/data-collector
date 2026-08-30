@@ -1,15 +1,5 @@
 pub use error_grouping::Language as ErrorLanguage;
 
-pub(crate) fn parse_optional(
-    value: Option<&str>,
-) -> Result<ErrorLanguage, error_grouping::UnsupportedLanguage> {
-    value
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or(error_grouping::UnsupportedLanguage)?
-        .parse()
-}
-
 pub(crate) fn group_hash(language: ErrorLanguage, error_type: &str, stacktrace: &str) -> String {
     let result = error_grouping::group(error_grouping::GroupingInput {
         language,
@@ -30,17 +20,6 @@ pub(crate) fn group_hash(language: ErrorLanguage, error_type: &str, stacktrace: 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn missing_language_is_rejected() {
-        assert!(parse_optional(None).is_err());
-        assert!(parse_optional(Some("")).is_err());
-    }
-
-    #[test]
-    fn unsupported_language_is_rejected() {
-        assert!(parse_optional(Some("ruby")).is_err());
-    }
 
     #[test]
     fn authoritative_type_changes_the_group() {

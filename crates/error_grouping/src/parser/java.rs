@@ -3,6 +3,7 @@ use crate::parser::{error_kind, looks_like_exception, nonempty, payload, source_
 
 pub(super) fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Option<StackTrace<'a>> {
     let mut trace = JavaTraceBuilder::default();
+    let mut malformed_frame = false;
 
     for original in lines {
         let (line, _) = trim_line(original);
@@ -16,13 +17,32 @@ pub(super) fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Option<St
         } else if let Some(body) = payload(line, "at ") {
             if let Some(frame) = parse_frame(body) {
                 trace.push_frame(frame);
+            } else {
+                malformed_frame = true;
             }
-        } else if trace.is_empty() && looks_like_exception(line, &['$']) {
+        } else if trace.is_empty() && looks_like_java_exception(line) {
             trace.start_segment(SegmentRelation::Root, line);
         }
     }
 
+    if malformed_frame {
+        return None;
+    }
     trace.finish()
+}
+
+fn looks_like_java_exception(line: &str) -> bool {
+    if !looks_like_exception(line, &['$']) {
+        return false;
+    }
+    let (kind, has_message) = line
+        .split_once(':')
+        .map_or((line, false), |(kind, _)| (kind, true));
+    has_message
+        || kind.contains('.')
+        || ["Error", "Exception", "Throwable"]
+            .iter()
+            .any(|suffix| kind.ends_with(suffix))
 }
 
 #[derive(Default)]
@@ -134,10 +154,10 @@ Caused by: java.lang.IllegalStateException: bad state
 
     #[test]
     fn malformed_and_overflowing_frames_are_safe() {
-        let trace = Language::Java
-            .parse_stack("java.lang.Error: bad\n at not-a-java-frame\n ... 999999999999999999 more")
-            .unwrap();
-        assert!(trace.segments()[0].frames.is_empty());
+        let result = Language::Java.parse_stack(
+            "java.lang.Error: bad\n at not-a-java-frame\n ... 999999999999999999 more",
+        );
+        assert_eq!(result, Err(crate::ParseError::Unrecognized));
     }
 
     #[test]
@@ -171,5 +191,24 @@ Caused by: java.lang.IllegalStateException: bad state
 
         assert_eq!(trace.segments()[1].error_kind, Some("Middle"));
         assert_eq!(trace.segments()[2].error_kind, Some("Bottom"));
+    }
+
+    #[test]
+    fn rejects_arbitrary_single_word_input() {
+        assert_eq!(
+            Language::Java.parse_stack("arbitrary"),
+            Err(crate::ParseError::Unrecognized)
+        );
+    }
+
+    #[test]
+    fn accepts_header_without_message_or_frames() {
+        let trace = Language::Java
+            .parse_stack("java.lang.NullPointerException")
+            .unwrap();
+        assert_eq!(
+            trace.segments()[0].error_kind,
+            Some("java.lang.NullPointerException")
+        );
     }
 }

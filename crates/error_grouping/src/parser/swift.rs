@@ -3,7 +3,9 @@ use crate::parser::{nonempty, source_file};
 
 pub(super) fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Option<StackTrace<'a>> {
     let mut segment = TraceSegment::default();
-    let mut include_thread = None;
+    let mut preamble_frames = Vec::new();
+    let mut saw_thread_header = false;
+    let mut include_thread = false;
 
     for original in lines {
         let line = original.trim();
@@ -17,12 +19,19 @@ pub(super) fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Option<St
                 segment.error_kind = Some(kind);
             }
         } else if let Some(crashed) = crashed_thread(line) {
-            include_thread = Some(crashed);
-        } else if include_thread.unwrap_or(true)
-            && let Some(frame) = parse_frame(line)
-        {
-            segment.frames.push(frame);
+            saw_thread_header = true;
+            include_thread = crashed;
+        } else if let Some(frame) = parse_frame(line) {
+            if !saw_thread_header {
+                preamble_frames.push(frame);
+            } else if include_thread {
+                segment.frames.push(frame);
+            }
         }
+    }
+
+    if !saw_thread_header {
+        segment.frames = preamble_frames;
     }
 
     StackTrace::nonempty(segment)
@@ -229,6 +238,24 @@ mod tests {
                 module: Some("Demo"),
                 file: Some("App.swift"),
             }
+        );
+    }
+
+    #[test]
+    fn ignores_indexed_sections_before_crashed_thread() {
+        let trace = Language::Swift
+            .parse_stack(
+                "Last Exception Backtrace:\n0 Old 0x1 stale() + 4 (Old.swift:1)\nThread 0 Crashed:\n0 Demo 0x2 App.crash() + 8 (App.swift:9)",
+            )
+            .unwrap();
+
+        assert_eq!(
+            trace.segments()[0].frames,
+            vec![StackFrame {
+                function: Some("App.crash()"),
+                module: Some("Demo"),
+                file: Some("App.swift"),
+            }]
         );
     }
 }

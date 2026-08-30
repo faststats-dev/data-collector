@@ -1,6 +1,6 @@
 # error_grouping
 
-`error_grouping` turns an error kind and runtime stack into a stable group identifier. Its public API intentionally exposes one fixed grouping operation; parsing and the borrowed intermediate representation remain implementation details.
+`error_grouping` turns an error kind and runtime stack into a stable group identifier. Parsing and the borrowed intermediate representation remain implementation details, while callers can choose either the default grouping policy or a typed custom policy.
 
 ```rust
 use error_grouping::{GroupingEvidence, GroupingInput, Language, group};
@@ -12,7 +12,7 @@ let result = group(GroupingInput {
 });
 
 assert_eq!(result.evidence, GroupingEvidence::ParsedStack);
-println!("{}", result.fingerprint); // eg1_<sha256>
+println!("{}", result.fingerprint); // eg1_<policy-id>_<sha256>
 ```
 
 ## Policy
@@ -21,29 +21,50 @@ println!("{}", result.fingerprint); // eg1_<sha256>
 - The root and terminal cause/context contribute.
 - At most eight non-runtime frames contribute per selected exception.
 - Messages, line numbers, instruction addresses, and deployment prefixes do not contribute.
-- Unrecognized non-empty stacks use an exact raw-stack fallback, preventing unrelated errors of the same kind from silently merging.
+- Unrecognized non-empty stacks hash bounded raw-stack evidence, preventing ordinary unrelated errors of the same kind from silently merging.
 - `GroupingResult::evidence` and `parse_error` make fallback behavior observable.
 
-Parsing is iterative and bounded to 1 MiB, 16,384 lines, and 64 KiB per line. Supported runtimes are Java, JavaScript, Python, PHP, Go, Rust, and Swift.
+Parsing is iterative and bounded to 1 MiB, 16,384 lines, and 64 KiB per line. The default raw fallback hashes at most 1 MiB split between the beginning and end, plus the original length. Supported runtimes are Java, JavaScript, Python, PHP, Go, Rust, and Swift.
 
-## Internal grouping options
+## Custom grouping policies
 
-The public `group` function always uses the default `GroupingOptions`. The
-option types remain crate-private until a stable customization API is designed.
-Parser resource limits and fingerprint selection live behind that single policy
-boundary, which can later borrow compiled project rules without cloning them for
-every event.
+`group` uses `GroupingPolicy::default()`. Use `group_with_policy` when a project
+needs different grouping semantics. Policies borrow exclusion rules, so compiled
+project configuration does not need to be cloned for every event.
 
-| Option | Default | Effect |
+```rust
+use error_grouping::{
+    FrameExclusion, FrameField, FrameMatcher, FramePolicy, GroupingInput,
+    GroupingPolicy, Language, SegmentSelection, group_with_policy,
+};
+
+let exclusions = [FrameExclusion::new(
+    FrameField::Function,
+    FrameMatcher::Prefix("vendor."),
+)];
+let policy = GroupingPolicy::default()
+    .with_segments(SegmentSelection::Root)
+    .with_frames(FramePolicy::default().with_exclusions(&exclusions));
+let result = group_with_policy(
+    GroupingInput {
+        language: Language::Java,
+        error_kind: "java.lang.RuntimeException",
+        stack: "at app.Main.run(Main.java:1)",
+    },
+    &policy,
+);
+```
+
+| Setting | Default | Effect |
 | --- | --- | --- |
-| `max_segments` | `2` | For parsed stacks, includes the root and, when present, the terminal cause or context. `0` produces kind-only identity and `1` includes only the root. |
-| `include_error_kind` | `true` | Controls whether the authoritative root kind and terminal cause kind contribute. |
-| `include_raw_stack` | `true` | Includes exact raw stack text when parsing fails. Disabling it uses the same canonical identity as a missing stack. |
-| `frames.max_frames` | `8` | Bounds the number of included frames per selected segment. Excluded and filtered frames do not consume the limit. |
-| `frames.fields` | all fields | Independently selects function, module, and file identity. Disabled fields also do not affect deduplication. |
-| `frames.filter_runtime` | `true` | Removes recognized runtime frames when the segment contains at least one application frame. |
-| `frames.deduplicate_adjacent` | `true` | Collapses adjacent frames with the same selected identity. |
-| `frames.exclusions` | none | Removes frames matching custom exclusion rules. |
+| `SegmentSelection` | root and terminal cause | Selects kind-only, root-only, or root-plus-terminal-cause identity. |
+| `ErrorKindPolicy` | include | Controls whether authoritative root and terminal cause kinds contribute. |
+| `RawStackPolicy` | bounded to 1 MiB | Selects bounded raw evidence or kind-only fallback after parsing fails. |
+| `FramePolicy::with_max_frames` | `8` | Bounds included frames per selected segment. Excluded and filtered frames do not consume the limit. |
+| `FramePolicy::with_fields` | all fields | Selects function, module, and file identity. Disabled fields do not affect deduplication. |
+| `RuntimeFramePolicy` | filter when app frames exist | Controls built-in runtime-frame filtering. |
+| `AdjacentFramePolicy` | deduplicate | Controls adjacent duplicate identity handling. |
+| `FramePolicy::with_exclusions` | none | Removes frames matching borrowed custom exclusion rules. |
 
 An exclusion targets a normalized function, module, or file value and supports
 exact, prefix, suffix, or substring matching. Rules are evaluated after built-in
@@ -51,6 +72,9 @@ normalization and runtime filtering, but before deduplication and frame limits.
 Empty patterns intentionally match nothing, preventing an incomplete rule from
 silently excluding every frame.
 
-Changing fingerprint options changes grouping semantics. The default policy is
-covered by an exact `eg1` regression test; any future public customization must
-also define how policies are versioned and kept consistent for stored events.
+Every policy setting and exclusion is hashed into the 128-bit policy component
+of the stored `eg1_<policy-id>_<sha256>` value. Changing policy therefore cannot
+silently reuse group identifiers produced by an earlier configuration. A
+bounded fallback can intentionally collide when equal-length inputs share its
+sampled beginning and end; lower the accepted input limit or handle resource
+errors outside grouping if that trade-off is unsuitable.

@@ -10,7 +10,7 @@
 //! });
 //!
 //! assert_eq!(result.evidence, GroupingEvidence::ParsedStack);
-//! println!("{}", result.fingerprint); // eg1_<sha256>
+//! println!("{}", result.fingerprint); // eg1_<policy-id>_<sha256>
 //! ```
 
 #![forbid(unsafe_code)]
@@ -21,7 +21,11 @@ mod group;
 mod language;
 mod parser;
 
-pub use ast::ParseError;
-pub use fingerprint::{FINGERPRINT_VERSION, Fingerprint};
-pub use group::{GroupingEvidence, GroupingInput, GroupingResult, group};
+pub use ast::{ParseError, ParserLimits};
+pub use fingerprint::{
+    AdjacentFramePolicy, ErrorKindPolicy, FINGERPRINT_VERSION, Fingerprint, FrameExclusion,
+    FrameField, FrameFields, FrameMatcher, FramePolicy, GroupingPolicy, GroupingPolicyId,
+    RawStackPolicy, RuntimeFramePolicy, SegmentSelection,
+};
+pub use group::{GroupingEvidence, GroupingInput, GroupingResult, group, group_with_policy};
 pub use language::{Language, UnsupportedLanguage};

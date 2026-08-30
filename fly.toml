@@ -1,4 +1,4 @@
-# fly.toml app configuration file generated for data-collector-20axlq on 2026-02-11T18:03:01+01:00
+# fly.toml app configuration file generated for data-collector-20axlq on 2026-08-30T17:44:05Z
 #
 # See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #
@@ -11,7 +11,7 @@ primary_region = 'fra'
 [http_service]
   internal_port = 8080
   force_https = true
-  auto_stop_machines = 'stop'
+  auto_stop_machines = true
   auto_start_machines = true
   min_machines_running = 1
   processes = ['app']
@@ -21,5 +21,9 @@ primary_region = 'fra'
   path = "/metrics"
 
 [[vm]]
-  size = "shared-cpu-1x"
-  memory = "512mb"
+  size = 'shared-cpu-1x'
+  memory = '512mb'
+  cpu_kind = 'shared'
+  cpus = 1
+  memory_mb = 512
+  processes = ['app']

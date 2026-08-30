@@ -91,6 +91,7 @@ pub async fn error(
                 sdk_name: payload.sdk_name.as_deref(),
                 sdk_version: payload.sdk_version.as_deref(),
                 context: &context,
+                grouping: &ctx.error_grouping,
             },
             error,
         );
@@ -98,6 +99,7 @@ pub async fn error(
             &state.batch_queue,
             occurrence,
             language,
+            &ctx.error_grouping,
             Some(tracking_ctx.clone()),
         ) {
             return e;

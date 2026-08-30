@@ -263,6 +263,7 @@ pub async fn web(
                     sdk_name: sdk_name.as_deref(),
                     sdk_version: sdk_version.as_deref(),
                     context: error_v3_context,
+                    grouping: &ctx.error_grouping,
                 },
                 error,
             );
@@ -270,6 +271,7 @@ pub async fn web(
                 &state.batch_queue,
                 occurrence,
                 ErrorLanguage::JavaScript,
+                &ctx.error_grouping,
                 Some(tracking_ctx.clone()),
             ) {
                 return e;

@@ -8,8 +8,8 @@ use serde_json::{Map, Value};
 use std::collections::HashMap;
 use uuid::Uuid;
 
-use crate::error_tracking::ErrorLanguage;
 use crate::error_tracking::group_hash;
+use crate::error_tracking::{ErrorLanguage, ProjectGrouping};
 
 pub struct OccurrenceInput<'a> {
     pub project_id: Uuid,
@@ -21,6 +21,7 @@ pub struct OccurrenceInput<'a> {
     pub sdk_name: Option<&'a str>,
     pub sdk_version: Option<&'a str>,
     pub context: &'a Value,
+    pub grouping: &'a ProjectGrouping,
 }
 
 pub fn build_occurrence(input: OccurrenceInput<'_>, error: ErrorTracking) -> ErrorOccurrenceV3Row {
@@ -55,7 +56,7 @@ pub fn build_occurrence(input: OccurrenceInput<'_>, error: ErrorTracking) -> Err
         environment: "prod".to_string(),
         language: input.language.as_str().to_owned(),
         release: build_id.unwrap_or_else(|| input.release.unwrap_or_default().to_owned()),
-        group_hash: group_hash(input.language, &error_type, source_stack),
+        group_hash: group_hash(input.language, &error_type, source_stack, input.grouping),
         exact_hash: exact_hash(&error_type, &error_message, source_stack),
         error_type,
         error_message,
@@ -78,13 +79,14 @@ pub async fn enrich_with_mapping(
     resolver: &MappingResolver,
     mut row: ErrorOccurrenceV3Row,
     language: ErrorLanguage,
+    grouping: &ProjectGrouping,
 ) -> ErrorOccurrenceV3Row {
     let mapped = resolver
         .apply(language, row.project_id, &row.release, &row.stacktrace)
         .await;
 
     if let Some(mapped) = mapped {
-        row.group_hash = group_hash(language, &row.error_type, &mapped.stacktrace);
+        row.group_hash = group_hash(language, &row.error_type, &mapped.stacktrace, grouping);
         row.exact_hash = exact_hash(&row.error_type, &row.error_message, &mapped.stacktrace);
         row.mapped_stacktrace = Some(mapped.stacktrace);
         row.mapping_used = Some(mapped.mapping_used);
@@ -177,7 +179,11 @@ mod tests {
     };
     use crate::models::{Error, ErrorTracking};
     use serde_json::json;
+    use std::sync::LazyLock;
     use uuid::Uuid;
+
+    static GROUPING: LazyLock<crate::error_tracking::ProjectGrouping> =
+        LazyLock::new(crate::error_tracking::ProjectGrouping::default);
 
     #[test]
     fn mods_occurrences_use_java_fingerprint() {
@@ -209,6 +215,7 @@ mod tests {
                 sdk_name: Some("minecraft-plugin"),
                 sdk_version: None,
                 context: &context,
+                grouping: &GROUPING,
             },
             error,
         );
@@ -218,7 +225,8 @@ mod tests {
             group_hash(
                 ErrorLanguage::Java,
                 "java.lang.RuntimeException",
-                "\tat plugin-1.2.3.jar//com.example.Plugin.handle(Plugin.java:42)"
+                "\tat plugin-1.2.3.jar//com.example.Plugin.handle(Plugin.java:42)",
+                &GROUPING,
             )
         );
         assert_eq!(row.count, 3);
@@ -239,6 +247,7 @@ mod tests {
                 sdk_name: None,
                 sdk_version: Some("request-sdk"),
                 context: &context,
+                grouping: &GROUPING,
             },
             ErrorTracking {
                 error: Error {
@@ -274,6 +283,7 @@ mod tests {
                 sdk_name: None,
                 sdk_version: Some("request-sdk"),
                 context: &context,
+                grouping: &GROUPING,
             },
             ErrorTracking {
                 error: Error {
@@ -330,6 +340,7 @@ mod tests {
                 sdk_name: None,
                 sdk_version: None,
                 context: &context,
+                grouping: &GROUPING,
             },
             error,
         );
@@ -339,7 +350,8 @@ mod tests {
             group_hash(
                 ErrorLanguage::Php,
                 "RuntimeException",
-                "#0 /var/www/app/src/UserService.php(42): App\\Service\\UserService->find('abc', 123)"
+                "#0 /var/www/app/src/UserService.php(42): App\\Service\\UserService->find('abc', 123)",
+                &GROUPING,
             )
         );
         assert_eq!(row.language, "php");
@@ -375,13 +387,14 @@ mod tests {
                 sdk_name: None,
                 sdk_version: None,
                 context: &context,
+                grouping: &GROUPING,
             },
             error,
         );
 
         assert_eq!(
             row.group_hash,
-            group_hash(ErrorLanguage::Rust, "panic", stacktrace)
+            group_hash(ErrorLanguage::Rust, "panic", stacktrace, &GROUPING)
         );
         assert_eq!(row.language, "rust");
     }

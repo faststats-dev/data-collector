@@ -5,10 +5,18 @@ pub struct Config {
     pub topic: String,
     pub group_id: String,
     pub max_message_bytes: usize,
+    pub security_protocol: String,
+    pub sasl_mechanism: Option<String>,
+    pub sasl_username: Option<String>,
+    pub sasl_password: Option<String>,
+    pub ssl_ca_location: Option<String>,
 }
 
 impl Config {
     pub fn from_env() -> Result<Self, String> {
+        let security_protocol =
+            std::env::var("KAFKA_SECURITY_PROTOCOL").unwrap_or_else(|_| "PLAINTEXT".into());
+        let uses_sasl = security_protocol.to_ascii_uppercase().contains("SASL");
         Ok(Self {
             database_url: required("DATABASE_URL")?,
             database_max_connections: optional("DATABASE_MAX_CONNECTIONS", 10)?,
@@ -18,6 +26,16 @@ impl Config {
             group_id: std::env::var("REPLAY_KAFKA_GROUP_ID")
                 .unwrap_or_else(|_| "replay-consumer".into()),
             max_message_bytes: optional("KAFKA_MAX_MESSAGE_BYTES", 16 * 1024 * 1024 + 256 * 1024)?,
+            security_protocol,
+            sasl_mechanism: uses_sasl
+                .then(|| std::env::var("KAFKA_SASL_MECHANISM").unwrap_or_else(|_| "PLAIN".into())),
+            sasl_username: uses_sasl
+                .then(|| required("KAFKA_SASL_USERNAME"))
+                .transpose()?,
+            sasl_password: uses_sasl
+                .then(|| required("KAFKA_SASL_PASSWORD"))
+                .transpose()?,
+            ssl_ca_location: std::env::var("KAFKA_SSL_CA_LOCATION").ok(),
         })
     }
 }

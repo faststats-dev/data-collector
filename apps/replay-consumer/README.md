@@ -48,6 +48,17 @@ cargo run -p replay-consumer
 cargo run -p collector
 ```
 
+For a SASL/TLS cluster such as Aiven, set `KAFKA_SECURITY_PROTOCOL=SASL_SSL`,
+`KAFKA_SASL_MECHANISM=PLAIN`, `KAFKA_SASL_USERNAME`, `KAFKA_SASL_PASSWORD`, and
+`KAFKA_SSL_CA_LOCATION` (the path to the provider's CA certificate). Plaintext remains the
+default for local development.
+
+Build the worker image from the repository root so workspace crates are available:
+
+```sh
+docker build -f apps/replay-consumer/Dockerfile -t faststats-replay-consumer .
+```
+
 Large replay commands use `KAFKA_MAX_MESSAGE_BYTES` (default 17 MiB) consistently in the
 collector and replay consumer. The broker must allow the same size; the local Compose broker
 is configured accordingly.

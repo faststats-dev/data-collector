@@ -17,14 +17,17 @@ impl Publisher {
             .ok()
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(DEFAULT_MAX_MESSAGE_BYTES);
-        let producer = ClientConfig::new()
+        let mut config = ClientConfig::new();
+        config
             .set("bootstrap.servers", brokers)
             .set("message.timeout.ms", "5000")
             .set("compression.type", "zstd")
             .set("compression.level", "3")
             .set("linger.ms", "10")
             .set("batch.size", "1048576")
-            .set("message.max.bytes", max_message_bytes.to_string())
+            .set("message.max.bytes", max_message_bytes.to_string());
+        apply_security_config(&mut config)?;
+        let producer = config
             .create()
             .map_err(|error| format!("Failed to create Kafka producer: {error}"))?;
         Ok(Self { producer })
@@ -40,6 +43,30 @@ impl Publisher {
             .map_err(|(error, _)| format!("Failed to publish Kafka message: {error}"))?;
         Ok(())
     }
+}
+
+fn apply_security_config(config: &mut ClientConfig) -> Result<(), String> {
+    let protocol = std::env::var("KAFKA_SECURITY_PROTOCOL").unwrap_or_else(|_| "PLAINTEXT".into());
+    config.set("security.protocol", &protocol);
+
+    if protocol.to_ascii_uppercase().contains("SASL") {
+        config
+            .set(
+                "sasl.mechanisms",
+                std::env::var("KAFKA_SASL_MECHANISM").unwrap_or_else(|_| "PLAIN".into()),
+            )
+            .set("sasl.username", required_env("KAFKA_SASL_USERNAME")?)
+            .set("sasl.password", required_env("KAFKA_SASL_PASSWORD")?);
+    }
+
+    if let Ok(path) = std::env::var("KAFKA_SSL_CA_LOCATION") {
+        config.set("ssl.ca.location", path);
+    }
+    Ok(())
+}
+
+fn required_env(name: &str) -> Result<String, String> {
+    std::env::var(name).map_err(|_| format!("{name} must be set when using SASL"))
 }
 
 #[derive(Clone)]

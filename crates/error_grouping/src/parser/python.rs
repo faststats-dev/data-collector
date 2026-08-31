@@ -1,13 +1,18 @@
-use crate::ast::{SegmentRelation, StackFrame, StackTrace, TraceSegment};
-use crate::parser::{error_kind, looks_like_exception, nonempty, trim_line};
+use crate::ast::{
+    ParseWarnings, SegmentList, SegmentRelation, StackFrame, StackTrace, TraceSegment,
+};
+use crate::parser::{
+    error_kind, looks_like_exception, nonempty, push_recent_frame, push_segment, trim_line,
+};
 
 pub(super) fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Option<StackTrace<'a>> {
-    let mut segments = Vec::new();
+    let mut segments = SegmentList::new();
     let mut current = None;
     let mut expect_context = false;
     let mut exception_group = false;
     let mut skip_group_children = false;
     let mut saw_traceback = false;
+    let mut warnings = ParseWarnings::default();
 
     for original in lines {
         let (raw, indent) = trim_line(original);
@@ -28,21 +33,22 @@ pub(super) fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Option<St
             skip_group_children = true;
         } else if let Some(group) = traceback_header(line) {
             saw_traceback = true;
-            finish_segment(&mut segments, &mut current);
+            finish_segment(&mut segments, &mut current, &mut warnings);
             current = Some(TraceSegment::default());
             expect_context = false;
             exception_group = group;
         } else if let Some(relation) = chain_relation(line) {
-            finish_segment(&mut segments, &mut current);
+            finish_segment(&mut segments, &mut current, &mut warnings);
             if let Some(segment) = segments.last_mut() {
                 segment.relation = relation;
             }
             expect_context = false;
         } else if let Some(frame) = parse_frame(line) {
-            current
-                .get_or_insert_with(TraceSegment::default)
-                .frames
-                .push(frame);
+            push_recent_frame(
+                &mut current.get_or_insert_with(TraceSegment::default).frames,
+                frame,
+                &mut warnings,
+            );
             expect_context = true;
         } else if expect_context && indent > 0 {
             expect_context = false;
@@ -52,7 +58,7 @@ pub(super) fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Option<St
             expect_context = false;
         }
     }
-    finish_segment(&mut segments, &mut current);
+    finish_segment(&mut segments, &mut current, &mut warnings);
     if !saw_traceback || segments.is_empty() {
         return None;
     }
@@ -65,17 +71,18 @@ pub(super) fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Option<St
             segment.relation = SegmentRelation::Root;
         }
     }
-    Some(StackTrace::new(segments))
+    Some(StackTrace::with_warnings(segments, warnings))
 }
 
 fn finish_segment<'a>(
-    segments: &mut Vec<TraceSegment<'a>>,
+    segments: &mut SegmentList<'a>,
     current: &mut Option<TraceSegment<'a>>,
+    warnings: &mut ParseWarnings,
 ) {
     if let Some(segment) = current.take()
         && !segment.is_empty()
     {
-        segments.push(segment);
+        push_segment(segments, segment, warnings);
     }
 }
 
@@ -178,12 +185,14 @@ mod tests {
             &trace.segments()[0],
             &TraceSegment {
                 relation: SegmentRelation::Root,
+                depth: 0,
                 error_kind: Some("ExceptionGroup"),
                 frames: vec![StackFrame {
                     function: Some("run"),
                     module: None,
                     file: Some("app.py"),
-                }],
+                }]
+                .into(),
             }
         );
     }

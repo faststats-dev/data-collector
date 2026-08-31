@@ -1,11 +1,12 @@
-use crate::ast::{StackFrame, StackTrace, TraceSegment};
-use crate::parser::{nonempty, source_file};
+use crate::ast::{FrameList, ParseWarnings, StackFrame, StackTrace, TraceSegment};
+use crate::parser::{nonempty, push_frame, source_file};
 
 pub(super) fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Option<StackTrace<'a>> {
     let mut segment = TraceSegment::default();
-    let mut preamble_frames = Vec::new();
+    let mut preamble_frames = FrameList::new();
     let mut saw_thread_header = false;
     let mut include_thread = false;
+    let mut warnings = ParseWarnings::default();
 
     for original in lines {
         let line = original.trim();
@@ -23,9 +24,9 @@ pub(super) fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Option<St
             include_thread = crashed;
         } else if let Some(frame) = parse_frame(line) {
             if !saw_thread_header {
-                preamble_frames.push(frame);
+                push_frame(&mut preamble_frames, frame, &mut warnings);
             } else if include_thread {
-                segment.frames.push(frame);
+                push_frame(&mut segment.frames, frame, &mut warnings);
             }
         }
     }
@@ -34,7 +35,7 @@ pub(super) fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Option<St
         segment.frames = preamble_frames;
     }
 
-    StackTrace::nonempty(segment)
+    (!segment.is_empty()).then(|| StackTrace::single_with_warnings(segment, warnings))
 }
 
 fn runtime_failure_kind(line: &str) -> Option<&str> {
@@ -250,12 +251,13 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            trace.segments()[0].frames,
+            trace.segments()[0].frames.as_slice(),
             vec![StackFrame {
                 function: Some("App.crash()"),
                 module: Some("Demo"),
                 file: Some("App.swift"),
             }]
+            .as_slice()
         );
     }
 }

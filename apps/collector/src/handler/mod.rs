@@ -272,9 +272,16 @@ async fn load_error_grouping(pool: &sqlx::PgPool, project_id: Uuid) -> ProjectGr
     .fetch_optional(pool)
     .await;
 
-    let Ok(Some(settings)) = settings else {
-        warn!(%project_id, "Missing error grouping settings; using modern defaults");
-        return ProjectGrouping::default();
+    let settings = match settings {
+        Ok(Some(settings)) => settings,
+        Ok(None) => {
+            warn!(%project_id, "Missing error grouping settings; using modern defaults");
+            return ProjectGrouping::default();
+        }
+        Err(error) => {
+            warn!(%project_id, %error, "Failed to load error grouping settings; using modern defaults");
+            return ProjectGrouping::default();
+        }
     };
     let exclusions = sqlx::query(
         r#"
@@ -286,41 +293,148 @@ async fn load_error_grouping(pool: &sqlx::PgPool, project_id: Uuid) -> ProjectGr
     )
     .bind(project_id)
     .fetch_all(pool)
-    .await
-    .unwrap_or_default()
-    .into_iter()
-    .map(|row| crate::error_tracking::OwnedFrameExclusion {
-        field: row.get("field"),
-        matcher: row.get("matcher"),
-        pattern: row.get("pattern"),
-    })
-    .collect();
+    .await;
+    let exclusions = match exclusions {
+        Ok(exclusions) => exclusions,
+        Err(error) => {
+            warn!(%project_id, %error, "Failed to load error grouping exclusions; using modern defaults");
+            return ProjectGrouping::default();
+        }
+    };
+    let exclusions = exclusions
+        .into_iter()
+        .map(parse_frame_exclusion)
+        .collect::<Option<Vec<error_grouping::FrameRule>>>();
+    let Some(exclusions) = exclusions else {
+        warn!(%project_id, "Invalid error grouping exclusion; using modern defaults");
+        return ProjectGrouping::default();
+    };
 
-    ProjectGrouping {
-        mode: if settings.get::<String, _>("mode") == "legacy" {
-            crate::error_tracking::GroupingMode::Legacy
-        } else {
-            crate::error_tracking::GroupingMode::Modern
-        },
-        parser_max_input_bytes: positive_usize(&settings, "parser_max_input_bytes", 1_048_576),
-        parser_max_lines: positive_usize(&settings, "parser_max_lines", 16_384),
-        parser_max_line_bytes: positive_usize(&settings, "parser_max_line_bytes", 65_536),
-        segment_selection: settings.get("segment_selection"),
-        include_error_kind: settings.get("include_error_kind"),
-        raw_stack_policy: settings.get("raw_stack_policy"),
-        raw_stack_max_bytes: positive_usize(&settings, "raw_stack_max_bytes", 1_048_576),
-        max_frames: settings
-            .get::<i32, _>("max_frames")
-            .max(0)
-            .try_into()
-            .unwrap_or(8),
-        include_function: settings.get("include_function"),
-        include_module: settings.get("include_module"),
-        include_file: settings.get("include_file"),
-        runtime_frame_policy: settings.get("runtime_frame_policy"),
-        adjacent_frame_policy: settings.get("adjacent_frame_policy"),
-        exclusions,
+    let grouping = build_project_grouping(&settings, exclusions);
+    grouping.unwrap_or_else(|reason| {
+        warn!(%project_id, %reason, "Invalid error grouping settings; using modern defaults");
+        ProjectGrouping::default()
+    })
+}
+
+fn parse_frame_exclusion(row: sqlx::postgres::PgRow) -> Option<error_grouping::FrameRule> {
+    use error_grouping::{FrameField, FrameMatcher, FrameRule};
+
+    let field = enum_setting(
+        &row,
+        "field",
+        &[
+            ("function", FrameField::Function),
+            ("module", FrameField::Module),
+            ("file", FrameField::File),
+        ],
+    )
+    .ok()?;
+    let pattern = row.get::<String, _>("pattern");
+    let matcher = match row.get::<String, _>("matcher").as_str() {
+        "exact" => FrameMatcher::exact(pattern),
+        "prefix" => FrameMatcher::prefix(pattern),
+        "suffix" => FrameMatcher::suffix(pattern),
+        "contains" => FrameMatcher::contains(pattern),
+        _ => return None,
+    };
+    Some(FrameRule::new(field, matcher))
+}
+
+fn build_project_grouping(
+    settings: &sqlx::postgres::PgRow,
+    exclusions: Vec<error_grouping::FrameRule>,
+) -> Result<ProjectGrouping, Cow<'static, str>> {
+    use crate::error_tracking::GroupingMode;
+    use error_grouping::{
+        FrameFields, FramePolicy, GroupingPolicy, ParserLimits, RawStackPolicy, SegmentSelection,
+    };
+
+    let mode = enum_setting(
+        settings,
+        "mode",
+        &[
+            ("legacy", GroupingMode::Legacy),
+            ("modern", GroupingMode::Modern),
+        ],
+    )?;
+    let mut fields = FrameFields::NONE;
+    if settings.get("include_function") {
+        fields = fields.union(FrameFields::FUNCTION);
     }
+    if settings.get("include_module") {
+        fields = fields.union(FrameFields::MODULE);
+    }
+    if settings.get("include_file") {
+        fields = fields.union(FrameFields::FILE);
+    }
+    let raw_stack_max_bytes = positive_usize(settings, "raw_stack_max_bytes", 1_048_576);
+    let segments = enum_setting(
+        settings,
+        "segment_selection",
+        &[
+            ("error_kind_only", SegmentSelection::ErrorKindOnly),
+            ("root", SegmentSelection::Root),
+            (
+                "root_and_terminal_cause",
+                SegmentSelection::RootAndTerminalCause,
+            ),
+            (
+                "terminal_cause_frames",
+                SegmentSelection::TerminalCauseFrames,
+            ),
+        ],
+    )?;
+    let raw_stack = match settings.get::<String, _>("raw_stack_policy").as_str() {
+        "error_kind_only" => RawStackPolicy::ErrorKindOnly,
+        "bounded" => RawStackPolicy::Bounded {
+            max_bytes: raw_stack_max_bytes,
+        },
+        _ => return Err("raw_stack_policy".into()),
+    };
+    let include_runtime_frames = enum_setting(
+        settings,
+        "runtime_frame_policy",
+        &[
+            ("include", true),
+            ("exclude_when_application_frame_exists", false),
+        ],
+    )?;
+    let deduplicate_adjacent_frames = enum_setting(
+        settings,
+        "adjacent_frame_policy",
+        &[("deduplicate", true), ("preserve", false)],
+    )?;
+    let policy = GroupingPolicy::default()
+        .with_parser_limits(ParserLimits {
+            max_input_bytes: positive_usize(settings, "parser_max_input_bytes", 1_048_576),
+            max_lines: positive_usize(settings, "parser_max_lines", 16_384),
+            max_line_bytes: positive_usize(settings, "parser_max_line_bytes", 65_536),
+        })
+        .with_segments(segments)
+        .include_error_kind(settings.get("include_error_kind"))
+        .with_raw_stack(raw_stack)
+        .with_frames(
+            FramePolicy::default()
+                .with_max_frames(settings.get::<i32, _>("max_frames").max(0) as usize)
+                .with_fields(fields)
+                .include_runtime_frames(include_runtime_frames)
+                .deduplicate_adjacent_frames(deduplicate_adjacent_frames)
+                .with_exclusions(exclusions),
+        );
+    ProjectGrouping::new(mode, policy).map_err(|error| error.to_string().into())
+}
+
+fn enum_setting<T: Copy>(
+    row: &sqlx::postgres::PgRow,
+    column: &'static str,
+    variants: &[(&str, T)],
+) -> Result<T, &'static str> {
+    let value = row.get::<String, _>(column);
+    variants
+        .iter()
+        .find_map(|(name, variant)| (value == *name).then_some(*variant))
+        .ok_or(column)
 }
 
 fn positive_usize(row: &sqlx::postgres::PgRow, column: &str, fallback: usize) -> usize {

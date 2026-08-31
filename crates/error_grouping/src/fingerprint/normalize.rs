@@ -76,12 +76,16 @@ fn normalize_file_path(language: Language, path: &str) -> Cow<'_, str> {
         }
         offset += component.len() + 1;
     }
-
     let suffix = stable_root.map_or_else(
         || path.rsplit_once('/').map_or(path, |(_, basename)| basename),
         |root| &path[root..],
     );
-    normalize_asset_hashes(normalize_case(language, suffix))
+    let value = normalize_case(language, suffix);
+    if language == Language::JavaScript {
+        normalize_asset_hashes(value)
+    } else {
+        value
+    }
 }
 
 fn is_stable_path_root(component: &str) -> bool {
@@ -172,7 +176,12 @@ fn normalize_asset_hashes(value: Cow<'_, str>) -> Cow<'_, str> {
 }
 
 fn is_asset_hash(value: &str) -> bool {
-    value.len() >= 8 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    value.len() >= 12
+        && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && value.bytes().any(|byte| byte.is_ascii_digit())
+        && value
+            .bytes()
+            .any(|byte| matches!(byte.to_ascii_lowercase(), b'a'..=b'f'))
 }
 
 pub(super) fn is_runtime_frame(language: Language, frame: &StackFrame<'_>) -> bool {

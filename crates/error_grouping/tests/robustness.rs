@@ -1,6 +1,6 @@
 use error_grouping::{
-    GroupingEvidence, GroupingInput, GroupingPolicy, Language, ParseError, ParserLimits,
-    RawStackPolicy, group, group_with_policy,
+    Grouper, GroupingInput, GroupingOutcome, GroupingPolicy, Language, ParseError, ParserLimits,
+    RawStackPolicy, group,
 };
 
 const LANGUAGES: [Language; 7] = [
@@ -61,9 +61,12 @@ fn oversized_inputs_use_observable_raw_stack_fallback() {
         stack: &stack,
     });
 
-    assert_eq!(result.evidence, GroupingEvidence::RawStack);
     assert!(matches!(
-        result.parse_error,
+        result.outcome,
+        GroupingOutcome::RawFallback { .. }
+    ));
+    assert!(matches!(
+        result.parse_error(),
         Some(ParseError::InputTooLarge { .. })
     ));
 }
@@ -76,16 +79,15 @@ fn oversized_fallback_samples_only_a_bounded_prefix_and_suffix() {
             ..ParserLimits::default()
         })
         .with_raw_stack(RawStackPolicy::Bounded { max_bytes: 4 });
+    let grouper = Grouper::new(policy).unwrap();
     let fingerprint = |stack| {
-        group_with_policy(
-            GroupingInput {
+        grouper
+            .group(GroupingInput {
                 language: Language::Java,
                 error_kind: "Error",
                 stack,
-            },
-            &policy,
-        )
-        .fingerprint
+            })
+            .fingerprint
     };
 
     assert_eq!(fingerprint("ab1111yz"), fingerprint("ab2222yz"));

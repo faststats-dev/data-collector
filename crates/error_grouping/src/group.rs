@@ -1,5 +1,11 @@
 use crate::fingerprint;
-use crate::{Fingerprint, GroupingPolicy, Language, ParseError};
+use std::{
+    error::Error,
+    fmt,
+    sync::{Arc, LazyLock},
+};
+
+use crate::{Fingerprint, GroupingPolicy, Language, ParseError, ParseWarnings, RawStackPolicy};
 
 /// Complete input needed to derive an error-group identifier.
 #[derive(Clone, Copy, Debug)]
@@ -12,16 +18,30 @@ pub struct GroupingInput<'a> {
     pub stack: &'a str,
 }
 
-/// Strength of the evidence that contributed to a fingerprint.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Why grouping used only the authoritative error kind.
+#[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
-pub enum GroupingEvidence {
-    /// A recognized stack trace contributed normalized frames.
-    ParsedStack,
-    /// Parsing failed, so bounded non-empty raw-stack evidence contributed.
-    RawStack,
-    /// Only language and configured error-kind identity contributed.
-    ErrorKind,
+pub enum KindOnlyReason {
+    EmptyStack,
+    Policy,
+    NoUsableFrames,
+    ParseFailure(ParseError),
+}
+
+/// Structurally valid provenance for a grouping decision.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum GroupingOutcome {
+    Frames {
+        contributing_frames: usize,
+        warnings: ParseWarnings,
+    },
+    RawFallback {
+        reason: ParseError,
+    },
+    KindOnly {
+        reason: KindOnlyReason,
+    },
 }
 
 /// Fingerprint plus enough provenance to observe degraded grouping.
@@ -31,9 +51,83 @@ pub struct GroupingResult {
     /// Stable, versioned identity for storage and comparison.
     pub fingerprint: Fingerprint,
     /// Source material used to derive the fingerprint.
-    pub evidence: GroupingEvidence,
-    /// Parser failure that caused a raw-stack fallback, if any.
-    pub parse_error: Option<ParseError>,
+    pub outcome: GroupingOutcome,
+}
+
+impl GroupingResult {
+    #[must_use]
+    pub const fn parse_error(&self) -> Option<&ParseError> {
+        match &self.outcome {
+            GroupingOutcome::RawFallback { reason }
+            | GroupingOutcome::KindOnly {
+                reason: KindOnlyReason::ParseFailure(reason),
+            } => Some(reason),
+            _ => None,
+        }
+    }
+}
+
+/// A validated grouping policy compiled for repeated use.
+#[derive(Clone, Debug)]
+pub struct Grouper {
+    policy: Arc<GroupingPolicy>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InvalidPolicy(&'static str);
+
+impl fmt::Display for InvalidPolicy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl Error for InvalidPolicy {}
+
+fn validate(valid: bool, message: &'static str) -> Result<(), InvalidPolicy> {
+    valid.then_some(()).ok_or(InvalidPolicy(message))
+}
+
+impl Grouper {
+    /// Validate an owned or shared policy for repeated use.
+    pub fn new(policy: impl Into<Arc<GroupingPolicy>>) -> Result<Self, InvalidPolicy> {
+        let policy = policy.into();
+        let limits = policy.parser_limits;
+        validate(
+            limits.max_input_bytes > 0 && limits.max_lines > 0 && limits.max_line_bytes > 0,
+            "parser limits must be greater than zero",
+        )?;
+        validate(
+            !matches!(policy.raw_stack, RawStackPolicy::Bounded { max_bytes: 0 }),
+            "raw-stack fallback must retain at least one byte",
+        )?;
+        validate(
+            policy.frames.max_frames <= crate::parser::MAX_RETAINED_FRAMES,
+            "max_frames exceeds the parser retention limit",
+        )?;
+        validate(
+            policy.frames.fields.is_valid(),
+            "frame fields contain unknown bits",
+        )?;
+        validate(
+            policy
+                .frames
+                .exclusions
+                .iter()
+                .all(|rule| !rule.pattern().is_empty()),
+            "frame-rule patterns must not be empty",
+        )?;
+        Ok(Self { policy })
+    }
+
+    #[must_use]
+    pub fn policy(&self) -> &GroupingPolicy {
+        &self.policy
+    }
+
+    pub fn group(&self, input: GroupingInput<'_>) -> GroupingResult {
+        group_with_policy(input, &self.policy)
+    }
 }
 
 /// Group an error using the default bounded policy.
@@ -41,59 +135,59 @@ pub struct GroupingResult {
 /// Unrecognized non-empty stacks contribute bounded raw evidence rather than
 /// collapsing all errors of the same kind into one low-confidence group.
 pub fn group(input: GroupingInput<'_>) -> GroupingResult {
-    group_with_policy(input, &GroupingPolicy::default())
+    static DEFAULT: LazyLock<Grouper> = LazyLock::new(|| {
+        Grouper::new(GroupingPolicy::default()).expect("default grouping policy is valid")
+    });
+    DEFAULT.group(input)
 }
 
-/// Group an error with an explicit, borrow-friendly policy.
-///
-/// The policy identity is encoded in the returned fingerprint, so changing any
-/// option cannot silently reuse identifiers produced by another policy.
-pub fn group_with_policy(input: GroupingInput<'_>, policy: &GroupingPolicy<'_>) -> GroupingResult {
-    let policy_id = policy.id();
+fn group_with_policy(input: GroupingInput<'_>, policy: &GroupingPolicy) -> GroupingResult {
     match input
         .language
         .parse_stack_with_limits(input.stack, &policy.parser_limits)
     {
         Ok(trace) => {
-            let output =
-                fingerprint::parsed(input.language, &trace, input.error_kind, *policy, policy_id);
-            let evidence = if output.used_stack {
-                GroupingEvidence::ParsedStack
+            let (fingerprint, contributing_frames) =
+                fingerprint::parsed(input.language, &trace, input.error_kind, policy);
+            let outcome = if contributing_frames > 0 {
+                GroupingOutcome::Frames {
+                    contributing_frames,
+                    warnings: trace.warnings,
+                }
             } else {
-                GroupingEvidence::ErrorKind
+                GroupingOutcome::KindOnly {
+                    reason: if policy.segments == crate::SegmentSelection::ErrorKindOnly
+                        || !policy.frames.includes_frames()
+                    {
+                        KindOnlyReason::Policy
+                    } else {
+                        KindOnlyReason::NoUsableFrames
+                    },
+                }
             };
             GroupingResult {
-                fingerprint: output.fingerprint,
-                evidence,
-                parse_error: None,
+                fingerprint,
+                outcome,
             }
         }
         Err(ParseError::Empty) => GroupingResult {
-            fingerprint: fingerprint::kind_only(
-                input.language,
-                input.error_kind,
-                *policy,
-                policy_id,
-            ),
-            evidence: GroupingEvidence::ErrorKind,
-            parse_error: None,
+            fingerprint: fingerprint::kind_only(input.language, input.error_kind, policy),
+            outcome: GroupingOutcome::KindOnly {
+                reason: KindOnlyReason::EmptyStack,
+            },
         },
         Err(error) => {
-            let output = fingerprint::raw_stack(
-                input.language,
-                input.error_kind,
-                input.stack,
-                *policy,
-                policy_id,
-            );
-            GroupingResult {
-                fingerprint: output.fingerprint,
-                evidence: if output.used_stack {
-                    GroupingEvidence::RawStack
-                } else {
-                    GroupingEvidence::ErrorKind
+            let fingerprint =
+                fingerprint::raw_stack(input.language, input.error_kind, input.stack, policy);
+            let outcome = match policy.raw_stack {
+                RawStackPolicy::Bounded { .. } => GroupingOutcome::RawFallback { reason: error },
+                RawStackPolicy::ErrorKindOnly => GroupingOutcome::KindOnly {
+                    reason: KindOnlyReason::ParseFailure(error),
                 },
-                parse_error: Some(error),
+            };
+            GroupingResult {
+                fingerprint,
+                outcome,
             }
         }
     }
@@ -103,122 +197,122 @@ pub fn group_with_policy(input: GroupingInput<'_>, policy: &GroupingPolicy<'_>) 
 mod tests {
     use super::*;
 
+    fn input<'a>(language: Language, error_kind: &'a str, stack: &'a str) -> GroupingInput<'a> {
+        GroupingInput {
+            language,
+            error_kind,
+            stack,
+        }
+    }
+
     #[test]
     fn recognized_stack_reports_parsed_evidence() {
-        let result = group(GroupingInput {
-            language: Language::JavaScript,
-            error_kind: "TypeError",
-            stack: "at render (/app/main.js:10:2)",
-        });
-        assert_eq!(result.evidence, GroupingEvidence::ParsedStack);
+        let result = group(input(
+            Language::JavaScript,
+            "TypeError",
+            "at render (/app/main.js:10:2)",
+        ));
+        assert!(matches!(result.outcome, GroupingOutcome::Frames { .. }));
     }
 
     #[test]
     fn empty_stack_reports_error_kind_evidence() {
-        let result = group(GroupingInput {
-            language: Language::Java,
-            error_kind: "java.lang.RuntimeException",
-            stack: " \t",
-        });
-        assert_eq!(result.evidence, GroupingEvidence::ErrorKind);
+        let result = group(input(Language::Java, "java.lang.RuntimeException", " \t"));
+        assert!(matches!(result.outcome, GroupingOutcome::KindOnly { .. }));
     }
 
     #[test]
     fn unrecognized_stack_reports_raw_evidence_and_reason() {
-        let result = group(GroupingInput {
-            language: Language::Java,
-            error_kind: "java.lang.RuntimeException",
-            stack: "not a stack",
-        });
-        assert_eq!(
-            (result.evidence, result.parse_error),
-            (GroupingEvidence::RawStack, Some(ParseError::Unrecognized))
-        );
+        let result = group(input(
+            Language::Java,
+            "java.lang.RuntimeException",
+            "not a stack",
+        ));
+        assert_eq!(result.parse_error(), Some(&ParseError::Unrecognized));
+        assert!(matches!(
+            result.outcome,
+            GroupingOutcome::RawFallback { .. }
+        ));
     }
 
     #[test]
     fn different_unrecognized_stacks_do_not_merge() {
-        let first = group(GroupingInput {
-            language: Language::Java,
-            error_kind: "java.lang.RuntimeException",
-            stack: "first unsupported stack",
-        });
-        let second = group(GroupingInput {
-            language: Language::Java,
-            error_kind: "java.lang.RuntimeException",
-            stack: "second unsupported stack",
-        });
+        let first = group(input(
+            Language::Java,
+            "java.lang.RuntimeException",
+            "first unsupported stack",
+        ));
+        let second = group(input(
+            Language::Java,
+            "java.lang.RuntimeException",
+            "second unsupported stack",
+        ));
         assert_ne!(first.fingerprint, second.fingerprint);
     }
 
     #[test]
     fn arbitrary_java_identifiers_use_raw_stack_fallback() {
-        let input = |stack| GroupingInput {
-            language: Language::Java,
-            error_kind: "java.lang.RuntimeException",
-            stack,
-        };
-        let first = group(input("alpha"));
-        let second = group(input("beta"));
+        let first = group(input(Language::Java, "java.lang.RuntimeException", "alpha"));
+        let second = group(input(Language::Java, "java.lang.RuntimeException", "beta"));
 
-        assert_eq!(first.evidence, GroupingEvidence::RawStack);
+        assert!(matches!(first.outcome, GroupingOutcome::RawFallback { .. }));
         assert_ne!(first.fingerprint, second.fingerprint);
     }
 
     #[test]
     fn header_only_stack_reports_error_kind_evidence() {
-        let result = group(GroupingInput {
-            language: Language::Java,
-            error_kind: "java.lang.RuntimeException",
-            stack: "java.lang.RuntimeException: dynamic message",
-        });
+        let result = group(input(
+            Language::Java,
+            "java.lang.RuntimeException",
+            "java.lang.RuntimeException: dynamic message",
+        ));
 
-        assert_eq!(result.evidence, GroupingEvidence::ErrorKind);
+        assert!(matches!(result.outcome, GroupingOutcome::KindOnly { .. }));
     }
 
     #[test]
     fn policy_can_ignore_error_kind() {
-        let input = |error_kind| GroupingInput {
-            language: Language::JavaScript,
-            error_kind,
-            stack: "at load (/app.js:1:1)",
-        };
-        let policy = GroupingPolicy::default().with_error_kind(crate::ErrorKindPolicy::Ignore);
+        let policy = GroupingPolicy::default().include_error_kind(false);
 
         assert_eq!(
-            group_with_policy(input("TypeError"), &policy).fingerprint,
-            group_with_policy(input("RangeError"), &policy).fingerprint
+            group_with_policy(
+                input(Language::JavaScript, "TypeError", "at load (/app.js:1:1)"),
+                &policy,
+            )
+            .fingerprint,
+            group_with_policy(
+                input(Language::JavaScript, "RangeError", "at load (/app.js:1:1)"),
+                &policy,
+            )
+            .fingerprint
         );
     }
 
     #[test]
     fn policy_can_ignore_raw_stack_fallback() {
-        let input = |stack| GroupingInput {
-            language: Language::Java,
-            error_kind: "Error",
-            stack,
-        };
         let policy = GroupingPolicy::default().with_raw_stack(crate::RawStackPolicy::ErrorKindOnly);
 
         assert_eq!(
-            group_with_policy(input("first unsupported stack"), &policy).fingerprint,
-            group_with_policy(input("second unsupported stack"), &policy).fingerprint
+            group_with_policy(
+                input(Language::Java, "Error", "first unsupported stack"),
+                &policy,
+            )
+            .fingerprint,
+            group_with_policy(
+                input(Language::Java, "Error", "second unsupported stack"),
+                &policy,
+            )
+            .fingerprint
         );
     }
 
     #[test]
     fn ignored_raw_stack_reports_error_kind_evidence() {
         let policy = GroupingPolicy::default().with_raw_stack(crate::RawStackPolicy::ErrorKindOnly);
-        let result = group_with_policy(
-            GroupingInput {
-                language: Language::Java,
-                error_kind: "Error",
-                stack: "unsupported stack",
-            },
-            &policy,
-        );
+        let result =
+            group_with_policy(input(Language::Java, "Error", "unsupported stack"), &policy);
 
-        assert_eq!(result.evidence, GroupingEvidence::ErrorKind);
+        assert!(matches!(result.outcome, GroupingOutcome::KindOnly { .. }));
     }
 
     #[test]
@@ -226,15 +320,11 @@ mod tests {
         let policy =
             GroupingPolicy::default().with_segments(crate::SegmentSelection::ErrorKindOnly);
         let result = group_with_policy(
-            GroupingInput {
-                language: Language::JavaScript,
-                error_kind: "TypeError",
-                stack: "at load (/app.js:1:1)",
-            },
+            input(Language::JavaScript, "TypeError", "at load (/app.js:1:1)"),
             &policy,
         );
 
-        assert_eq!(result.evidence, GroupingEvidence::ErrorKind);
+        assert!(matches!(result.outcome, GroupingOutcome::KindOnly { .. }));
     }
 
     #[test]
@@ -243,18 +333,11 @@ mod tests {
             max_input_bytes: 4,
             ..crate::ParserLimits::default()
         });
-        let result = group_with_policy(
-            GroupingInput {
-                language: Language::Java,
-                error_kind: "Error",
-                stack: "     ",
-            },
-            &policy,
-        );
+        let result = group_with_policy(input(Language::Java, "Error", "     "), &policy);
 
         assert_eq!(
-            result.parse_error,
-            Some(ParseError::InputTooLarge {
+            result.parse_error(),
+            Some(&ParseError::InputTooLarge {
                 actual: 5,
                 limit: 4,
             })
@@ -269,18 +352,78 @@ mod tests {
         });
 
         let result = group_with_policy(
-            GroupingInput {
-                language: Language::Java,
-                error_kind: "Error",
-                stack: "at a.B.run(B.java:1)",
-            },
+            input(Language::Java, "Error", "at a.B.run(B.java:1)"),
             &policy,
         );
 
-        assert_eq!(result.evidence, GroupingEvidence::RawStack);
         assert!(matches!(
-            result.parse_error,
+            result.outcome,
+            GroupingOutcome::RawFallback { .. }
+        ));
+        assert!(matches!(
+            result.parse_error(),
             Some(ParseError::InputTooLarge { limit: 4, .. })
+        ));
+    }
+
+    #[test]
+    fn grouper_rejects_invalid_configuration() {
+        let empty_rule = GroupingPolicy::default().with_frames(
+            crate::FramePolicy::default().with_exclusions(vec![crate::FrameRule::new(
+                crate::FrameField::Function,
+                crate::FrameMatcher::prefix(""),
+            )]),
+        );
+        assert!(Grouper::new(empty_rule).is_err());
+        assert!(
+            Grouper::new(
+                GroupingPolicy::default()
+                    .with_raw_stack(crate::RawStackPolicy::Bounded { max_bytes: 0 })
+            )
+            .is_err()
+        );
+        assert!(
+            Grouper::new(
+                GroupingPolicy::default()
+                    .with_frames(crate::FramePolicy::default().with_max_frames(257))
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn frames_without_selected_identity_are_kind_only() {
+        let policy = GroupingPolicy::default()
+            .with_frames(crate::FramePolicy::default().with_fields(crate::FrameFields::FUNCTION));
+        let result = group_with_policy(
+            input(Language::JavaScript, "Error", "at /app.js:1:1"),
+            &policy,
+        );
+        assert!(matches!(result.outcome, GroupingOutcome::KindOnly { .. }));
+    }
+
+    #[test]
+    fn partial_and_truncated_parses_report_warnings() {
+        let partial = group(input(
+            Language::Java,
+            "Error",
+            "Error: bad\n at malformed\n at app.Main.run(Main.java:1)",
+        ));
+        assert!(matches!(
+            partial.outcome,
+            GroupingOutcome::Frames { warnings, .. }
+                if warnings.malformed_frame
+        ));
+
+        let mut stack = String::from("Error: bad\n");
+        for index in 0..257 {
+            stack.push_str(&format!("at f{index} (/app.js:{index}:1)\n"));
+        }
+        let truncated = group(input(Language::JavaScript, "Error", &stack));
+        assert!(matches!(
+            truncated.outcome,
+            GroupingOutcome::Frames { warnings, .. }
+                if warnings.truncated
         ));
     }
 }

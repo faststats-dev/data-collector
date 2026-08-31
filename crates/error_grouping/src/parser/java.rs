@@ -1,33 +1,36 @@
-use crate::ast::{SegmentRelation, StackFrame, StackTrace, TraceSegment};
-use crate::parser::{error_kind, looks_like_exception, nonempty, payload, source_file, trim_line};
+use crate::ast::{
+    FrameList, ParseWarnings, SegmentList, SegmentRelation, StackFrame, StackTrace, TraceSegment,
+};
+use crate::parser::{
+    error_kind, looks_like_exception, nonempty, payload, push_frame, push_segment, source_file,
+    trim_line,
+};
 
 pub(super) fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Option<StackTrace<'a>> {
     let mut trace = JavaTraceBuilder::default();
-    let mut malformed_frame = false;
 
     for original in lines {
-        let (line, _) = trim_line(original);
+        let (line, indent) = trim_line(original);
         if line.is_empty() {
             continue;
         }
         if let Some(error) = exception_in_thread(line) {
-            trace.start_segment(SegmentRelation::Root, error);
+            trace.start_segment(SegmentRelation::Root, 0, error);
         } else if let Some((relation, error)) = related_error(line) {
-            trace.start_segment(relation, error);
+            trace.start_segment(relation, indent, error);
         } else if let Some(body) = payload(line, "at ") {
             if let Some(frame) = parse_frame(body) {
                 trace.push_frame(frame);
             } else {
-                malformed_frame = true;
+                trace.warnings.malformed_frame = true;
             }
+        } else if let Some(shared) = shared_frames(line) {
+            trace.expand_shared_frames(shared);
         } else if trace.is_empty() && looks_like_java_exception(line) {
-            trace.start_segment(SegmentRelation::Root, line);
+            trace.start_segment(SegmentRelation::Root, 0, line);
         }
     }
 
-    if malformed_frame {
-        return None;
-    }
     trace.finish()
 }
 
@@ -47,24 +50,50 @@ fn looks_like_java_exception(line: &str) -> bool {
 
 #[derive(Default)]
 struct JavaTraceBuilder<'a> {
-    segments: Vec<TraceSegment<'a>>,
+    segments: SegmentList<'a>,
+    warnings: ParseWarnings,
 }
 
 impl<'a> JavaTraceBuilder<'a> {
-    const fn is_empty(&self) -> bool {
+    fn is_empty(&self) -> bool {
         self.segments.is_empty()
     }
 
-    fn start_segment(&mut self, relation: SegmentRelation, error: &'a str) {
-        self.segments.push(TraceSegment {
-            relation: if self.segments.is_empty() {
-                SegmentRelation::Root
-            } else {
-                relation
+    fn start_segment(&mut self, relation: SegmentRelation, depth: usize, error: &'a str) {
+        let relation = if self.segments.is_empty() {
+            SegmentRelation::Root
+        } else {
+            relation
+        };
+        push_segment(
+            &mut self.segments,
+            TraceSegment {
+                relation,
+                depth,
+                error_kind: error_kind(error),
+                frames: FrameList::new(),
             },
-            error_kind: error_kind(error),
-            frames: Vec::new(),
-        });
+            &mut self.warnings,
+        );
+    }
+
+    fn expand_shared_frames(&mut self, count: usize) {
+        let length = self.segments.len();
+        if length < 2 {
+            return;
+        }
+        let (parents, current) = self.segments.split_at_mut(length - 1);
+        let current = &mut current[0];
+        let Some(parent) = parents
+            .iter()
+            .rev()
+            .find(|parent| parent.depth <= current.depth)
+        else {
+            return;
+        };
+        for frame in parent.frames.iter().rev().take(count).rev().copied() {
+            push_frame(&mut current.frames, frame, &mut self.warnings);
+        }
     }
 
     fn push_frame(&mut self, frame: StackFrame<'a>) {
@@ -72,16 +101,15 @@ impl<'a> JavaTraceBuilder<'a> {
             self.segments.push(TraceSegment::default());
         }
         if let Some(segment) = self.segments.last_mut() {
-            segment.frames.push(frame);
+            push_frame(&mut segment.frames, frame, &mut self.warnings);
         }
     }
 
     fn finish(self) -> Option<StackTrace<'a>> {
-        if self.segments.iter().any(|segment| !segment.is_empty()) {
-            Some(StackTrace::new(self.segments))
-        } else {
-            None
-        }
+        self.segments
+            .iter()
+            .any(|segment| !segment.is_empty())
+            .then(|| StackTrace::with_warnings(self.segments, self.warnings))
     }
 }
 
@@ -89,6 +117,13 @@ fn related_error(line: &str) -> Option<(SegmentRelation, &str)> {
     payload(line, "Caused by: ")
         .map(|error| (SegmentRelation::Cause, error))
         .or_else(|| payload(line, "Suppressed: ").map(|error| (SegmentRelation::Suppressed, error)))
+}
+
+fn shared_frames(line: &str) -> Option<usize> {
+    line.strip_prefix("... ")?
+        .strip_suffix(" more")?
+        .parse()
+        .ok()
 }
 
 fn exception_in_thread(line: &str) -> Option<&str> {
@@ -154,10 +189,11 @@ Caused by: java.lang.IllegalStateException: bad state
 
     #[test]
     fn malformed_and_overflowing_frames_are_safe() {
-        let result = Language::Java.parse_stack(
-            "java.lang.Error: bad\n at not-a-java-frame\n ... 999999999999999999 more",
-        );
-        assert_eq!(result, Err(crate::ParseError::Unrecognized));
+        let trace = Language::Java
+            .parse_stack("java.lang.Error: bad\n at not-a-java-frame\n ... 999999999999999999 more")
+            .unwrap();
+        assert_eq!(trace.segments()[0].error_kind, Some("java.lang.Error"));
+        assert!(trace.segments()[0].frames.is_empty());
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Bounded, deterministic grouping for runtime errors.
 //!
 //! ```
-//! use error_grouping::{GroupingEvidence, GroupingInput, Language, group};
+//! use error_grouping::{GroupingInput, GroupingOutcome, Language, group};
 //!
 //! let result = group(GroupingInput {
 //!     language: Language::JavaScript,
@@ -9,8 +9,8 @@
 //!     stack: "TypeError: bad value\n    at load (/app/main.js:8:2)",
 //! });
 //!
-//! assert_eq!(result.evidence, GroupingEvidence::ParsedStack);
-//! println!("{}", result.fingerprint); // eg1_<policy-id>_<sha256>
+//! assert!(matches!(result.outcome, GroupingOutcome::Frames { .. }));
+//! println!("{}", result.fingerprint); // eg1_<sha256>
 //! ```
 
 #![forbid(unsafe_code)]
@@ -21,11 +21,12 @@ mod group;
 mod language;
 mod parser;
 
-pub use ast::{ParseError, ParserLimits};
+pub use ast::{ParseError, ParseWarnings, ParserLimits};
 pub use fingerprint::{
-    AdjacentFramePolicy, ErrorKindPolicy, FINGERPRINT_VERSION, Fingerprint, FrameExclusion,
-    FrameField, FrameFields, FrameMatcher, FramePolicy, GroupingPolicy, GroupingPolicyId,
-    RawStackPolicy, RuntimeFramePolicy, SegmentSelection,
+    FINGERPRINT_VERSION, Fingerprint, FrameField, FrameFields, FrameMatcher, FramePolicy,
+    FrameRule, GroupingPolicy, RawStackPolicy, SegmentSelection,
 };
-pub use group::{GroupingEvidence, GroupingInput, GroupingResult, group, group_with_policy};
+pub use group::{
+    Grouper, GroupingInput, GroupingOutcome, GroupingResult, InvalidPolicy, KindOnlyReason, group,
+};
 pub use language::{Language, UnsupportedLanguage};

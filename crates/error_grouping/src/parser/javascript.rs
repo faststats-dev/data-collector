@@ -1,9 +1,10 @@
-use crate::ast::{StackFrame, StackTrace, TraceSegment};
-use crate::parser::{nonempty, payload, source_file};
+use crate::ast::{ParseWarnings, StackFrame, StackTrace, TraceSegment};
+use crate::parser::{nonempty, payload, push_frame, source_file};
 
 pub(super) fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Option<StackTrace<'a>> {
     let mut segment = TraceSegment::default();
     let mut saw_content = false;
+    let mut warnings = ParseWarnings::default();
 
     for original in lines {
         let line = original.trim();
@@ -12,17 +13,18 @@ pub(super) fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Option<St
         }
         if !saw_content && let Some(kind) = error_header_kind(line) {
             segment.error_kind = nonempty(kind);
-        } else if let Some(body) = payload(line, "at ") {
-            segment.frames.push(parse_frame(body));
+        } else if let Some(body) = payload(line, "at ")
+            && let Some(frame) = parse_frame(body)
+        {
+            push_frame(&mut segment.frames, frame, &mut warnings);
+        } else if payload(line, "at ").is_some() {
+            warnings.malformed_frame = true;
         } else if let Some(frame) = parse_spidermonkey_frame(line) {
-            segment.frames.push(frame);
+            push_frame(&mut segment.frames, frame, &mut warnings);
         }
         saw_content = true;
     }
-    if segment.frames.is_empty() {
-        return None;
-    }
-    Some(StackTrace::single(segment))
+    (!segment.frames.is_empty()).then(|| StackTrace::single_with_warnings(segment, warnings))
 }
 
 fn error_header_kind(line: &str) -> Option<&str> {
@@ -45,7 +47,7 @@ fn parse_spidermonkey_frame(line: &str) -> Option<StackFrame<'_>> {
     })
 }
 
-fn parse_frame(body: &str) -> StackFrame<'_> {
+fn parse_frame(body: &str) -> Option<StackFrame<'_>> {
     let body = body.strip_prefix("async ").unwrap_or(body);
     let body = body.strip_prefix("new ").unwrap_or(body);
     let (function, location_text) = if body.ends_with(')') {
@@ -62,12 +64,21 @@ fn parse_frame(body: &str) -> StackFrame<'_> {
     let synthetic_index = location_text
         .strip_prefix("index ")
         .is_some_and(|index| index.parse::<u32>().is_ok());
-    let file = (location_text != "native" && !synthetic_index).then(|| source_file(location_text));
-    StackFrame {
+    let native = location_text == "native";
+    let looks_like_location = native
+        || synthetic_index
+        || location_text.contains(['/', '\\'])
+        || location_text.contains(":")
+        || location_text.starts_with(['<', '[']);
+    if !looks_like_location {
+        return None;
+    }
+    let file = (!native && !synthetic_index).then(|| source_file(location_text));
+    Some(StackFrame {
         function,
         file,
         ..StackFrame::default()
-    }
+    })
 }
 
 #[cfg(test)]

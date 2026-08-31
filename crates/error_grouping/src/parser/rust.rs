@@ -1,5 +1,5 @@
-use crate::ast::{StackFrame, StackTrace, TraceSegment};
-use crate::parser::{nonempty, payload, source_file};
+use crate::ast::{ParseWarnings, StackFrame, StackTrace, TraceSegment};
+use crate::parser::{nonempty, payload, push_frame, source_file};
 
 pub(super) fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Option<StackTrace<'a>> {
     let mut segment = TraceSegment {
@@ -8,6 +8,7 @@ pub(super) fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Option<St
     };
     let mut saw_panic_header = false;
     let mut in_cause_list = false;
+    let mut warnings = ParseWarnings::default();
 
     for original in lines {
         let line = original.trim();
@@ -21,7 +22,7 @@ pub(super) fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Option<St
         } else if line.eq_ignore_ascii_case("stack backtrace:") {
             in_cause_list = false;
         } else if !in_cause_list && let Some(body) = indexed_frame(line) {
-            segment.frames.push(parse_frame(body));
+            push_frame(&mut segment.frames, parse_frame(body), &mut warnings);
         } else if !in_cause_list
             && let Some(location) = payload(line, "at ")
             && let Some(frame) = segment.frames.last_mut()
@@ -32,7 +33,7 @@ pub(super) fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Option<St
     if segment.frames.is_empty() && !saw_panic_header {
         return None;
     }
-    Some(StackTrace::single(segment))
+    Some(StackTrace::single_with_warnings(segment, warnings))
 }
 
 fn is_panic_header(line: &str) -> bool {

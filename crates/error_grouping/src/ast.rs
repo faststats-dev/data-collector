@@ -1,21 +1,23 @@
 use std::{error::Error, fmt};
 
+use smallvec::SmallVec;
+
+pub(super) type SegmentList<'a> = SmallVec<[TraceSegment<'a>; 1]>;
+pub(super) type FrameList<'a> = SmallVec<[StackFrame<'a>; 4]>;
+
 #[derive(Debug, Eq, PartialEq)]
 pub(super) struct StackTrace<'a> {
-    pub(super) segments: Vec<TraceSegment<'a>>,
+    pub(super) segments: SegmentList<'a>,
+    pub(super) warnings: ParseWarnings,
 }
 
 impl<'a> StackTrace<'a> {
-    pub(super) const fn new(segments: Vec<TraceSegment<'a>>) -> Self {
-        Self { segments }
+    pub(super) const fn with_warnings(segments: SegmentList<'a>, warnings: ParseWarnings) -> Self {
+        Self { segments, warnings }
     }
 
-    pub(super) fn single(segment: TraceSegment<'a>) -> Self {
-        Self::new(vec![segment])
-    }
-
-    pub(super) fn nonempty(segment: TraceSegment<'a>) -> Option<Self> {
-        (!segment.is_empty()).then(|| Self::single(segment))
+    pub(super) fn single_with_warnings(segment: TraceSegment<'a>, warnings: ParseWarnings) -> Self {
+        Self::with_warnings(SegmentList::from_buf([segment]), warnings)
     }
 
     #[cfg(test)]
@@ -24,16 +26,25 @@ impl<'a> StackTrace<'a> {
     }
 }
 
+/// Non-fatal parser conditions that reduced the available stack evidence.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ParseWarnings {
+    pub malformed_frame: bool,
+    pub truncated: bool,
+}
+
 #[derive(Debug, Default, Eq, PartialEq)]
 pub(super) struct TraceSegment<'a> {
     pub(super) relation: SegmentRelation,
+    /// Display indentation used to preserve nested exception topology.
+    pub(super) depth: usize,
     pub(super) error_kind: Option<&'a str>,
     /// Frames are ordered from the crash site toward the oldest caller.
-    pub(super) frames: Vec<StackFrame<'a>>,
+    pub(super) frames: FrameList<'a>,
 }
 
 impl TraceSegment<'_> {
-    pub(super) const fn is_empty(&self) -> bool {
+    pub(super) fn is_empty(&self) -> bool {
         self.frames.is_empty() && self.error_kind.is_none()
     }
 }
@@ -56,7 +67,7 @@ pub(super) struct StackFrame<'a> {
 }
 
 /// Resource limits applied before and while parsing untrusted stack text.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct ParserLimits {
     /// Maximum total UTF-8 input bytes.
     pub max_input_bytes: usize,

@@ -1,8 +1,9 @@
-use crate::ast::{StackFrame, StackTrace, TraceSegment};
-use crate::parser::{error_kind, nonempty};
+use crate::ast::{ParseWarnings, StackFrame, StackTrace, TraceSegment};
+use crate::parser::{error_kind, nonempty, push_frame};
 
 pub(super) fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Option<StackTrace<'a>> {
     let mut segment = TraceSegment::default();
+    let mut warnings = ParseWarnings::default();
 
     for original in lines {
         let line = original.trim();
@@ -14,10 +15,10 @@ pub(super) fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Option<St
         {
             segment.error_kind = Some(error);
         } else if let Some(frame) = parse_frame(line) {
-            segment.frames.push(frame);
+            push_frame(&mut segment.frames, frame, &mut warnings);
         }
     }
-    StackTrace::nonempty(segment)
+    (!segment.is_empty()).then(|| StackTrace::single_with_warnings(segment, warnings))
 }
 
 fn parse_error_header(line: &str) -> Option<&str> {

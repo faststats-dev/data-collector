@@ -6,8 +6,47 @@ mod python;
 mod rust;
 mod swift;
 
-use crate::ast::{ParserLimits, StackTrace};
+use crate::ast::{FrameList, ParseWarnings, ParserLimits, SegmentList, StackTrace};
 use crate::{Language, ParseError};
+
+pub(super) const MAX_RETAINED_FRAMES: usize = 256;
+const MAX_RETAINED_SEGMENTS: usize = 64;
+
+pub(super) fn push_frame<'a>(
+    frames: &mut FrameList<'a>,
+    frame: crate::ast::StackFrame<'a>,
+    warnings: &mut ParseWarnings,
+) {
+    if frames.len() < MAX_RETAINED_FRAMES {
+        frames.push(frame);
+    } else {
+        warnings.truncated = true;
+    }
+}
+
+pub(super) fn push_recent_frame<'a>(
+    frames: &mut FrameList<'a>,
+    frame: crate::ast::StackFrame<'a>,
+    warnings: &mut ParseWarnings,
+) {
+    if frames.len() == MAX_RETAINED_FRAMES {
+        frames.remove(0);
+        warnings.truncated = true;
+    }
+    frames.push(frame);
+}
+
+pub(super) fn push_segment<'a>(
+    segments: &mut SegmentList<'a>,
+    segment: crate::ast::TraceSegment<'a>,
+    warnings: &mut ParseWarnings,
+) {
+    if segments.len() == MAX_RETAINED_SEGMENTS {
+        segments.remove(1);
+        warnings.truncated = true;
+    }
+    segments.push(segment);
+}
 
 pub(super) fn parse<'a>(
     language: Language,

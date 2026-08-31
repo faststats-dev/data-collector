@@ -1,21 +1,20 @@
 use super::options::{
-    AdjacentFramePolicy, FrameExclusion, FrameField, FrameFields, FrameMatcher, FramePolicy,
-    GroupingPolicy, RuntimeFramePolicy, SegmentSelection,
+    FrameField, FrameFields, FrameMatcher, FramePolicy, FrameRule, GroupingPolicy, SegmentSelection,
 };
 use super::*;
 
 fn fingerprint(language: Language, kind: &str, stack: &str) -> Fingerprint {
-    fingerprint_with_policy(language, kind, stack, GroupingPolicy::default())
+    fingerprint_with_policy(language, kind, stack, &GroupingPolicy::default())
 }
 
 fn fingerprint_with_policy(
     language: Language,
     kind: &str,
     stack: &str,
-    policy: GroupingPolicy<'_>,
+    policy: &GroupingPolicy,
 ) -> Fingerprint {
     let trace = language.parse_stack(stack).unwrap();
-    parsed(language, &trace, kind, policy, policy.id()).fingerprint
+    parsed(language, &trace, kind, policy).0
 }
 
 fn fingerprints(
@@ -23,11 +22,11 @@ fn fingerprints(
     kind: &str,
     first: &str,
     second: &str,
-    policy: GroupingPolicy<'_>,
+    policy: GroupingPolicy,
 ) -> (Fingerprint, Fingerprint) {
     (
-        fingerprint_with_policy(language, kind, first, policy),
-        fingerprint_with_policy(language, kind, second, policy),
+        fingerprint_with_policy(language, kind, first, &policy),
+        fingerprint_with_policy(language, kind, second, &policy),
     )
 }
 
@@ -68,7 +67,7 @@ fn default_policy_has_a_stable_versioned_fingerprint() {
             "TypeError: bad value\n at load (/app/main.js:8:2)"
         )
         .to_string(),
-        "eg1_d3e41c27789090e6c2687643b60878da_0a2f5bf3a327956dae63ab7149569ff7dd403d80009a90413c0b095191d80626"
+        "eg1_0a2f5bf3a327956dae63ab7149569ff7dd403d80009a90413c0b095191d80626"
     );
 }
 
@@ -78,27 +77,20 @@ fn parsed_header_without_frames_matches_kind_only_identity() {
         .parse_stack("java.lang.RuntimeException: dynamic message")
         .unwrap();
     let policy = GroupingPolicy::default();
-    let policy_id = policy.id();
     assert_eq!(
         parsed(
             Language::Java,
             &trace,
             "java.lang.RuntimeException",
-            policy,
-            policy_id,
+            &policy
         )
-        .fingerprint,
-        kind_only(
-            Language::Java,
-            "java.lang.RuntimeException",
-            policy,
-            policy_id,
-        )
+        .0,
+        kind_only(Language::Java, "java.lang.RuntimeException", &policy)
     );
 }
 
 #[test]
-fn java_exception_topology_does_not_split_the_same_root_and_terminal_cause() {
+fn java_exception_topology_ignores_causes_nested_under_suppressed_errors() {
     let nested = fingerprint(
         Language::Java,
         "Root",
@@ -109,7 +101,7 @@ fn java_exception_topology_does_not_split_the_same_root_and_terminal_cause() {
         "Root",
         "Root: x\n  Suppressed: S: x\nCaused by: A: x\n  Caused by: B: x",
     );
-    assert_eq!(nested, linear);
+    assert_ne!(nested, linear);
 }
 
 #[test]
@@ -188,24 +180,9 @@ fn rust_symbol_hashes_and_runtime_frames_are_noise() {
 #[test]
 fn raw_stack_fallback_separates_different_unparsed_stacks() {
     let policy = GroupingPolicy::default();
-    let policy_id = policy.id();
     assert_ne!(
-        raw_stack(
-            Language::Java,
-            "Error",
-            "first unsupported stack",
-            policy,
-            policy_id,
-        )
-        .fingerprint,
-        raw_stack(
-            Language::Java,
-            "Error",
-            "second unsupported stack",
-            policy,
-            policy_id,
-        )
-        .fingerprint
+        raw_stack(Language::Java, "Error", "first unsupported stack", &policy),
+        raw_stack(Language::Java, "Error", "second unsupported stack", &policy)
     );
 }
 
@@ -249,8 +226,8 @@ fn policy_can_limit_contributing_frames() {
 
 #[test]
 fn policy_can_include_runtime_frames() {
-    let policy = GroupingPolicy::default()
-        .with_frames(FramePolicy::default().with_runtime_frames(RuntimeFramePolicy::Include));
+    let policy =
+        GroupingPolicy::default().with_frames(FramePolicy::default().include_runtime_frames(true));
 
     let (first, second) = fingerprints(
         Language::Rust,
@@ -380,7 +357,7 @@ fn policy_can_exclude_frames() {
 #[test]
 fn policy_can_preserve_duplicate_frames() {
     let policy = GroupingPolicy::default()
-        .with_frames(FramePolicy::default().with_adjacent_frames(AdjacentFramePolicy::Preserve));
+        .with_frames(FramePolicy::default().deduplicate_adjacent_frames(false));
 
     let (first, second) = fingerprints(
         Language::JavaScript,
@@ -395,18 +372,18 @@ fn policy_can_preserve_duplicate_frames() {
 #[test]
 fn policy_can_exclude_frames_with_custom_matchers() {
     let exclusions = [
-        FrameExclusion::new(FrameField::Function, FrameMatcher::Prefix("")),
-        FrameExclusion::new(FrameField::Module, FrameMatcher::Prefix("")),
-        FrameExclusion::new(FrameField::File, FrameMatcher::Prefix("")),
-        FrameExclusion::new(FrameField::Function, FrameMatcher::Exact("exact")),
-        FrameExclusion::new(FrameField::Function, FrameMatcher::Prefix("vendor")),
-        FrameExclusion::new(FrameField::Function, FrameMatcher::Suffix("suffix")),
-        FrameExclusion::new(FrameField::Function, FrameMatcher::Contains("middle")),
+        FrameRule::new(FrameField::Function, FrameMatcher::prefix("")),
+        FrameRule::new(FrameField::Module, FrameMatcher::prefix("")),
+        FrameRule::new(FrameField::File, FrameMatcher::prefix("")),
+        FrameRule::new(FrameField::Function, FrameMatcher::exact("exact")),
+        FrameRule::new(FrameField::Function, FrameMatcher::prefix("vendor")),
+        FrameRule::new(FrameField::Function, FrameMatcher::suffix("suffix")),
+        FrameRule::new(FrameField::Function, FrameMatcher::contains("middle")),
     ];
     let policy = GroupingPolicy::default().with_frames(
         FramePolicy::default()
             .with_max_frames(1)
-            .with_exclusions(&exclusions),
+            .with_exclusions(exclusions),
     );
 
     let (filtered, expected) = fingerprints(
@@ -420,21 +397,42 @@ fn policy_can_exclude_frames_with_custom_matchers() {
 }
 
 #[test]
-fn policy_changes_are_encoded_in_fingerprint_identity() {
+fn policy_changes_that_do_not_change_evidence_preserve_identity() {
     let input = "at load (/app.js:1:1)";
     let default = fingerprint_with_policy(
         Language::JavaScript,
         "Error",
         input,
-        GroupingPolicy::default(),
+        &GroupingPolicy::default(),
     );
     let root_only = fingerprint_with_policy(
         Language::JavaScript,
         "Error",
         input,
-        GroupingPolicy::default().with_segments(SegmentSelection::Root),
+        &GroupingPolicy::default().with_segments(SegmentSelection::Root),
     );
 
-    assert_ne!(default.policy(), root_only.policy());
-    assert_ne!(default, root_only);
+    assert_eq!(default, root_only);
+}
+
+#[test]
+fn legitimate_hex_filenames_are_not_treated_as_asset_hashes() {
+    let values = fingerprints(
+        Language::JavaScript,
+        "Error",
+        "at run (/assets/deadbeef.js:1:1)",
+        "at run (/assets/cafebabe.js:1:1)",
+        GroupingPolicy::default(),
+    );
+    assert_ne!(values.0, values.1);
+}
+
+#[test]
+fn java_shared_frame_elisions_match_expanded_traces() {
+    let elided = "Root: bad\n at app.Root.run(Root.java:1)\n at app.Shared.call(Shared.java:2)\nCaused by: Cause: bad\n at app.Cause.fail(Cause.java:3)\n ... 1 more";
+    let expanded = "Root: bad\n at app.Root.run(Root.java:1)\n at app.Shared.call(Shared.java:2)\nCaused by: Cause: bad\n at app.Cause.fail(Cause.java:3)\n at app.Shared.call(Shared.java:2)";
+    assert_eq!(
+        fingerprint(Language::Java, "Root", elided),
+        fingerprint(Language::Java, "Root", expanded)
+    );
 }

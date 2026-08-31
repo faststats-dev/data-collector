@@ -1,9 +1,10 @@
-use crate::ast::{StackFrame, StackTrace, TraceSegment};
-use crate::parser::{nonempty, payload, source_file};
+use crate::ast::{ParseWarnings, StackFrame, StackTrace, TraceSegment};
+use crate::parser::{nonempty, payload, push_frame, source_file};
 
 pub(super) fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Option<StackTrace<'a>> {
     let mut segment = TraceSegment::default();
     let mut goroutines = 0;
+    let mut warnings = ParseWarnings::default();
 
     for original in lines {
         let line = original.trim();
@@ -23,16 +24,16 @@ pub(super) fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Option<St
             let function = function
                 .split_once(" in goroutine ")
                 .map_or(function, |(function, _)| function);
-            segment.frames.push(go_frame(function));
+            push_frame(&mut segment.frames, go_frame(function), &mut warnings);
         } else if let Some(file) = parse_file(line) {
             if let Some(frame) = segment.frames.last_mut() {
                 frame.file = Some(file);
             }
         } else if is_function_line(line) {
-            segment.frames.push(go_frame(line));
+            push_frame(&mut segment.frames, go_frame(line), &mut warnings);
         }
     }
-    StackTrace::nonempty(segment)
+    (!segment.is_empty()).then(|| StackTrace::single_with_warnings(segment, warnings))
 }
 
 fn is_goroutine(line: &str) -> bool {

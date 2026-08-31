@@ -12,11 +12,11 @@ pub enum SegmentSelection {
     /// Include only the root exception.
     Root = 1,
     /// Include the root and the terminal cause or context, when present.
-    #[default]
     RootAndTerminalCause = 2,
     /// Include the terminal cause's frames, falling back to root frames when no
     /// cause exists. Wrapping topology and the selected exception kind do not
     /// contribute when frames are available.
+    #[default]
     TerminalCauseFrames = 3,
 }
 

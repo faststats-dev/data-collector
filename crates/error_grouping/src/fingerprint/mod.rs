@@ -53,8 +53,13 @@ pub(super) fn parsed(
 ) -> (Fingerprint, usize) {
     let terminal_frames = policy.segments == SegmentSelection::TerminalCauseFrames;
     let authoritative_kind = nonempty(authoritative_kind);
+    let selected_segment = terminal_frames
+        .then(|| terminal_cause(trace).or_else(|| trace.segments.first()))
+        .flatten();
     let header_kind = if terminal_frames {
-        None
+        selected_segment
+            .filter(|segment| segment.frames.is_empty())
+            .and_then(|segment| segment.error_kind.or(authoritative_kind))
     } else {
         authoritative_kind.or_else(|| root_kind(trace))
     };
@@ -84,18 +89,13 @@ pub(super) fn parsed(
             }
         }
         SegmentSelection::TerminalCauseFrames => {
-            if let Some(segment) = terminal_cause(trace).or_else(|| trace.segments.first()) {
-                let kind = if segment.frames.is_empty() {
-                    segment.error_kind.or(authoritative_kind)
-                } else {
-                    None
-                };
+            if let Some(segment) = selected_segment {
                 contributing_frames += write_segment(
                     &mut canonical,
                     language,
                     segment,
                     SegmentRelation::Root,
-                    kind,
+                    None,
                     policy,
                 );
             } else {

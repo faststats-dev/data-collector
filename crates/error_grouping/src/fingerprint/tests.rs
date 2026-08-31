@@ -47,10 +47,11 @@ fn ignores_common_deployment_and_runtime_noise() {
 
 #[test]
 fn authoritative_kind_and_frame_changes_affect_identity() {
+    let policy = GroupingPolicy::default().with_segments(SegmentSelection::Root);
     let stack = "at load (/app.js:1:2)";
     assert_ne!(
-        fingerprint(Language::JavaScript, "TypeError", stack),
-        fingerprint(Language::JavaScript, "RangeError", stack)
+        fingerprint_with_policy(Language::JavaScript, "TypeError", stack, &policy),
+        fingerprint_with_policy(Language::JavaScript, "RangeError", stack, &policy)
     );
     assert_ne!(
         fingerprint(Language::JavaScript, "TypeError", stack),
@@ -67,7 +68,7 @@ fn default_policy_has_a_stable_versioned_fingerprint() {
             "TypeError: bad value\n at load (/app/main.js:8:2)"
         )
         .to_string(),
-        "eg1_0a2f5bf3a327956dae63ab7149569ff7dd403d80009a90413c0b095191d80626"
+        "eg1_b2f284ce142dee20730e700fcbfc987761abecca051a8164fb97774725c27303"
     );
 }
 
@@ -341,14 +342,14 @@ Caused by: java.lang.NoSuchFieldError: missing field
   at worlds-3.12.4-all.jar//net.thenextlvl.worlds.level.PaperLevel.createAsync(PaperLevel.java:74)
   at worlds-3.12.4-all.jar//net.thenextlvl.worlds.listener.WorldListener.loadLevel(WorldListener.java:60)"#;
 
-    let default = fingerprints(
+    let root_and_terminal = fingerprints(
         Language::Java,
         "com.destroystokyo.paper.exception.ServerEventException",
         missing_method,
         missing_field,
-        GroupingPolicy::default(),
+        GroupingPolicy::default().with_segments(SegmentSelection::RootAndTerminalCause),
     );
-    assert_ne!(default.0, default.1);
+    assert_ne!(root_and_terminal.0, root_and_terminal.1);
 
     let terminal_frames = fingerprints(
         Language::Java,
@@ -467,14 +468,14 @@ fn policy_changes_that_do_not_change_evidence_preserve_identity() {
         input,
         &GroupingPolicy::default(),
     );
-    let root_only = fingerprint_with_policy(
+    let larger_frame_limit = fingerprint_with_policy(
         Language::JavaScript,
         "Error",
         input,
-        &GroupingPolicy::default().with_segments(SegmentSelection::Root),
+        &GroupingPolicy::default().with_frames(FramePolicy::default().with_max_frames(9)),
     );
 
-    assert_eq!(default, root_only);
+    assert_eq!(default, larger_frame_limit);
 }
 
 #[test]

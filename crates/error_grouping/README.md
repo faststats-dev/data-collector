@@ -46,7 +46,7 @@ let result = grouper.group(GroupingInput {
 ## Behavior
 
 - Frames are normalized to crash-nearest-first order.
-- The default policy uses the root and terminal non-suppressed cause/context.
+- The default policy uses terminal-cause frames, falling back to root frames.
 - At most eight frames per selected segment contribute by default.
 - Messages, line numbers, instruction addresses, and deployment prefixes do not contribute.
 - Runtime frames are filtered when application frames exist.

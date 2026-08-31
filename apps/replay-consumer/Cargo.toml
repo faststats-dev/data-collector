@@ -9,7 +9,7 @@ aws-sdk-s3 = { version = "1.144.0", features = ["behavior-version-latest"] }
 dotenvy = "0.15.7"
 hex = "0.4.3"
 metrics = "0.24.6"
-rdkafka = { version = "0.38.0", features = ["cmake-build", "sasl", "ssl", "tokio"] }
+rdkafka = { version = "0.38.0", features = ["cmake-build", "sasl", "ssl", "tokio", "zstd"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.11.0"

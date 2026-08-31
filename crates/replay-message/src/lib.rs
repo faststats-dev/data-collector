@@ -2,6 +2,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+/// Environment variable used by both the producer and consumer to select the topic.
+pub const TOPIC_ENV: &str = "REPLAY_KAFKA_TOPIC";
+/// Topic used when [`TOPIC_ENV`] is not set.
 pub const DEFAULT_TOPIC: &str = "replay-snapshot";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

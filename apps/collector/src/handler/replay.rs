@@ -30,7 +30,7 @@ pub(crate) struct ReplayPublisher {
 impl ReplayPublisher {
     pub(crate) fn from_env() -> Result<Self, String> {
         let brokers = std::env::var("KAFKA_BROKERS").unwrap_or_else(|_| "localhost:9092".into());
-        let topic = std::env::var("REPLAY_KAFKA_TOPIC")
+        let topic = std::env::var(replay_message::TOPIC_ENV)
             .unwrap_or_else(|_| replay_message::DEFAULT_TOPIC.into());
         let producer = ClientConfig::new()
             .set("bootstrap.servers", brokers)

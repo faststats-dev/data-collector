@@ -1,11 +1,10 @@
-mod aggregation;
 mod config;
 mod consumer;
 mod object_store;
 mod storage;
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), String> {
     dotenvy::dotenv().ok();
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -14,5 +13,5 @@ async fn main() {
         )
         .init();
 
-    consumer::run(config::Config::from_env()).await;
+    consumer::run(config::Config::from_env()?).await
 }

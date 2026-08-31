@@ -6,29 +6,28 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[path = "build/regex.rs"]
+mod regex_rewrite;
+use regex_rewrite::rewrite_regex;
+
 const UAP_CORE_RULES: &str = "regexes.yaml";
 
 #[derive(Deserialize)]
 struct Rules {
-    user_agent_parsers: Vec<UserAgentRule>,
-    os_parsers: Vec<OperatingSystemRule>,
+    user_agent_parsers: Vec<ParserRule>,
+    os_parsers: Vec<ParserRule>,
     device_parsers: Vec<DeviceRule>,
 }
 
 #[derive(Deserialize)]
-struct UserAgentRule {
+struct ParserRule {
     regex: String,
-    family_replacement: Option<String>,
+    #[serde(alias = "family_replacement", alias = "os_replacement")]
+    replacement: Option<String>,
+    #[serde(alias = "os_v1_replacement")]
     v1_replacement: Option<String>,
+    #[serde(alias = "os_v2_replacement")]
     v2_replacement: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct OperatingSystemRule {
-    regex: String,
-    os_replacement: Option<String>,
-    os_v1_replacement: Option<String>,
-    os_v2_replacement: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -62,74 +61,45 @@ fn generate(rules: &Rules) -> String {
              pub replacement: Option<&'static str>,\n\
              pub v1_replacement: Option<&'static str>,\n\
              pub v2_replacement: Option<&'static str>,\n\
-             pub ignore_case: bool,\n\
+         }\n\n\
+         pub(crate) struct DeviceRule {\n\
+             pub regex: &'static str,\n\
+             pub is_bot: bool,\n\
          }\n\n",
     );
 
-    generate_rules(
-        &mut output,
-        "UA_RULES",
-        rules.user_agent_parsers.iter().map(|rule| {
-            (
-                rule.regex.as_str(),
-                rule.family_replacement.as_deref(),
-                rule.v1_replacement.as_deref(),
-                rule.v2_replacement.as_deref(),
-                false,
-            )
-        }),
-    );
-    generate_rules(
-        &mut output,
-        "OS_RULES",
-        rules.os_parsers.iter().map(|rule| {
-            (
-                rule.regex.as_str(),
-                rule.os_replacement.as_deref(),
-                rule.os_v1_replacement.as_deref(),
-                rule.os_v2_replacement.as_deref(),
-                false,
-            )
-        }),
-    );
-    generate_rules(
-        &mut output,
-        "DEVICE_RULES",
-        rules.device_parsers.iter().map(|rule| {
-            (
-                rule.regex.as_str(),
-                rule.device_replacement.as_deref(),
-                None,
-                None,
-                rule.regex_flag.as_deref() == Some("i"),
-            )
-        }),
-    );
+    generate_rules(&mut output, "UA_RULES", &rules.user_agent_parsers);
+    generate_rules(&mut output, "OS_RULES", &rules.os_parsers);
+    output.push_str("pub(crate) static DEVICE_RULES: &[DeviceRule] = &[\n");
+    for rule in &rules.device_parsers {
+        let regex = rewrite_regex(&rule.regex);
+        let regex = if rule.regex_flag.as_deref() == Some("i") {
+            format!("(?i:{regex})")
+        } else {
+            regex
+        };
+        writeln!(
+            output,
+            "    DeviceRule {{ regex: {}, is_bot: {} }},",
+            literal(&regex),
+            rule.device_replacement.as_deref() == Some("Spider"),
+        )
+        .unwrap();
+    }
+    output.push_str("];\n");
     output
 }
 
-type GeneratedRule<'a> = (
-    &'a str,
-    Option<&'a str>,
-    Option<&'a str>,
-    Option<&'a str>,
-    bool,
-);
-
-fn generate_rules<'a>(
-    output: &mut String,
-    name: &str,
-    rules: impl Iterator<Item = GeneratedRule<'a>>,
-) {
+fn generate_rules(output: &mut String, name: &str, rules: &[ParserRule]) {
     writeln!(output, "pub(crate) static {name}: &[Rule] = &[").unwrap();
-    for (regex, replacement, v1, v2, ignore_case) in rules {
+    for rule in rules {
         writeln!(
             output,
-            "    Rule {{ regex: {}, replacement: {}, v1_replacement: {}, v2_replacement: {}, ignore_case: {ignore_case} }},",
-            literal(regex),
-            optional_literal(replacement),
-            optional_literal(v1),
-            optional_literal(v2),
+            "    Rule {{ regex: {}, replacement: {}, v1_replacement: {}, v2_replacement: {} }},",
+            literal(&rewrite_regex(&rule.regex)),
+            optional_literal(rule.replacement.as_deref()),
+            optional_literal(rule.v1_replacement.as_deref()),
+            optional_literal(rule.v2_replacement.as_deref()),
         )
         .unwrap();
     }
@@ -144,11 +114,5 @@ fn optional_literal(value: Option<&str>) -> String {
 }
 
 fn literal(value: &str) -> String {
-    for hashes in 1..=16 {
-        let marker = "#".repeat(hashes);
-        if !value.contains(&format!("\"{marker}")) {
-            return format!("r{marker}\"{value}\"{marker}");
-        }
-    }
-    panic!("could not create a raw Rust string literal")
+    format!("{value:?}")
 }

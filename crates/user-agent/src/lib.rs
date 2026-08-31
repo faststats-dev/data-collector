@@ -1,9 +1,15 @@
-use regex::{Captures, Regex, RegexBuilder, RegexSet, RegexSetBuilder};
-use std::sync::OnceLock;
+use regex::{Captures, Regex, RegexSet, RegexSetBuilder};
+use std::{borrow::Cow, sync::OnceLock};
 
 mod rules {
     include!(concat!(env!("OUT_DIR"), "/rules.rs"));
 }
+
+#[cfg(test)]
+#[path = "../build/regex.rs"]
+mod regex_rewrite;
+#[cfg(test)]
+use regex_rewrite::rewrite_regex;
 
 use rules::{DEVICE_RULES, OS_RULES, Rule, UA_RULES};
 
@@ -36,49 +42,42 @@ fn parser() -> &'static Parser {
 }
 
 struct Parser {
-    user_agents: RuleMatcher,
-    operating_systems: RuleMatcher,
-    devices: RuleMatcher,
+    rules: RuleMatcher,
 }
 
 impl Parser {
     fn compile() -> Result<Self, regex::Error> {
         Ok(Self {
-            user_agents: RuleMatcher::compile(UA_RULES)?,
-            operating_systems: RuleMatcher::compile(OS_RULES)?,
-            devices: RuleMatcher::compile(DEVICE_RULES)?,
+            rules: RuleMatcher::compile()?,
         })
     }
 
     fn parse(&self, user_agent: &str) -> Option<UserAgentInfo> {
-        let device_family = self
-            .devices
-            .captures(user_agent)
-            .map(|(rule, captures)| resolve(&captures, rule.replacement, 1));
-        let device = classify_device(user_agent, device_family.as_deref());
+        let matches = self.rules.matches(user_agent);
+        let device = classify_device(user_agent, matches.device_is_bot);
         if device == "Bot" {
             return None;
         }
 
-        let (browser, browser_version) = self
-            .user_agents
-            .captures(user_agent)
-            .map(|(rule, captures)| {
+        let (browser, browser_version) = matches
+            .user_agent
+            .and_then(|(rule, regex)| {
+                let captures = regex.captures(user_agent)?;
                 let family = resolve_family(&captures, rule.replacement);
                 let major = resolve_optional(&captures, rule.v1_replacement, 2);
                 let minor = resolve_optional(&captures, rule.v2_replacement, 3);
-                (family, format_version(major.as_deref(), minor.as_deref()))
+                Some((family, format_version(major, minor)))
             })
             .unwrap_or_default();
 
-        let (os, os_version) = self
-            .operating_systems
-            .captures(user_agent)
-            .map(|(rule, captures)| {
+        let (os, os_version) = matches
+            .operating_system
+            .and_then(|(rule, regex)| {
+                let captures = regex.captures(user_agent)?;
                 let name = resolve(&captures, rule.replacement, 1);
                 let major = resolve_optional(&captures, rule.v1_replacement, 2);
                 let minor = resolve_optional(&captures, rule.v2_replacement, 3);
-                (name, format_version(major.as_deref(), minor.as_deref()))
+                Some((name, format_version(major, minor)))
             })
             .unwrap_or_default();
 
@@ -94,48 +93,66 @@ impl Parser {
 
 struct RuleMatcher {
     set: RegexSet,
-    rules: Vec<(Regex, &'static Rule)>,
+    user_agents: Vec<Regex>,
+    operating_systems: Vec<Regex>,
+}
+
+struct MetadataMatches<'a> {
+    user_agent: Option<(&'static Rule, &'a Regex)>,
+    operating_system: Option<(&'static Rule, &'a Regex)>,
+    device_is_bot: bool,
 }
 
 impl RuleMatcher {
-    fn compile(rules: &'static [Rule]) -> Result<Self, regex::Error> {
-        let rewritten: Vec<(String, bool)> = rules
+    fn compile() -> Result<Self, regex::Error> {
+        let patterns = UA_RULES
             .iter()
-            .map(|rule| (rewrite_regex(rule.regex), rule.ignore_case))
-            .collect();
-        let set_patterns: Vec<String> = rewritten
-            .iter()
-            .map(|(regex, ignore_case)| {
-                if *ignore_case {
-                    format!("(?i:{regex})")
-                } else {
-                    regex.clone()
-                }
-            })
-            .collect();
-
-        let set = RegexSetBuilder::new(set_patterns)
+            .chain(OS_RULES)
+            .map(|rule| rule.regex)
+            .chain(DEVICE_RULES.iter().map(|rule| rule.regex));
+        let set = RegexSetBuilder::new(patterns)
             .size_limit(100 * 1024 * 1024)
             .dfa_size_limit(20 * 1024 * 1024)
             .build()?;
-        let rules = rewritten
-            .into_iter()
-            .zip(rules)
-            .map(|((regex, ignore_case), rule)| {
-                RegexBuilder::new(&regex)
-                    .case_insensitive(ignore_case)
-                    .build()
-                    .map(|regex| (regex, rule))
-            })
+        let user_agents = UA_RULES
+            .iter()
+            .map(|rule| Regex::new(rule.regex))
+            .collect::<Result<_, _>>()?;
+        let operating_systems = OS_RULES
+            .iter()
+            .map(|rule| Regex::new(rule.regex))
             .collect::<Result<_, _>>()?;
 
-        Ok(Self { set, rules })
+        Ok(Self {
+            set,
+            user_agents,
+            operating_systems,
+        })
     }
 
-    fn captures<'ua>(&self, user_agent: &'ua str) -> Option<(&'static Rule, Captures<'ua>)> {
-        let index = self.set.matches(user_agent).iter().next()?;
-        let (regex, rule) = &self.rules[index];
-        Some((*rule, regex.captures(user_agent)?))
+    fn matches(&self, user_agent: &str) -> MetadataMatches<'_> {
+        let mut user_agent_match = None;
+        let mut os_match = None;
+        let mut device_is_bot = None;
+        for index in self.set.matches(user_agent).iter() {
+            if index < UA_RULES.len() {
+                user_agent_match.get_or_insert((&UA_RULES[index], &self.user_agents[index]));
+            } else if index < UA_RULES.len() + OS_RULES.len() {
+                let index = index - UA_RULES.len();
+                os_match.get_or_insert((&OS_RULES[index], &self.operating_systems[index]));
+            } else if device_is_bot.is_none() {
+                let index = index - UA_RULES.len() - OS_RULES.len();
+                device_is_bot = Some(DEVICE_RULES[index].is_bot);
+            }
+            if user_agent_match.is_some() && os_match.is_some() && device_is_bot.is_some() {
+                break;
+            }
+        }
+        MetadataMatches {
+            user_agent: user_agent_match,
+            operating_system: os_match,
+            device_is_bot: device_is_bot.unwrap_or(false),
+        }
     }
 }
 
@@ -157,18 +174,18 @@ fn resolve(captures: &Captures<'_>, replacement: Option<&str>, fallback: usize) 
     }
 }
 
-fn resolve_optional(
-    captures: &Captures<'_>,
-    replacement: Option<&str>,
+fn resolve_optional<'a>(
+    captures: &Captures<'a>,
+    replacement: Option<&'a str>,
     fallback: usize,
-) -> Option<String> {
+) -> Option<Cow<'a, str>> {
     match replacement.filter(|replacement| !replacement.trim().is_empty()) {
         Some(template) if has_substitution(template) => {
             let value = expand(captures, template);
-            (!value.is_empty()).then_some(value)
+            (!value.is_empty()).then_some(Cow::Owned(value))
         }
-        Some(replacement) => Some(replacement.to_owned()),
-        None => capture(captures, fallback).map(str::to_owned),
+        Some(replacement) => Some(Cow::Borrowed(replacement)),
+        None => capture(captures, fallback).map(Cow::Borrowed),
     }
 }
 
@@ -192,19 +209,22 @@ fn has_substitution(template: &str) -> bool {
         .any(|pair| pair[0] == b'$' && pair[1].is_ascii_digit())
 }
 
-fn format_version(major: Option<&str>, minor: Option<&str>) -> String {
+fn format_version(major: Option<Cow<'_, str>>, minor: Option<Cow<'_, str>>) -> String {
     match (major, minor) {
-        (Some(major), Some(minor)) => format!("{major}.{minor}"),
-        (Some(major), None) => major.to_owned(),
+        (Some(major), Some(minor)) => {
+            let mut version = String::with_capacity(major.len() + minor.len() + 1);
+            version.push_str(&major);
+            version.push('.');
+            version.push_str(&minor);
+            version
+        }
+        (Some(major), None) => major.into_owned(),
         _ => String::new(),
     }
 }
 
-fn classify_device(user_agent: &str, device_family: Option<&str>) -> &'static str {
-    if device_family
-        .is_some_and(|family| family.eq_ignore_ascii_case("spider") || contains_ci(family, "bot"))
-        || contains_any_ci(user_agent, &["bot", "spider", "crawler", "headless"])
-    {
+fn classify_device(user_agent: &str, device_is_bot: bool) -> &'static str {
+    if device_is_bot || contains_any_ci(user_agent, &["bot", "spider", "crawler", "headless"]) {
         return "Bot";
     }
 
@@ -246,67 +266,6 @@ fn contains_ci(haystack: &str, needle: &str) -> bool {
             .as_bytes()
             .windows(needle.len())
             .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
-}
-
-fn rewrite_regex(regex: &str) -> String {
-    let mut rewritten = String::with_capacity(regex.len());
-    let mut characters = regex.chars().peekable();
-    let mut in_class = false;
-
-    while let Some(character) = characters.next() {
-        match character {
-            '[' => {
-                in_class = true;
-                rewritten.push(character);
-            }
-            ']' => {
-                in_class = false;
-                rewritten.push(character);
-            }
-            '\\' => match characters.next() {
-                Some('d') => rewritten.push_str("[0-9]"),
-                Some('D') => rewritten.push_str("[^0-9]"),
-                Some('w') => rewritten.push_str("[A-Za-z0-9_]"),
-                Some('W') => rewritten.push_str("[^A-Za-z0-9_]"),
-                Some(next) => {
-                    rewritten.push('\\');
-                    rewritten.push(next);
-                }
-                None => rewritten.push('\\'),
-            },
-            '{' if !in_class => {
-                let mut repetition = String::from("{");
-                while let Some(&next) = characters.peek() {
-                    repetition.push(next);
-                    characters.next();
-                    if next == '}' {
-                        break;
-                    }
-                }
-                if let Some(replacement) = unbounded_repetition(&repetition) {
-                    rewritten.push_str(replacement);
-                } else {
-                    rewritten.push_str(&repetition);
-                }
-            }
-            _ => rewritten.push(character),
-        }
-    }
-
-    rewritten
-}
-
-fn unbounded_repetition(repetition: &str) -> Option<&'static str> {
-    let inner = repetition.strip_prefix('{')?.strip_suffix('}')?;
-    let (minimum, maximum) = inner.split_once(',')?;
-    if maximum.len() <= 2 || !maximum.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
-    }
-    match minimum {
-        "0" => Some("*"),
-        "1" => Some("+"),
-        _ => None,
-    }
 }
 
 #[cfg(test)]

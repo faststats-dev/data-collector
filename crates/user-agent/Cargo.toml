@@ -10,3 +10,7 @@ regex.workspace = true
 [build-dependencies]
 serde.workspace = true
 serde_yaml_ng = "0.10.0"
+
+[[bench]]
+name = "parse"
+harness = false

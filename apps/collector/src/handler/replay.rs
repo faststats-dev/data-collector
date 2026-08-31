@@ -5,17 +5,111 @@ use super::{
 };
 use crate::batch_queue::{FailedRequest, RequestType, TrackingContext};
 use crate::models::AppState;
-use crate::replay_storage::ReplayChunkInput;
 use axum::body::Bytes;
 use axum::extract::{Query, State};
 use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
+use rdkafka::ClientConfig;
+use rdkafka::producer::{FutureProducer, FutureRecord};
+use replay_message::{ReplayChunk, ReplayCommand, ReplaySessionPatch};
 use serde::Deserialize;
 use serde_json::Value;
 use sqlx::types::Uuid as SqlxUuid;
 use std::collections::HashMap;
+use std::time::Duration;
 use tracing::{error, warn};
+use uuid::Uuid;
+
+#[derive(Clone)]
+pub(crate) struct ReplayPublisher {
+    producer: FutureProducer,
+    topic: String,
+}
+
+impl ReplayPublisher {
+    pub(crate) fn from_env() -> Result<Self, String> {
+        let brokers = std::env::var("KAFKA_BROKERS").unwrap_or_else(|_| "localhost:9092".into());
+        let topic = std::env::var("REPLAY_KAFKA_TOPIC")
+            .unwrap_or_else(|_| replay_message::DEFAULT_TOPIC.into());
+        let producer = ClientConfig::new()
+            .set("bootstrap.servers", brokers)
+            .set("message.timeout.ms", "5000")
+            .set("compression.type", "zstd")
+            .set("compression.level", "3")
+            .set("linger.ms", "10")
+            .set("batch.size", "1048576")
+            .create()
+            .map_err(|error| format!("Failed to create replay Kafka producer: {error}"))?;
+        Ok(Self { producer, topic })
+    }
+
+    pub(crate) async fn publish(&self, command: ReplayCommand) -> Result<(), String> {
+        let key = command_key(&command);
+        let payload = serde_json::to_vec(&command).map_err(|error| error.to_string())?;
+        self.producer
+            .send(
+                FutureRecord::to(&self.topic).key(&key).payload(&payload),
+                Duration::from_secs(5),
+            )
+            .await
+            .map_err(|(error, _)| format!("Failed to publish replay command: {error}"))?;
+        Ok(())
+    }
+
+    pub(crate) async fn mark_error(
+        &self,
+        project_id: Uuid,
+        session_id: &str,
+        window_id: &str,
+    ) -> Result<(), String> {
+        self.publish(ReplayCommand::SessionPatch(session_patch(
+            project_id, session_id, window_id, true, false,
+        )))
+        .await
+    }
+
+    pub(crate) async fn mark_poor_vital(
+        &self,
+        project_id: Uuid,
+        session_id: &str,
+        window_id: &str,
+    ) -> Result<(), String> {
+        self.publish(ReplayCommand::SessionPatch(session_patch(
+            project_id, session_id, window_id, false, true,
+        )))
+        .await
+    }
+}
+
+fn session_patch(
+    project_id: Uuid,
+    session_id: &str,
+    window_id: &str,
+    has_errors: bool,
+    has_poor_vitals: bool,
+) -> ReplaySessionPatch {
+    ReplaySessionPatch {
+        project_id,
+        session_id: session_id.into(),
+        window_id: window_id.into(),
+        has_errors,
+        has_poor_vitals,
+    }
+}
+
+fn command_key(command: &ReplayCommand) -> String {
+    match command {
+        ReplayCommand::Snapshot(value) => format!(
+            "{}:{}:{}",
+            value.project_id, value.session_id, value.window_id
+        ),
+        ReplayCommand::SessionPatch(value) => format!(
+            "{}:{}:{}",
+            value.project_id, value.session_id, value.window_id
+        ),
+    }
+}
 
 pub(crate) fn normalize_window_id(window_id: Option<String>, session_id: &str) -> String {
     window_id
@@ -55,7 +149,7 @@ pub(crate) struct ReplayRequest {
 pub(crate) struct BuiltReplayChunk {
     pub(crate) session_id: String,
     pub(crate) tracking: TrackingContext,
-    pub(crate) input: ReplayChunkInput,
+    pub(crate) input: ReplayChunk,
     pub(crate) dropped_event_count: usize,
 }
 
@@ -113,7 +207,7 @@ pub(crate) fn build_replay_chunk_input(
         session_id: session_id.clone(),
         tracking,
         dropped_event_count,
-        input: ReplayChunkInput {
+        input: ReplayChunk {
             project_id: context.project_id,
             storage_generation: context.replay_storage_generation,
             session_id,
@@ -237,13 +331,6 @@ pub async fn replay(
         );
     }
 
-    let Some(replay_storage) = state.replay_storage.as_deref() else {
-        return error_response(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Replay storage is not configured",
-        );
-    };
-
     let built = match build_replay_chunk_input(
         &context,
         &token,
@@ -256,30 +343,19 @@ pub async fn replay(
         Err(message) => return error_response(StatusCode::BAD_REQUEST, &message),
     };
 
-    let input = built.input;
-    let stored = if input.events.is_empty() {
-        replay_storage
-            .finalize_replay_session(
-                &state.pool,
-                input.project_id,
-                &input.session_id,
-                &input.window_id,
-            )
-            .await
-            .map(|()| Default::default())
-    } else {
-        replay_storage.store_replay_chunk(&state.pool, input).await
-    };
-    match stored {
-        Ok(stored) => {
-            if stored.first_for_billing {
-                state
-                    .batch_queue
-                    .track_replay_usage(&built.session_id, &built.tracking);
-            }
+    match state
+        .replay_publisher
+        .publish(ReplayCommand::Snapshot(Box::new(built.input)))
+        .await
+    {
+        Ok(()) => {
+            // Usage tracking is idempotent by replay session in the billing pipeline.
+            state
+                .batch_queue
+                .track_replay_usage(&built.session_id, &built.tracking);
         }
         Err(error) => {
-            error!("Failed to store replay: {}", error);
+            error!("Failed to publish replay: {}", error);
             let client_ip = if client_ip.is_empty() {
                 None
             } else {

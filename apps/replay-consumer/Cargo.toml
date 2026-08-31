@@ -1,0 +1,23 @@
+[package]
+name = "replay-consumer"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+replay-message = { path = "../../crates/replay-message" }
+aws-sdk-s3 = { version = "1.144.0", features = ["behavior-version-latest"] }
+dotenvy = "0.15.7"
+hex = "0.4.3"
+metrics = "0.24.6"
+rdkafka = { version = "0.38.0", features = ["cmake-build", "tokio"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.11.0"
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "json"] }
+thiserror = "2.0.18"
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "signal", "time"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+url = "2.5.8"
+uuid = { version = "1.26.0", features = ["serde", "v4"] }
+zstd = "0.13.3"

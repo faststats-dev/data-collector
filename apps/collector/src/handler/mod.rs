@@ -8,6 +8,7 @@ mod web;
 pub use collect::collect;
 pub use error::error;
 pub use identify::identify;
+pub(crate) use replay::ReplayPublisher;
 pub use replay::replay;
 pub use vitals::vitals;
 pub use web::web;
@@ -763,17 +764,17 @@ pub fn insert_error_occurrence_v3(
 pub async fn process_failed_request(
     batch_queue: &BatchQueue,
     pool: &sqlx::PgPool,
-    replay_storage: Option<&crate::replay_storage::ReplayStorage>,
+    replay_publisher: &ReplayPublisher,
     request: &FailedRequest,
 ) -> Result<(), String> {
     match request.request_type {
         RequestType::Collect => process_collect_request(batch_queue, pool, request).await,
-        RequestType::Web => process_web_request(batch_queue, pool, replay_storage, request).await,
+        RequestType::Web => process_web_request(batch_queue, pool, replay_publisher, request).await,
         RequestType::Vitals => {
-            process_vitals_request(batch_queue, pool, replay_storage, request).await
+            process_vitals_request(batch_queue, pool, replay_publisher, request).await
         }
         RequestType::Replay => {
-            process_replay_request(batch_queue, pool, replay_storage, request).await
+            process_replay_request(batch_queue, pool, replay_publisher, request).await
         }
     }
 }
@@ -817,7 +818,7 @@ async fn process_collect_request(
 async fn process_web_request(
     batch_queue: &BatchQueue,
     pool: &sqlx::PgPool,
-    replay_storage: Option<&crate::replay_storage::ReplayStorage>,
+    replay_publisher: &ReplayPublisher,
     request: &FailedRequest,
 ) -> Result<(), String> {
     use crate::handler::web::WebRequest;
@@ -925,30 +926,6 @@ async fn process_web_request(
             .unwrap_or_else(|| crate::error_tracking::v3::web_context(&event_row, &properties))
     });
 
-    if ctx.replay_storage_active
-        && let Some(session_id) = parsed.session_id.as_deref()
-        && let Some(replay_storage) = replay_storage
-        && let Err(error) = replay_storage
-            .record_filter_event(
-                pool,
-                crate::replay_storage::ReplayFilterEventInput {
-                    project_id: ctx.project_id,
-                    storage_generation: ctx.replay_storage_generation,
-                    session_id,
-                    window_id: parsed.window_id.as_deref().unwrap_or(session_id),
-                    identifier: Some(fallback_identity.as_str()),
-                    browser: event_row.browser.as_deref(),
-                    os: event_row.os.as_deref(),
-                    country: request.country.as_deref(),
-                    url: event_row.url.as_deref(),
-                    custom: &properties,
-                },
-            )
-            .await
-    {
-        warn!("Failed to persist replay filter metadata: {}", error);
-    }
-
     insert_web_event(batch_queue, event_row, Some(tracking_ctx.clone()))
         .map_err(|_| "Failed to queue event".to_string())?;
 
@@ -985,10 +962,8 @@ async fn process_web_request(
         }
 
         if let Some(session_id) = parsed.session_id.as_deref()
-            && let Some(replay_storage) = replay_storage
-            && let Err(error) = replay_storage
-                .mark_session_error(
-                    pool,
+            && let Err(error) = replay_publisher
+                .mark_error(
                     ctx.project_id,
                     session_id,
                     parsed.window_id.as_deref().unwrap_or(session_id),
@@ -1005,7 +980,7 @@ async fn process_web_request(
 async fn process_vitals_request(
     batch_queue: &BatchQueue,
     pool: &sqlx::PgPool,
-    replay_storage: Option<&crate::replay_storage::ReplayStorage>,
+    replay_publisher: &ReplayPublisher,
     request: &FailedRequest,
 ) -> Result<(), String> {
     use crate::handler::vitals::WebVitalRequest;
@@ -1039,11 +1014,9 @@ async fn process_vitals_request(
             .map_err(|_| "Failed to queue web vital".to_string())?;
 
         if let Some(session_id) = req.session_id.as_deref()
-            && let Some(replay_storage) = replay_storage
             && is_poor
-            && let Err(error) = replay_storage
-                .mark_session_poor_vital(
-                    pool,
+            && let Err(error) = replay_publisher
+                .mark_poor_vital(
                     ctx.project_id,
                     session_id,
                     req.window_id.as_deref().unwrap_or(session_id),
@@ -1060,7 +1033,7 @@ async fn process_vitals_request(
 async fn process_replay_request(
     batch_queue: &BatchQueue,
     pool: &sqlx::PgPool,
-    replay_storage: Option<&crate::replay_storage::ReplayStorage>,
+    replay_publisher: &ReplayPublisher,
     request: &FailedRequest,
 ) -> Result<(), String> {
     use crate::handler::replay::ReplayRequest;
@@ -1073,8 +1046,6 @@ async fn process_replay_request(
         .await
         .map_err(|_| "Unauthorized or database error")?;
 
-    let replay_storage =
-        replay_storage.ok_or_else(|| "Replay storage is not configured".to_string())?;
     if !ctx.replay_storage_active {
         return Err("Replay storage is resetting".to_string());
     }
@@ -1088,20 +1059,12 @@ async fn process_replay_request(
         request.country.as_deref(),
     )?;
 
-    let input = built.input;
-    let stored = if input.events.is_empty() {
-        replay_storage
-            .finalize_replay_session(pool, input.project_id, &input.session_id, &input.window_id)
-            .await
-            .map(|()| Default::default())
-    } else {
-        replay_storage.store_replay_chunk(pool, input).await
-    }
-    .map_err(|error| error.to_string())?;
-
-    if stored.first_for_billing {
-        batch_queue.track_replay_usage(&built.session_id, &built.tracking);
-    }
+    replay_publisher
+        .publish(replay_message::ReplayCommand::Snapshot(Box::new(
+            built.input,
+        )))
+        .await?;
+    batch_queue.track_replay_usage(&built.session_id, &built.tracking);
 
     Ok(())
 }

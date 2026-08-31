@@ -732,7 +732,7 @@ impl BatchQueue {
     pub(crate) async fn replay_failed_requests(
         &self,
         pool: &sqlx::PgPool,
-        replay_storage: Option<&crate::replay_storage::ReplayStorage>,
+        replay_publisher: &crate::handler::ReplayPublisher,
     ) {
         match self.backup_store.cleanup_stale_requests().await {
             Ok(count) if count > 0 => {
@@ -772,7 +772,8 @@ impl BatchQueue {
 
         for (id, request) in requests {
             let result =
-                super::handler::process_failed_request(self, pool, replay_storage, &request).await;
+                super::handler::process_failed_request(self, pool, replay_publisher, &request)
+                    .await;
 
             match result {
                 Ok(()) => {

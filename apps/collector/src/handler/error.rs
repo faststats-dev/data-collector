@@ -106,17 +106,16 @@ pub async fn error(
         }
 
         if let Some(session_id) = replay_session_id.as_deref()
-            && let Some(replay_storage) = state.replay_storage.as_deref()
-            && let Err(err) = replay_storage
-                .mark_session_error(
-                    &state.pool,
+            && let Err(err) = state
+                .replay_publisher
+                .mark_error(
                     ctx.project_id,
                     session_id,
                     payload.window_id.as_deref().unwrap_or(session_id),
                 )
                 .await
         {
-            warn!("Failed to persist replay error flag: {}", err);
+            warn!("Failed to publish replay error flag: {}", err);
         }
     }
 

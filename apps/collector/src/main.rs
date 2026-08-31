@@ -28,7 +28,6 @@ mod handler;
 mod identity;
 mod models;
 mod polar;
-mod replay_storage;
 mod tinybird;
 mod utils;
 mod validation;
@@ -118,19 +117,8 @@ async fn main() {
         backup_store_enabled,
         error_tracking::mapping::MappingResolver::from_env(pool.clone()).map(Arc::new),
     );
-    let replay_storage = match replay_storage::ReplayStorage::from_env() {
-        Ok(Some(storage)) => {
-            info!("Replay object storage enabled");
-            Some(Arc::new(storage))
-        }
-        Ok(None) => {
-            warn!("Replay object storage is not configured; replay ingestion is disabled");
-            None
-        }
-        Err(error) => {
-            panic!("Invalid replay storage configuration: {}", error);
-        }
-    };
+    let replay_publisher =
+        Arc::new(handler::ReplayPublisher::from_env().expect("Invalid replay Kafka configuration"));
     let recorder_handle = setup_metrics_recorder();
 
     let batch_queue_for_metrics = Arc::clone(&batch_queue);
@@ -150,10 +138,10 @@ async fn main() {
     let state = models::AppState {
         pool: pool.clone(),
         batch_queue: Arc::clone(&batch_queue),
-        replay_storage: replay_storage.clone(),
+        replay_publisher: Arc::clone(&replay_publisher),
     };
 
-    start_failed_request_replayer(pool.clone(), Arc::clone(&batch_queue), replay_storage);
+    start_failed_request_replayer(pool.clone(), Arc::clone(&batch_queue), replay_publisher);
 
     let cors = CorsLayer::new()
         .allow_origin(AllowOrigin::mirror_request())
@@ -223,7 +211,7 @@ async fn main() {
 fn start_failed_request_replayer(
     pool: sqlx::PgPool,
     batch_queue: Arc<batch_queue::BatchQueue>,
-    replay_storage: Option<Arc<replay_storage::ReplayStorage>>,
+    replay_publisher: Arc<handler::ReplayPublisher>,
 ) {
     tokio::spawn(async move {
         let replay_interval = std::time::Duration::from_secs(60);
@@ -231,7 +219,7 @@ fn start_failed_request_replayer(
         loop {
             tokio::time::sleep(replay_interval).await;
             batch_queue
-                .replay_failed_requests(&pool, replay_storage.as_deref())
+                .replay_failed_requests(&pool, replay_publisher.as_ref())
                 .await;
         }
     });

@@ -8,6 +8,7 @@ user-agent = { path = "../../crates/user-agent" }
 rrweb-types = { path = "../../crates/rrweb-types" }
 error_grouping = { path = "../../crates/error_grouping" }
 legacy-grouping = { path = "../../crates/legacy-grouping" }
+replay-message = { path = "../../crates/replay-message" }
 dotenvy = "0.15.7"
 axum = "0.8.9"
 chrono = { version = "0.4.45", features = ["serde"] }
@@ -31,6 +32,7 @@ metrics = "0.24.6"
 metrics-exporter-prometheus = "0.18.3"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+rdkafka = { version = "0.38.0", features = ["cmake-build"] }
 aws-sdk-s3 = { version = "1.144.0", features = ["behavior-version-latest"] }
 
 [dev-dependencies]

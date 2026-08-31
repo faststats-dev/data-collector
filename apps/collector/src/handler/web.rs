@@ -216,30 +216,6 @@ pub async fn web(
     let error_v3_context = should_process_errors
         .then(|| context.unwrap_or_else(|| web_context(&event_row, &properties)));
 
-    if ctx.replay_storage_active
-        && let Some(session_id) = session_id.as_deref()
-        && let Some(replay_storage) = state.replay_storage.as_deref()
-        && let Err(error) = replay_storage
-            .record_filter_event(
-                &state.pool,
-                crate::replay_storage::ReplayFilterEventInput {
-                    project_id: ctx.project_id,
-                    storage_generation: ctx.replay_storage_generation,
-                    session_id,
-                    window_id: window_id.as_deref().unwrap_or(session_id),
-                    identifier: Some(fallback_identity.as_str()),
-                    browser: event_row.browser.as_deref(),
-                    os: event_row.os.as_deref(),
-                    country: country.as_deref(),
-                    url: event_row.url.as_deref(),
-                    custom: &properties,
-                },
-            )
-            .await
-    {
-        warn!("Failed to persist replay filter metadata: {}", error);
-    }
-
     if !is_debounced {
         match insert_web_event(&state.batch_queue, event_row, Some(tracking_ctx.clone())) {
             Ok(_) => {}
@@ -279,17 +255,16 @@ pub async fn web(
         }
 
         if let Some(session_id) = session_id.as_deref()
-            && let Some(replay_storage) = state.replay_storage.as_deref()
-            && let Err(error) = replay_storage
-                .mark_session_error(
-                    &state.pool,
+            && let Err(error) = state
+                .replay_publisher
+                .mark_error(
                     ctx.project_id,
                     session_id,
                     window_id.as_deref().unwrap_or(session_id),
                 )
                 .await
         {
-            warn!("Failed to persist replay error flag: {}", error);
+            warn!("Failed to publish replay error flag: {}", error);
         }
     }
 

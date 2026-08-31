@@ -1,5 +1,5 @@
 use crate::batch_queue::BatchQueue;
-use crate::replay_storage::ReplayStorage;
+use crate::handler::ReplayPublisher;
 use serde::Deserialize;
 use serde_json::Value;
 use sqlx::PgPool;
@@ -10,7 +10,7 @@ use std::sync::Arc;
 pub struct AppState {
     pub pool: PgPool,
     pub batch_queue: Arc<BatchQueue>,
-    pub replay_storage: Option<Arc<ReplayStorage>>,
+    pub replay_publisher: Arc<ReplayPublisher>,
 }
 
 pub struct DataSource {

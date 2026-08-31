@@ -245,18 +245,17 @@ pub async fn vitals(
         }
 
         if let Some(session_id) = request.session_id.as_deref()
-            && let Some(replay_storage) = state.replay_storage.as_deref()
             && is_poor
-            && let Err(error) = replay_storage
-                .mark_session_poor_vital(
-                    &state.pool,
+            && let Err(error) = state
+                .replay_publisher
+                .mark_poor_vital(
                     ctx.project_id,
                     session_id,
                     request.window_id.as_deref().unwrap_or(session_id),
                 )
                 .await
         {
-            warn!("Failed to persist replay poor-vital flag: {}", error);
+            warn!("Failed to publish replay poor-vital flag: {}", error);
         }
     }
 

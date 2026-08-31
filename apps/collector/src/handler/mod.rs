@@ -225,7 +225,12 @@ pub async fn load_project_context(
     .unwrap_or_default();
 
     let project_id = first.get::<Uuid, _>("id");
-    let error_grouping = load_error_grouping(pool, project_id).await;
+    let error_grouping = load_error_grouping(pool, project_id)
+        .await
+        .map_err(|error| {
+            warn!(%project_id, %error, "Failed to load error grouping settings");
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "DB Error")
+        })?;
 
     let owner_id: String = first.get("owner_id");
     let organization_id: Option<String> = first.get("organization_id");
@@ -257,7 +262,10 @@ pub async fn load_project_context(
     Ok(ctx)
 }
 
-async fn load_error_grouping(pool: &sqlx::PgPool, project_id: Uuid) -> ProjectGrouping {
+async fn load_error_grouping(
+    pool: &sqlx::PgPool,
+    project_id: Uuid,
+) -> Result<ProjectGrouping, Cow<'static, str>> {
     let settings = sqlx::query(
         r#"
         SELECT mode::text, parser_max_input_bytes, parser_max_lines, parser_max_line_bytes,
@@ -270,18 +278,10 @@ async fn load_error_grouping(pool: &sqlx::PgPool, project_id: Uuid) -> ProjectGr
     )
     .bind(project_id)
     .fetch_optional(pool)
-    .await;
-
-    let settings = match settings {
-        Ok(Some(settings)) => settings,
-        Ok(None) => {
-            warn!(%project_id, "Missing error grouping settings; using modern defaults");
-            return ProjectGrouping::default();
-        }
-        Err(error) => {
-            warn!(%project_id, %error, "Failed to load error grouping settings; using modern defaults");
-            return ProjectGrouping::default();
-        }
+    .await
+    .map_err(|error| Cow::Owned(format!("settings query failed: {error}")))?;
+    let Some(settings) = settings else {
+        return Ok(ProjectGrouping::default());
     };
     let exclusions = sqlx::query(
         r#"
@@ -293,28 +293,14 @@ async fn load_error_grouping(pool: &sqlx::PgPool, project_id: Uuid) -> ProjectGr
     )
     .bind(project_id)
     .fetch_all(pool)
-    .await;
-    let exclusions = match exclusions {
-        Ok(exclusions) => exclusions,
-        Err(error) => {
-            warn!(%project_id, %error, "Failed to load error grouping exclusions; using modern defaults");
-            return ProjectGrouping::default();
-        }
-    };
-    let exclusions = exclusions
-        .into_iter()
-        .map(parse_frame_exclusion)
-        .collect::<Option<Vec<error_grouping::FrameRule>>>();
-    let Some(exclusions) = exclusions else {
-        warn!(%project_id, "Invalid error grouping exclusion; using modern defaults");
-        return ProjectGrouping::default();
-    };
+    .await
+    .map_err(|error| Cow::Owned(format!("exclusions query failed: {error}")))?
+    .into_iter()
+    .map(parse_frame_exclusion)
+    .collect::<Option<Vec<_>>>()
+    .ok_or("invalid frame exclusion")?;
 
-    let grouping = build_project_grouping(&settings, exclusions);
-    grouping.unwrap_or_else(|reason| {
-        warn!(%project_id, %reason, "Invalid error grouping settings; using modern defaults");
-        ProjectGrouping::default()
-    })
+    build_project_grouping(&settings, exclusions)
 }
 
 fn parse_frame_exclusion(row: sqlx::postgres::PgRow) -> Option<error_grouping::FrameRule> {

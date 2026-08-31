@@ -120,6 +120,24 @@ fn terminal_cause_affects_identity() {
 }
 
 #[test]
+fn terminal_cause_frames_ignore_wrapping_topology() {
+    let policy = GroupingPolicy::default().with_segments(SegmentSelection::TerminalCauseFrames);
+    let direct = fingerprint_with_policy(
+        Language::Java,
+        "DatabaseError",
+        "DatabaseError: x\n at app.Database.query(Database.java:1)",
+        &policy,
+    );
+    let wrapped = fingerprint_with_policy(
+        Language::Java,
+        "ServiceError",
+        "ServiceError: x\n at app.Service.run(Service.java:1)\nCaused by: DatabaseError: x\n at app.Database.query(Database.java:1)",
+        &policy,
+    );
+    assert_eq!(direct, wrapped);
+}
+
+#[test]
 fn generated_symbols_and_asset_hashes_are_deployment_noise() {
     assert_eq!(
         fingerprint(
@@ -160,6 +178,50 @@ fn stable_source_roots_separate_same_named_files() {
         "Traceback (most recent call last):\n  File \"/opt/app/src/models/user.py\", line 1, in load\nValueError: x",
     );
     assert_ne!(controller, model);
+}
+
+#[test]
+fn windows_file_identity_is_case_insensitive() {
+    assert_eq!(
+        fingerprint(
+            Language::JavaScript,
+            "Error",
+            "at run (C:\\App\\Src\\Main.js:1:1)"
+        ),
+        fingerprint(
+            Language::JavaScript,
+            "Error",
+            "at run (c:\\app\\src\\main.js:2:2)"
+        ),
+    );
+}
+
+#[test]
+fn package_roots_separate_same_named_dependency_files() {
+    assert_ne!(
+        fingerprint(
+            Language::JavaScript,
+            "Error",
+            "at run (/app/node_modules/package-a/lib/index.js:1:1)"
+        ),
+        fingerprint(
+            Language::JavaScript,
+            "Error",
+            "at run (/app/node_modules/package-b/lib/index.js:1:1)"
+        ),
+    );
+    assert_ne!(
+        fingerprint(
+            Language::Rust,
+            "panic",
+            "0: run\n at /repo/crates/alpha/src/lib.rs:1:1"
+        ),
+        fingerprint(
+            Language::Rust,
+            "panic",
+            "0: run\n at /repo/crates/beta/src/lib.rs:1:1"
+        ),
+    );
 }
 
 #[test]

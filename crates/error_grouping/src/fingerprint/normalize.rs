@@ -57,7 +57,9 @@ fn normalized_file(language: Language, file: &str) -> Option<Cow<'_, str>> {
     }
 
     if file.contains('\\') {
-        let normalized = file.replace('\\', "/");
+        // A backslash identifies a Windows path, whose identity is normally
+        // case-insensitive even for case-sensitive runtime languages.
+        let normalized = file.replace('\\', "/").to_ascii_lowercase();
         Some(Cow::Owned(
             normalize_file_path(language, &normalized).into_owned(),
         ))
@@ -68,14 +70,7 @@ fn normalized_file(language: Language, file: &str) -> Option<Cow<'_, str>> {
 
 fn normalize_file_path(language: Language, path: &str) -> Cow<'_, str> {
     let path = path.trim_start_matches('/');
-    let mut offset = 0;
-    let mut stable_root = None;
-    for component in path.split('/') {
-        if is_stable_path_root(component) {
-            stable_root = Some(offset);
-        }
-        offset += component.len() + 1;
-    }
+    let stable_root = package_root(path).or_else(|| last_stable_root(path));
     let suffix = stable_root.map_or_else(
         || path.rsplit_once('/').map_or(path, |(_, basename)| basename),
         |root| &path[root..],
@@ -86,6 +81,30 @@ fn normalize_file_path(language: Language, path: &str) -> Cow<'_, str> {
     } else {
         value
     }
+}
+
+fn package_root(path: &str) -> Option<usize> {
+    ["node_modules/", "packages/", "crates/"]
+        .into_iter()
+        .flat_map(|marker| path.match_indices(marker))
+        .filter_map(|(offset, marker)| {
+            let component_boundary = offset == 0 || path.as_bytes()[offset - 1] == b'/';
+            let has_package = path.len() > offset + marker.len();
+            (component_boundary && has_package).then_some(offset)
+        })
+        .max()
+}
+
+fn last_stable_root(path: &str) -> Option<usize> {
+    let mut offset = 0;
+    let mut root = None;
+    for component in path.split('/') {
+        if is_stable_path_root(component) {
+            root = Some(offset);
+        }
+        offset += component.len() + 1;
+    }
+    root
 }
 
 fn is_stable_path_root(component: &str) -> bool {

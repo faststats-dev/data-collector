@@ -12,6 +12,8 @@ pub(super) fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Option<St
     let mut exception_group = false;
     let mut skip_group_children = false;
     let mut saw_traceback = false;
+    let mut standalone_header = false;
+    let mut content_lines = 0;
     let mut warnings = ParseWarnings::default();
 
     for original in lines {
@@ -27,6 +29,7 @@ pub(super) fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Option<St
         if line.is_empty() {
             continue;
         }
+        content_lines += 1;
         // Sibling exception trees do not fit the linear AST. Keep the stable
         // outer group stack and ignore its message-heavy child rendering.
         if exception_group && line.starts_with("+-+") {
@@ -55,11 +58,12 @@ pub(super) fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Option<St
         } else if indent == 0 && looks_like_exception(line, &[]) {
             let segment = current.get_or_insert_with(TraceSegment::default);
             segment.error_kind = error_kind(line);
+            standalone_header = line.contains(':');
             expect_context = false;
         }
     }
     finish_segment(&mut segments, &mut current, &mut warnings);
-    if !saw_traceback || segments.is_empty() {
+    if segments.is_empty() || (!saw_traceback && !(standalone_header && content_lines == 1)) {
         return None;
     }
 
@@ -195,5 +199,14 @@ mod tests {
                 .into(),
             }
         );
+    }
+
+    #[test]
+    fn accepts_standalone_exception_header() {
+        let trace = Language::Python
+            .parse_stack("ValueError: dynamic message")
+            .unwrap();
+        assert_eq!(trace.segments()[0].error_kind, Some("ValueError"));
+        assert!(trace.segments()[0].frames.is_empty());
     }
 }

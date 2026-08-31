@@ -15,7 +15,8 @@ pub enum SegmentSelection {
     #[default]
     RootAndTerminalCause = 2,
     /// Include the terminal cause's frames, falling back to root frames when no
-    /// cause exists. The nested cause kind does not contribute when frames do.
+    /// cause exists. Wrapping topology and the selected exception kind do not
+    /// contribute when frames are available.
     TerminalCauseFrames = 3,
 }
 

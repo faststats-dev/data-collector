@@ -24,7 +24,7 @@ pub(super) fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Option<St
         }
         saw_content = true;
     }
-    (!segment.frames.is_empty()).then(|| StackTrace::single_with_warnings(segment, warnings))
+    (!segment.is_empty()).then(|| StackTrace::single_with_warnings(segment, warnings))
 }
 
 fn error_header_kind(line: &str) -> Option<&str> {
@@ -134,6 +134,15 @@ mod tests {
             .parse_stack("TypeError:\n at run (app.js:1:2)")
             .unwrap();
         assert_eq!(trace.segments()[0].error_kind, Some("TypeError"));
+    }
+
+    #[test]
+    fn accepts_header_without_frames() {
+        let trace = Language::JavaScript
+            .parse_stack("TypeError: dynamic message")
+            .unwrap();
+        assert_eq!(trace.segments()[0].error_kind, Some("TypeError"));
+        assert!(trace.segments()[0].frames.is_empty());
     }
 
     #[test]

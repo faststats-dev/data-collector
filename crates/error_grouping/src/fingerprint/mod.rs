@@ -51,35 +51,53 @@ pub(super) fn parsed(
     authoritative_kind: &str,
     policy: &GroupingPolicy,
 ) -> (Fingerprint, usize) {
-    let mut canonical = header(language, authoritative_kind, root_kind(trace), policy);
+    let terminal_frames = policy.segments == SegmentSelection::TerminalCauseFrames;
+    let authoritative_kind = nonempty(authoritative_kind);
+    let header_kind = if terminal_frames {
+        None
+    } else {
+        authoritative_kind.or_else(|| root_kind(trace))
+    };
+    let mut canonical = header(language, header_kind, policy);
     let mut contributing_frames = 0;
 
     match policy.segments {
         SegmentSelection::ErrorKindOnly => write_empty_root(&mut canonical),
         SegmentSelection::Root | SegmentSelection::RootAndTerminalCause => {
             if let Some(root) = trace.segments.first() {
-                contributing_frames += write_segment(&mut canonical, language, root, false, policy);
+                contributing_frames +=
+                    write_segment(&mut canonical, language, root, root.relation, None, policy);
                 if policy.segments == SegmentSelection::RootAndTerminalCause
                     && let Some(cause) = terminal_cause(trace)
                 {
-                    contributing_frames +=
-                        write_segment(&mut canonical, language, cause, true, policy);
+                    contributing_frames += write_segment(
+                        &mut canonical,
+                        language,
+                        cause,
+                        cause.relation,
+                        cause.error_kind,
+                        policy,
+                    );
                 }
             } else {
                 write_empty_root(&mut canonical);
             }
         }
         SegmentSelection::TerminalCauseFrames => {
-            if let Some(cause) = terminal_cause(trace) {
+            if let Some(segment) = terminal_cause(trace).or_else(|| trace.segments.first()) {
+                let kind = if segment.frames.is_empty() {
+                    segment.error_kind.or(authoritative_kind)
+                } else {
+                    None
+                };
                 contributing_frames += write_segment(
                     &mut canonical,
                     language,
-                    cause,
-                    cause.frames.is_empty(),
+                    segment,
+                    SegmentRelation::Root,
+                    kind,
                     policy,
                 );
-            } else if let Some(root) = trace.segments.first() {
-                contributing_frames += write_segment(&mut canonical, language, root, false, policy);
             } else {
                 write_empty_root(&mut canonical);
             }
@@ -94,7 +112,7 @@ pub(super) fn kind_only(
     error_kind: &str,
     policy: &GroupingPolicy,
 ) -> Fingerprint {
-    let mut canonical = header(language, error_kind, None, policy);
+    let mut canonical = header(language, nonempty(error_kind), policy);
     write_empty_root(&mut canonical);
     finish(canonical)
 }
@@ -105,7 +123,7 @@ pub(super) fn raw_stack(
     stack: &str,
     policy: &GroupingPolicy,
 ) -> Fingerprint {
-    let mut canonical = header(language, error_kind, None, policy);
+    let mut canonical = header(language, nonempty(error_kind), policy);
     match policy.raw_stack {
         RawStackPolicy::Bounded { max_bytes } => {
             write_bounded_raw_stack(&mut canonical, stack, max_bytes);
@@ -117,22 +135,21 @@ pub(super) fn raw_stack(
     finish(canonical)
 }
 
-fn header(
-    language: Language,
-    authoritative_kind: &str,
-    parsed_kind: Option<&str>,
-    policy: &GroupingPolicy,
-) -> Canonical {
+fn header(language: Language, kind: Option<&str>, policy: &GroupingPolicy) -> Canonical {
     let mut canonical = Canonical::default();
     canonical.field(DOMAIN);
     canonical.byte(language_tag(language));
-    let authoritative_kind = (!authoritative_kind.trim().is_empty()).then_some(authoritative_kind);
-    let kind = policy
-        .include_error_kind
-        .then(|| normalized_kind(language, authoritative_kind.or(parsed_kind)))
-        .flatten();
+    let kind = if policy.include_error_kind {
+        normalized_kind(language, kind)
+    } else {
+        None
+    };
     canonical.optional_text(kind.as_deref());
     canonical
+}
+
+fn nonempty(value: &str) -> Option<&str> {
+    (!value.trim().is_empty()).then_some(value)
 }
 
 fn root_kind<'a>(trace: &StackTrace<'a>) -> Option<&'a str> {
@@ -167,14 +184,17 @@ fn write_segment(
     canonical: &mut Canonical,
     language: Language,
     segment: &TraceSegment<'_>,
-    include_kind: bool,
+    relation: SegmentRelation,
+    kind: Option<&str>,
     policy: &GroupingPolicy,
 ) -> usize {
     canonical.tag(Tag::Segment);
-    canonical.byte(relation_tag(segment.relation));
-    let kind = (include_kind && policy.include_error_kind)
-        .then(|| normalized_kind(language, segment.error_kind))
-        .flatten();
+    canonical.byte(relation_tag(relation));
+    let kind = if policy.include_error_kind {
+        normalized_kind(language, kind)
+    } else {
+        None
+    };
     canonical.optional_text(kind.as_deref());
 
     let frames = &policy.frames;

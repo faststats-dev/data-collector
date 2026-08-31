@@ -271,6 +271,48 @@ mod tests {
     }
 
     #[test]
+    fn javascript_header_only_stack_reports_error_kind_evidence() {
+        let result = group(input(
+            Language::JavaScript,
+            "TypeError",
+            "TypeError: user 123",
+        ));
+
+        assert!(matches!(
+            result.outcome,
+            GroupingOutcome::KindOnly {
+                reason: KindOnlyReason::NoUsableFrames
+            }
+        ));
+        assert_eq!(
+            result.fingerprint,
+            group(input(
+                Language::JavaScript,
+                "TypeError",
+                "TypeError: user 456"
+            ))
+            .fingerprint
+        );
+    }
+
+    #[test]
+    fn python_header_only_stack_ignores_the_message() {
+        let first = group(input(
+            Language::Python,
+            "ValueError",
+            "ValueError: user 123",
+        ));
+        let second = group(input(
+            Language::Python,
+            "ValueError",
+            "ValueError: user 456",
+        ));
+
+        assert!(matches!(first.outcome, GroupingOutcome::KindOnly { .. }));
+        assert_eq!(first.fingerprint, second.fingerprint);
+    }
+
+    #[test]
     fn policy_can_ignore_error_kind() {
         let policy = GroupingPolicy::default().include_error_kind(false);
 

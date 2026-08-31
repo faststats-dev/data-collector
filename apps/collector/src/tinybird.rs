@@ -1,8 +1,12 @@
 use chrono::{DateTime, Utc};
+pub use collector_message::{
+    ErrorOccurrence as ErrorOccurrenceV3Row, ModsEvent as ModsEventRow, WebEvent as WebEventRow,
+    WebVital as WebVitalRow,
+};
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use reqwest::Client;
-use serde::{Deserialize, Serialize, Serializer};
+use serde::{Serialize, Serializer};
 use std::io::Write;
 use tracing::debug;
 use uuid::Uuid;
@@ -11,63 +15,6 @@ pub struct TinybirdClient {
     client: Client,
     base_url: String,
     bearer_token: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct WebEventRow {
-    pub id: Uuid,
-    pub project_id: Uuid,
-    pub user_id: Option<String>,
-    pub person_id: Option<String>,
-    pub external_id: Option<String>,
-    pub is_identified: bool,
-    pub session_id: Option<String>,
-    pub event: Option<String>,
-    pub browser: Option<String>,
-    pub browser_version: Option<String>,
-    pub device: Option<String>,
-    pub os: Option<String>,
-    pub os_version: Option<String>,
-    pub referrer: Option<String>,
-    pub utm_source: Option<String>,
-    pub utm_medium: Option<String>,
-    pub utm_campaign: Option<String>,
-    pub utm_term: Option<String>,
-    pub utm_content: Option<String>,
-    pub title: Option<String>,
-    pub page: Option<String>,
-    pub url: Option<String>,
-    pub country: Option<String>,
-    pub cookieless: Option<bool>,
-    pub time_on_page: Option<u64>,
-    pub session_duration: Option<u64>,
-    pub properties: String,
-    #[serde(with = "chrono::serde::ts_milliseconds")]
-    pub created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ModsEventRow {
-    pub id: Uuid,
-    pub project_id: Uuid,
-    pub server_id: Uuid,
-    pub player_count: Option<f64>,
-    pub online_mode: Option<bool>,
-    pub client: Option<bool>,
-    pub plugin_version: Option<String>,
-    pub minecraft_version: Option<String>,
-    pub server_type: Option<String>,
-    pub platform_version: Option<String>,
-    pub java_version: Option<String>,
-    pub java_vendor: Option<String>,
-    pub os_name: Option<String>,
-    pub os_arch: Option<String>,
-    pub os_version: Option<String>,
-    pub core_count: Option<u16>,
-    pub country: Option<String>,
-    pub custom: String,
-    #[serde(with = "chrono::serde::ts_milliseconds")]
-    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Serialize)]
@@ -128,52 +75,6 @@ where
     let parsed: serde_json::Value =
         serde_json::from_str(value).map_err(serde::ser::Error::custom)?;
     parsed.serialize(serializer)
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ErrorOccurrenceV3Row {
-    #[serde(with = "chrono::serde::ts_milliseconds")]
-    pub timestamp: DateTime<Utc>,
-    pub project_id: Uuid,
-    pub environment: String,
-    pub language: String,
-    pub release: String,
-    pub group_hash: String,
-    pub exact_hash: String,
-    pub error_type: String,
-    pub error_message: String,
-    pub handled: bool,
-    pub stacktrace: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub mapped_stacktrace: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub mapping_used: Option<String>,
-    pub identifier: String,
-    pub session_id: String,
-    pub window_id: String,
-    pub sdk_name: String,
-    pub sdk_version: String,
-    pub count: u32,
-    pub context: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct WebVitalRow {
-    pub id: Uuid,
-    pub project_id: Uuid,
-    pub metric: String,
-    pub value: f64,
-    pub device: Option<String>,
-    pub country: Option<String>,
-    pub os: Option<String>,
-    pub os_version: Option<String>,
-    pub browser: Option<String>,
-    pub browser_version: Option<String>,
-    pub url: String,
-    pub attributes: String,
-    pub session_id: Option<String>,
-    #[serde(with = "chrono::serde::ts_milliseconds")]
-    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Debug)]

@@ -26,6 +26,7 @@ mod batch_queue;
 mod error_tracking;
 mod handler;
 mod identity;
+mod kafka;
 mod models;
 mod polar;
 mod tinybird;
@@ -110,15 +111,17 @@ async fn main() {
         warn!("Backup store disabled by DISABLE_BACKUP_STORE");
     }
 
+    let kafka_publisher = kafka::Publisher::from_env().expect("Invalid Kafka configuration");
+    let event_publisher = Arc::new(kafka::EventPublisher::from_env(kafka_publisher.clone()));
     let batch_queue = batch_queue::BatchQueue::new(
         Arc::clone(&tinybird_client),
         polar_client,
         &backup_path,
         backup_store_enabled,
         error_tracking::mapping::MappingResolver::from_env(pool.clone()).map(Arc::new),
+        event_publisher,
     );
-    let replay_publisher =
-        Arc::new(handler::ReplayPublisher::from_env().expect("Invalid replay Kafka configuration"));
+    let replay_publisher = Arc::new(handler::ReplayPublisher::from_env(kafka_publisher));
     let recorder_handle = setup_metrics_recorder();
 
     let batch_queue_for_metrics = Arc::clone(&batch_queue);

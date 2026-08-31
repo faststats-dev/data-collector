@@ -44,3 +44,7 @@ WORKDIR /app
 COPY --from=replay-consumer-builder /app/target/release/replay-consumer /usr/local/bin/replay-consumer
 USER nonroot:nonroot
 ENTRYPOINT ["/usr/local/bin/replay-consumer"]
+
+# Keep the HTTP service as the default image; build the worker with
+# `--target replay-consumer`.
+FROM runtime AS collector

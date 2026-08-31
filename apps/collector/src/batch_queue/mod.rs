@@ -288,10 +288,17 @@ fn record_batch_error(
         .push(format!("{datasource} rows={rows} {permanence}: {error}"));
 }
 
+fn record_kafka_error(result: &mut BatchSendResult, datasource: &str, rows: usize, error: &str) {
+    result
+        .errors
+        .push(format!("{datasource} rows={rows} transient Kafka: {error}"));
+}
+
 pub struct BatchQueue {
     tinybird: Arc<TinybirdClient>,
     polar: Option<Arc<PolarClient>>,
     mappings: Option<Arc<MappingResolver>>,
+    event_publisher: Arc<crate::kafka::EventPublisher>,
     pub(crate) backup_store: Arc<BackupStore>,
     sender: mpsc::Sender<QueuedEvent>,
     in_memory_batch: Arc<Mutex<InMemoryBatch>>,
@@ -305,6 +312,7 @@ impl BatchQueue {
         backup_path: &Path,
         backup_enabled: bool,
         mappings: Option<Arc<MappingResolver>>,
+        event_publisher: Arc<crate::kafka::EventPublisher>,
     ) -> Arc<Self> {
         let backup_store = Arc::new(BackupStore::new(backup_path, backup_enabled));
         let (sender, receiver) = mpsc::channel(CHANNEL_CAPACITY);
@@ -315,6 +323,7 @@ impl BatchQueue {
             tinybird,
             polar,
             mappings,
+            event_publisher,
             backup_store,
             sender,
             in_memory_batch,
@@ -539,6 +548,13 @@ impl BatchQueue {
             error_occurrences_v3.iter().map(|(e, _, _, _)| e).collect();
         let web_vital_rows: Vec<_> = web_vitals.iter().map(|(e, _)| e).collect();
 
+        // This runs after sourcemap enrichment, so error messages contain the final mapped
+        // stacktrace and the group hash recalculated from it.
+        let web_events_kafka = self.publish_web_events(&web_event_rows).await;
+        let mods_events_kafka = self.publish_mods_events(&mods_event_rows).await;
+        let errors_kafka = self.publish_errors(&error_occurrence_v3_rows).await;
+        let vitals_kafka = self.publish_vitals(&web_vital_rows).await;
+
         let (web_events_res, mods_events_res, error_occurrences_v3_res, web_vitals_res) = tokio::join!(
             async {
                 if web_event_rows.is_empty() {
@@ -572,44 +588,101 @@ impl BatchQueue {
             },
         );
 
-        if let Err(e) = web_events_res {
-            record_batch_error(&mut result, "web_events", web_events.len(), &e);
-            if !e.is_transient() {
-                result.had_permanent_failure = true;
+        if web_events_res.is_err() || web_events_kafka.is_err() {
+            if let Err(e) = web_events_res {
+                record_batch_error(&mut result, "web_events", web_events.len(), &e);
+                result.had_permanent_failure |= !e.is_transient();
+            }
+            if let Err(e) = web_events_kafka {
+                record_kafka_error(&mut result, "web_events", web_events.len(), &e);
             }
             result.failed_web_events = web_events;
         }
 
-        if let Err(e) = mods_events_res {
-            record_batch_error(&mut result, "mods_events", mods_events.len(), &e);
-            if !e.is_transient() {
-                result.had_permanent_failure = true;
+        if mods_events_res.is_err() || mods_events_kafka.is_err() {
+            if let Err(e) = mods_events_res {
+                record_batch_error(&mut result, "mods_events", mods_events.len(), &e);
+                result.had_permanent_failure |= !e.is_transient();
+            }
+            if let Err(e) = mods_events_kafka {
+                record_kafka_error(&mut result, "mods_events", mods_events.len(), &e);
             }
             result.failed_mods_events = mods_events;
         }
 
-        if let Err(e) = error_occurrences_v3_res {
-            record_batch_error(
-                &mut result,
-                "error_tracking_v3",
-                error_occurrences_v3.len(),
-                &e,
-            );
-            if !e.is_transient() {
-                result.had_permanent_failure = true;
+        if error_occurrences_v3_res.is_err() || errors_kafka.is_err() {
+            if let Err(e) = error_occurrences_v3_res {
+                record_batch_error(
+                    &mut result,
+                    "error_tracking_v3",
+                    error_occurrences_v3.len(),
+                    &e,
+                );
+                result.had_permanent_failure |= !e.is_transient();
+            }
+            if let Err(e) = errors_kafka {
+                record_kafka_error(
+                    &mut result,
+                    "error_tracking_v3",
+                    error_occurrences_v3.len(),
+                    &e,
+                );
             }
             result.failed_error_occurrences_v3 = error_occurrences_v3;
         }
 
-        if let Err(e) = web_vitals_res {
-            record_batch_error(&mut result, "web_vitals", web_vitals.len(), &e);
-            if !e.is_transient() {
-                result.had_permanent_failure = true;
+        if web_vitals_res.is_err() || vitals_kafka.is_err() {
+            if let Err(e) = web_vitals_res {
+                record_batch_error(&mut result, "web_vitals", web_vitals.len(), &e);
+                result.had_permanent_failure |= !e.is_transient();
+            }
+            if let Err(e) = vitals_kafka {
+                record_kafka_error(&mut result, "web_vitals", web_vitals.len(), &e);
             }
             result.failed_web_vitals = web_vitals;
         }
 
         result
+    }
+
+    async fn publish_web_events(&self, rows: &[&WebEventRow]) -> Result<(), String> {
+        self.event_publisher
+            .publish_all(
+                rows.iter()
+                    .map(|row| collector_message::Payload::WebEvent((**row).clone()))
+                    .collect(),
+            )
+            .await
+    }
+
+    async fn publish_mods_events(&self, rows: &[&ModsEventRow]) -> Result<(), String> {
+        self.event_publisher
+            .publish_all(
+                rows.iter()
+                    .map(|row| collector_message::Payload::ModsEvent((**row).clone()))
+                    .collect(),
+            )
+            .await
+    }
+
+    async fn publish_errors(&self, rows: &[&ErrorOccurrenceV3Row]) -> Result<(), String> {
+        self.event_publisher
+            .publish_all(
+                rows.iter()
+                    .map(|row| collector_message::Payload::ErrorOccurrence((**row).clone()))
+                    .collect(),
+            )
+            .await
+    }
+
+    async fn publish_vitals(&self, rows: &[&WebVitalRow]) -> Result<(), String> {
+        self.event_publisher
+            .publish_all(
+                rows.iter()
+                    .map(|row| collector_message::Payload::WebVital((**row).clone()))
+                    .collect(),
+            )
+            .await
     }
 
     async fn enrich_error_occurrences_v3(

@@ -10,51 +10,31 @@ use axum::extract::{Query, State};
 use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use rdkafka::ClientConfig;
-use rdkafka::producer::{FutureProducer, FutureRecord};
 use replay_message::{ReplayChunk, ReplayCommand, ReplaySessionPatch};
 use serde::Deserialize;
 use serde_json::Value;
 use sqlx::types::Uuid as SqlxUuid;
 use std::collections::HashMap;
-use std::time::Duration;
 use tracing::{error, warn};
 use uuid::Uuid;
 
 #[derive(Clone)]
 pub(crate) struct ReplayPublisher {
-    producer: FutureProducer,
+    publisher: crate::kafka::Publisher,
     topic: String,
 }
 
 impl ReplayPublisher {
-    pub(crate) fn from_env() -> Result<Self, String> {
-        let brokers = std::env::var("KAFKA_BROKERS").unwrap_or_else(|_| "localhost:9092".into());
+    pub(crate) fn from_env(publisher: crate::kafka::Publisher) -> Self {
         let topic = std::env::var(replay_message::TOPIC_ENV)
             .unwrap_or_else(|_| replay_message::DEFAULT_TOPIC.into());
-        let producer = ClientConfig::new()
-            .set("bootstrap.servers", brokers)
-            .set("message.timeout.ms", "5000")
-            .set("compression.type", "zstd")
-            .set("compression.level", "3")
-            .set("linger.ms", "10")
-            .set("batch.size", "1048576")
-            .create()
-            .map_err(|error| format!("Failed to create replay Kafka producer: {error}"))?;
-        Ok(Self { producer, topic })
+        Self { publisher, topic }
     }
 
     pub(crate) async fn publish(&self, command: ReplayCommand) -> Result<(), String> {
         let key = command_key(&command);
         let payload = serde_json::to_vec(&command).map_err(|error| error.to_string())?;
-        self.producer
-            .send(
-                FutureRecord::to(&self.topic).key(&key).payload(&payload),
-                Duration::from_secs(5),
-            )
-            .await
-            .map_err(|(error, _)| format!("Failed to publish replay command: {error}"))?;
-        Ok(())
+        self.publisher.publish(&self.topic, &key, &payload).await
     }
 
     pub(crate) async fn mark_error(

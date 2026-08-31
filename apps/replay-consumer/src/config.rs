@@ -4,6 +4,7 @@ pub struct Config {
     pub brokers: String,
     pub topic: String,
     pub group_id: String,
+    pub max_message_bytes: usize,
 }
 
 impl Config {
@@ -16,6 +17,7 @@ impl Config {
                 .unwrap_or_else(|_| replay_message::DEFAULT_TOPIC.into()),
             group_id: std::env::var("REPLAY_KAFKA_GROUP_ID")
                 .unwrap_or_else(|_| "replay-consumer".into()),
+            max_message_bytes: optional("KAFKA_MAX_MESSAGE_BYTES", 16 * 1024 * 1024 + 256 * 1024)?,
         })
     }
 }

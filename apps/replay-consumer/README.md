@@ -47,3 +47,11 @@ Run them in separate terminals:
 cargo run -p replay-consumer
 cargo run -p collector
 ```
+
+Large replay commands use `KAFKA_MAX_MESSAGE_BYTES` (default 17 MiB) consistently in the
+collector and replay consumer. The broker must allow the same size; the local Compose broker
+is configured accordingly.
+
+Session patches received before their replay snapshot are held without advancing that Kafka
+partition's committed offset. Once the snapshot creates the session, the patch is applied and
+the offset advances. A restart therefore replays, rather than loses, unresolved patches.

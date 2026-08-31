@@ -119,6 +119,7 @@ pub(crate) fn group_hash(
         .with_segments(match grouping.segment_selection.as_str() {
             "error_kind_only" => SegmentSelection::ErrorKindOnly,
             "root" => SegmentSelection::Root,
+            "terminal_cause_frames" => SegmentSelection::TerminalCauseFrames,
             _ => SegmentSelection::RootAndTerminalCause,
         })
         .with_error_kind(if grouping.include_error_kind {
@@ -195,6 +196,29 @@ mod tests {
         assert_ne!(
             group_hash(ErrorLanguage::JavaScript, "TypeError", stack, &default),
             group_hash(ErrorLanguage::JavaScript, "TypeError", stack, &kind_only),
+        );
+    }
+
+    #[test]
+    fn terminal_cause_frames_setting_uses_the_terminal_call_site() {
+        let mut grouping = ProjectGrouping::default();
+        grouping.segment_selection = "terminal_cause_frames".to_owned();
+        let missing_method = "Wrapper: failed\n at server.First.run(First.java:1)\nCaused by: java.lang.NoSuchMethodError\n at app.Plugin.load(Plugin.java:10)";
+        let missing_field = "Wrapper: failed\n at server.Second.run(Second.java:1)\nCaused by: java.lang.NoSuchFieldError\n at app.Plugin.load(Plugin.java:20)";
+
+        assert_eq!(
+            group_hash(
+                ErrorLanguage::Java,
+                "com.example.Wrapper",
+                missing_method,
+                &grouping,
+            ),
+            group_hash(
+                ErrorLanguage::Java,
+                "com.example.Wrapper",
+                missing_field,
+                &grouping,
+            ),
         );
     }
 

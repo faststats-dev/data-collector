@@ -57,7 +57,7 @@ let result = group_with_policy(
 
 | Setting | Default | Effect |
 | --- | --- | --- |
-| `SegmentSelection` | root and terminal cause | Selects kind-only, root-only, or root-plus-terminal-cause identity. |
+| `SegmentSelection` | root and terminal cause | Selects kind-only, root-only, root-plus-terminal-cause, or terminal-cause-frame identity. Terminal-cause-frame identity retains the authoritative root kind, ignores a nested cause kind when frames are available, and falls back to root frames when no cause exists. |
 | `ErrorKindPolicy` | include | Controls whether authoritative root and terminal cause kinds contribute. |
 | `RawStackPolicy` | bounded to 1 MiB | Selects bounded raw evidence or kind-only fallback after parsing fails. |
 | `FramePolicy::with_max_frames` | `8` | Bounds included frames per selected segment. Excluded and filtered frames do not consume the limit. |

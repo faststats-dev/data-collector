@@ -117,6 +117,21 @@ pub(super) fn parsed(
                 write_empty_root(&mut canonical);
             }
         }
+        SegmentSelection::TerminalCauseFrames => {
+            if let Some(cause) = terminal_cause(trace) {
+                used_frames |= write_segment(
+                    &mut canonical,
+                    language,
+                    cause,
+                    cause.frames.is_empty(),
+                    policy,
+                );
+            } else if let Some(root) = trace.segments.first() {
+                used_frames |= write_segment(&mut canonical, language, root, false, policy);
+            } else {
+                write_empty_root(&mut canonical);
+            }
+        }
     }
 
     FingerprintOutput {

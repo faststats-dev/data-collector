@@ -29,6 +29,9 @@ pub enum SegmentSelection {
     /// Include the root and the terminal cause or context, when present.
     #[default]
     RootAndTerminalCause = 2,
+    /// Include the terminal cause's frames, falling back to root frames when no
+    /// cause exists. The nested cause kind does not contribute when frames do.
+    TerminalCauseFrames = 3,
 }
 
 /// Controls whether the authoritative SDK error kind contributes.

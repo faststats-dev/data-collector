@@ -277,6 +277,77 @@ fn policy_can_exclude_the_terminal_cause() {
 }
 
 #[test]
+fn terminal_cause_frames_group_linkage_errors_from_the_same_call_site() {
+    let missing_method = r#"com.destroystokyo.paper.exception.ServerEventException: Could not pass event WorldLoadEvent to Worlds v3.12.4
+  at io.papermc.paper.plugin.manager.PaperEventManager.callEvent(PaperEventManager.java:72)
+  at io.papermc.paper.plugin.manager.PaperPluginManagerImpl.callEvent(PaperPluginManagerImpl.java:131)
+  at org.bukkit.plugin.SimplePluginManager.callEvent(SimplePluginManager.java:627)
+  at org.bukkit.event.Event.callEvent(Event.java:45)
+  at net.minecraft.server.MinecraftServer.prepareLevel(MinecraftServer.java:912)
+  at io.papermc.paper.world.PaperWorldLoader.loadInitialWorlds(PaperWorldLoader.java:137)
+Caused by: java.lang.NoSuchMethodError: missing method
+  at worlds-3.12.4-all.jar//net.thenextlvl.worlds.level.PaperLevel.createInternal(PaperLevel.java:117)
+  at worlds-3.12.4-all.jar//net.thenextlvl.worlds.WorldsPlugin.supplyGlobal(WorldsPlugin.java:177)
+  at worlds-3.12.4-all.jar//net.thenextlvl.worlds.level.PaperLevel.createAsync(PaperLevel.java:74)
+  at worlds-3.12.4-all.jar//net.thenextlvl.worlds.listener.WorldListener.loadLevel(WorldListener.java:60)"#;
+    let missing_field = r#"com.destroystokyo.paper.exception.ServerEventException: Could not pass event WorldLoadEvent to Worlds v3.12.4
+  at io.papermc.paper.plugin.manager.PaperEventManager.callEvent(PaperEventManager.java:89)
+  at io.papermc.paper.plugin.manager.PaperPluginManagerImpl.callEvent(PaperPluginManagerImpl.java:131)
+  at org.bukkit.plugin.SimplePluginManager.callEvent(SimplePluginManager.java:629)
+  at org.bukkit.event.Event.callEvent(Event.java:45)
+  at net.minecraft.server.MinecraftServer.loadWorld0(MinecraftServer.java:729)
+Caused by: java.lang.NoSuchFieldError: missing field
+  at worlds-3.12.4-all.jar//net.thenextlvl.worlds.level.PaperLevel.createInternal(PaperLevel.java:124)
+  at worlds-3.12.4-all.jar//net.thenextlvl.worlds.WorldsPlugin.supplyGlobal(WorldsPlugin.java:177)
+  at worlds-3.12.4-all.jar//net.thenextlvl.worlds.level.PaperLevel.createAsync(PaperLevel.java:74)
+  at worlds-3.12.4-all.jar//net.thenextlvl.worlds.listener.WorldListener.loadLevel(WorldListener.java:60)"#;
+
+    let default = fingerprints(
+        Language::Java,
+        "com.destroystokyo.paper.exception.ServerEventException",
+        missing_method,
+        missing_field,
+        GroupingPolicy::default(),
+    );
+    assert_ne!(default.0, default.1);
+
+    let terminal_frames = fingerprints(
+        Language::Java,
+        "com.destroystokyo.paper.exception.ServerEventException",
+        missing_method,
+        missing_field,
+        GroupingPolicy::default().with_segments(SegmentSelection::TerminalCauseFrames),
+    );
+    assert_eq!(terminal_frames.0, terminal_frames.1);
+}
+
+#[test]
+fn terminal_cause_frames_fall_back_to_root_frames() {
+    let policy = GroupingPolicy::default().with_segments(SegmentSelection::TerminalCauseFrames);
+    let (run, stop) = fingerprints(
+        Language::Java,
+        "java.lang.RuntimeException",
+        "java.lang.RuntimeException: failed\n at app.Main.run(Main.java:1)",
+        "java.lang.RuntimeException: failed\n at app.Main.stop(Main.java:1)",
+        policy,
+    );
+    assert_ne!(run, stop);
+}
+
+#[test]
+fn terminal_cause_frames_use_cause_kind_when_frames_are_missing() {
+    let policy = GroupingPolicy::default().with_segments(SegmentSelection::TerminalCauseFrames);
+    let (first, second) = fingerprints(
+        Language::Java,
+        "java.lang.RuntimeException",
+        "java.lang.RuntimeException: failed\nCaused by: java.lang.NoSuchMethodError",
+        "java.lang.RuntimeException: failed\nCaused by: java.lang.NoSuchFieldError",
+        policy,
+    );
+    assert_ne!(first, second);
+}
+
+#[test]
 fn policy_can_select_frame_identity_fields() {
     let policy = GroupingPolicy::default()
         .with_frames(FramePolicy::default().with_fields(FrameFields::FUNCTION));

@@ -354,8 +354,7 @@
                 "initialDelaySeconds": 10,
                 "periodSeconds": 30,
                 "timeoutSeconds": 3,
-                "failureThreshold": 3,
-                "successThreshold": 1
+                "failureThreshold": 3
               }
             ],
             "vcsData": {

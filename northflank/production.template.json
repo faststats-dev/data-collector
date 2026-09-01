@@ -296,7 +296,6 @@
           "spec": {
             "name": "collector",
             "description": "FastStats HTTP event collector",
-            "projectId": "data-collection",
             "billing": {
               "deploymentPlan": "nf-compute-20"
             },
@@ -316,13 +315,23 @@
                 "name": "http",
                 "internalPort": 8080,
                 "protocol": "HTTP",
-                "public": true
+                "public": true,
+                "security": {
+                  "credentials": [],
+                  "policies": [],
+                  "sso": {}
+                }
               },
               {
                 "name": "metrics",
                 "internalPort": 9091,
                 "protocol": "HTTP",
-                "public": false
+                "public": false,
+                "security": {
+                  "credentials": [],
+                  "policies": [],
+                  "sso": {}
+                }
               }
             ],
             "vcsData": {
@@ -346,7 +355,6 @@
           "spec": {
             "name": "replay-consumer",
             "description": "FastStats Kafka replay persistence worker",
-            "projectId": "data-collection",
             "billing": {
               "deploymentPlan": "nf-compute-20"
             },
@@ -393,7 +401,9 @@
                   "id": "${refs.collector-service.id}",
                   "type": "service"
                 }
-              ]
+              ],
+              "tags": [],
+              "stageIds": []
             },
             "secrets": {
               "variables": {
@@ -409,7 +419,8 @@
                 "REPLAY_KAFKA_TOPIC": "replay-snapshot"
               }
             }
-          }
+          },
+          "updateMode": "put"
         },
         {
           "kind": "SecretGroup",
@@ -428,7 +439,9 @@
                   "id": "${refs.replay-consumer-service.id}",
                   "type": "service"
                 }
-              ]
+              ],
+              "tags": [],
+              "stageIds": []
             },
             "secrets": {
               "variables": {
@@ -441,9 +454,21 @@
                 "REPLAY_KAFKA_GROUP_ID": "replay-consumer"
               }
             }
-          }
+          },
+          "updateMode": "put"
         }
       ]
     }
+  },
+  "options": {
+    "autorun": true,
+    "concurrencyPolicy": "allow"
+  },
+  "gitops": {
+    "repoUrl": "https://github.com/faststats-dev/data-collector",
+    "vcsService": "github",
+    "accountLogin": "faststats-dev",
+    "branch": "replay-kafka",
+    "filePath": "/northflank/production.template.json"
   }
 }

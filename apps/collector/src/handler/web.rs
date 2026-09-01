@@ -4,7 +4,6 @@ use super::{
     insert_error_occurrence_v3, insert_web_event, load_project_context, success_response,
     validate_hostname,
 };
-use crate::batch_queue::{FailedRequest, RequestType};
 use crate::error_tracking::ErrorLanguage;
 use crate::error_tracking::v3::{OccurrenceInput, build_occurrence, web_context};
 use crate::identity::resolve_person_for_distinct_id;
@@ -17,7 +16,7 @@ use axum::response::IntoResponse;
 use serde_json::Value;
 use sqlx::types::Uuid;
 use std::collections::HashMap;
-use tracing::{error, warn};
+use tracing::warn;
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -83,43 +82,7 @@ pub async fn web(
 
     let ctx = match load_project_context(&state.pool, &token).await {
         Ok(ctx) => ctx,
-        Err(e) => {
-            if e.0 == StatusCode::UNAUTHORIZED {
-                return e;
-            }
-
-            let country = headers
-                .get("CF-IPCountry")
-                .and_then(|v| v.to_str().ok())
-                .map(String::from);
-
-            let client_ip = get_client_ip(&headers);
-            let user_agent = headers.get("User-Agent").and_then(|v| v.to_str().ok());
-
-            let failed = FailedRequest {
-                request_type: RequestType::Web,
-                token,
-                body: body.to_vec(),
-                country,
-                client_ip: if client_ip.is_empty() {
-                    None
-                } else {
-                    Some(client_ip.to_owned())
-                },
-                user_agent: user_agent.map(str::to_owned),
-                origin: request_origin,
-            };
-
-            if let Err(e) = state.batch_queue.backup_store.backup_request(&failed).await {
-                error!("Failed to store failed request: {}", e);
-                return error_response(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "Service temporarily unavailable",
-                );
-            }
-
-            return success_response(HashMap::new());
-        }
+        Err(error) => return error,
     };
 
     if !validate_hostname(&ctx.allowed_hostnames, request_origin.as_deref()) {

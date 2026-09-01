@@ -3,7 +3,7 @@ use super::{
     extract_known_fields, get_authorization, get_client_ip, get_country,
     insert_error_occurrence_v3, insert_mods_event, load_project_context, success_response,
 };
-use crate::batch_queue::{FailedRequest, RequestType, TrackingContext};
+use crate::batch_queue::TrackingContext;
 use crate::error_tracking::ErrorLanguage;
 use crate::error_tracking::v3::{OccurrenceInput, build_occurrence, mods_context};
 use crate::models::{AppState, Request};
@@ -15,7 +15,6 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use sqlx::types::Uuid;
 use std::collections::HashMap;
-use tracing::error;
 
 pub async fn collect(
     State(state): State<AppState>,
@@ -29,36 +28,7 @@ pub async fn collect(
 
     let ctx = match load_project_context(&state.pool, &token).await {
         Ok(ctx) => ctx,
-        Err(e) => {
-            if e.0 == StatusCode::UNAUTHORIZED {
-                return e;
-            }
-
-            let country = headers
-                .get("CF-IPCountry")
-                .and_then(|v| v.to_str().ok())
-                .map(String::from);
-
-            let failed = FailedRequest {
-                request_type: RequestType::Collect,
-                token,
-                body: body.to_vec(),
-                country,
-                client_ip: None,
-                user_agent: None,
-                origin: None,
-            };
-
-            if let Err(e) = state.batch_queue.backup_store.backup_request(&failed).await {
-                error!("Failed to store failed request: {}", e);
-                return error_response(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "Service temporarily unavailable",
-                );
-            }
-
-            return success_response(HashMap::new());
-        }
+        Err(error) => return error,
     };
 
     let client_ip = get_client_ip(&headers);

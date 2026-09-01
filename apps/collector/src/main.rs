@@ -14,14 +14,13 @@ use axum::{
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
 use sqlx::postgres::PgPoolOptions;
 use std::{
-    path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
 };
 use tokio::signal;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::decompression::RequestDecompressionLayer;
-use tracing::{info, warn};
+use tracing::info;
 mod batch_queue;
 mod error_tracking;
 mod handler;
@@ -101,23 +100,11 @@ async fn main() {
         Arc::new(polar::PolarClient::new(token))
     });
 
-    let backup_path = std::env::var("BACKUP_DB_PATH")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/data/backup.db"));
-    let backup_store_enabled = std::env::var("DISABLE_BACKUP_STORE").unwrap_or_default() != "1";
-    if backup_store_enabled {
-        info!("Backup store enabled at {}", backup_path.display());
-    } else {
-        warn!("Backup store disabled by DISABLE_BACKUP_STORE");
-    }
-
     let kafka_publisher = kafka::Publisher::from_env().expect("Invalid Kafka configuration");
     let event_publisher = Arc::new(kafka::EventPublisher::from_env(kafka_publisher.clone()));
     let batch_queue = batch_queue::BatchQueue::new(
         Arc::clone(&tinybird_client),
         polar_client,
-        &backup_path,
-        backup_store_enabled,
         error_tracking::mapping::MappingResolver::from_env(pool.clone()).map(Arc::new),
         event_publisher,
     );
@@ -143,8 +130,6 @@ async fn main() {
         batch_queue: Arc::clone(&batch_queue),
         replay_publisher: Arc::clone(&replay_publisher),
     };
-
-    start_failed_request_replayer(pool.clone(), Arc::clone(&batch_queue), replay_publisher);
 
     let cors = CorsLayer::new()
         .allow_origin(AllowOrigin::mirror_request())
@@ -209,23 +194,6 @@ async fn main() {
     info!("Shutting down, flushing in-memory batch...");
     batch_queue.flush_in_memory_batch().await;
     info!("Shutdown complete");
-}
-
-fn start_failed_request_replayer(
-    pool: sqlx::PgPool,
-    batch_queue: Arc<batch_queue::BatchQueue>,
-    replay_publisher: Arc<handler::ReplayPublisher>,
-) {
-    tokio::spawn(async move {
-        let replay_interval = std::time::Duration::from_secs(60);
-
-        loop {
-            tokio::time::sleep(replay_interval).await;
-            batch_queue
-                .replay_failed_requests(&pool, replay_publisher.as_ref())
-                .await;
-        }
-    });
 }
 
 fn setup_metrics_recorder() -> PrometheusHandle {

@@ -3,7 +3,7 @@ use super::{
     get_client_ip, get_country, get_request_origin, load_project_context, success_response,
     validate_hostname,
 };
-use crate::batch_queue::{FailedRequest, RequestType, TrackingContext};
+use crate::batch_queue::TrackingContext;
 use crate::models::AppState;
 use axum::body::Bytes;
 use axum::extract::{Query, State};
@@ -249,39 +249,7 @@ pub async fn replay(
 
     let context = match load_project_context(&state.pool, &token).await {
         Ok(ctx) => ctx,
-        Err(e) => {
-            if e.0 == StatusCode::UNAUTHORIZED {
-                return e;
-            }
-
-            let client_ip = get_client_ip(&headers);
-            let failed = FailedRequest {
-                request_type: RequestType::Replay,
-                token: token.clone(),
-                body: body.to_vec(),
-                country: country.clone(),
-                client_ip: if client_ip.is_empty() {
-                    None
-                } else {
-                    Some(client_ip.to_string())
-                },
-                user_agent: headers
-                    .get("User-Agent")
-                    .and_then(|value| value.to_str().ok())
-                    .map(str::to_string),
-                origin: request_origin.clone(),
-            };
-
-            if let Err(e) = state.batch_queue.backup_store.backup_request(&failed).await {
-                error!("Failed to store failed request: {}", e);
-                return error_response(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "Service temporarily unavailable",
-                );
-            }
-
-            return success_response(HashMap::new());
-        }
+        Err(error) => return error,
     };
 
     if !is_replay_origin_allowed(&context.allowed_hostnames, request_origin.as_deref()) {
@@ -336,39 +304,10 @@ pub async fn replay(
         }
         Err(error) => {
             error!("Failed to publish replay: {}", error);
-            let client_ip = if client_ip.is_empty() {
-                None
-            } else {
-                Some(client_ip.to_string())
-            };
-            let user_agent = headers
-                .get("User-Agent")
-                .and_then(|value| value.to_str().ok())
-                .map(str::to_string);
-            let failed_request = FailedRequest {
-                request_type: RequestType::Replay,
-                token: token.clone(),
-                body: body.into_owned(),
-                country,
-                client_ip,
-                user_agent,
-                origin: request_origin,
-            };
-            if let Err(backup_error) = state
-                .batch_queue
-                .backup_store
-                .backup_request(&failed_request)
-                .await
-            {
-                error!(
-                    "Failed to store replay request after storage failure: {}",
-                    backup_error
-                );
-                return error_response(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "Service temporarily unavailable",
-                );
-            }
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Service temporarily unavailable",
+            );
         }
     }
 

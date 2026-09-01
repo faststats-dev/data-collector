@@ -191,8 +191,8 @@ async fn main() {
         .await
         .expect("Server error");
 
-    info!("Shutting down, flushing in-memory batch...");
-    batch_queue.flush_in_memory_batch().await;
+    info!("Shutting down, draining Kafka and flushing Tinybird batch...");
+    batch_queue.drain().await;
     info!("Shutdown complete");
 }
 

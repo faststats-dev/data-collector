@@ -1,4 +1,3 @@
-use futures_util::{StreamExt, TryStreamExt};
 use rdkafka::ClientConfig;
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use std::time::Duration;
@@ -142,18 +141,6 @@ impl EventPublisher {
         let key = message.key();
         let bytes = serde_json::to_vec(&message).map_err(|error| error.to_string())?;
         self.publisher.publish(topic, &key, &bytes).await
-    }
-
-    pub async fn publish_all(
-        &self,
-        payloads: Vec<collector_message::Payload>,
-    ) -> Result<(), String> {
-        futures_util::stream::iter(payloads)
-            .map(|payload| self.publish(payload))
-            .buffer_unordered(100)
-            .try_collect::<Vec<_>>()
-            .await?;
-        Ok(())
     }
 }
 

@@ -4,20 +4,25 @@ use crate::polar::{PolarClient, UsageCounts};
 use crate::tinybird::{
     ErrorOccurrenceV3Row, ModsEventRow, TinybirdClient, WebEventRow, WebVitalRow,
 };
+use futures_util::StreamExt;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::sync::Mutex;
+use tokio::sync::Notify;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
 const MAX_RETRIES: u32 = 5;
 const INITIAL_RETRY_DELAY: Duration = Duration::from_secs(1);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
-const BATCH_WINDOW: Duration = Duration::from_secs(5);
+const TINYBIRD_BATCH_WINDOW: Duration = Duration::from_secs(5);
 const CHANNEL_CAPACITY: usize = 2_000;
 const CHANNEL_BACKPRESSURE_THRESHOLD: usize = 1_600;
-const MAX_BATCH_SIZE: usize = 5000;
+const TINYBIRD_MAX_BATCH_SIZE: usize = 5000;
+const EVENT_PROCESSING_CONCURRENCY: usize = 100;
+const KAFKA_PUBLISH_CONCURRENCY: usize = 100;
 
 pub struct OwnerUsage {
     pub counts: UsageCounts,
@@ -57,25 +62,33 @@ pub enum QueuedEvent {
     },
 }
 
+impl QueuedEvent {
+    fn kafka_payload(&self) -> collector_message::Payload {
+        match self {
+            Self::WebEvent { row, .. } => collector_message::Payload::WebEvent((**row).clone()),
+            Self::ModsEvent { row, .. } => collector_message::Payload::ModsEvent(row.clone()),
+            Self::ErrorOccurrenceV3 { row, .. } => {
+                collector_message::Payload::ErrorOccurrence((**row).clone())
+            }
+            Self::WebVital { row, .. } => collector_message::Payload::WebVital(row.clone()),
+        }
+    }
+}
+
 pub enum QueueError {
     Full,
     Closed,
 }
 
 #[derive(Debug, Default)]
-struct InMemoryBatch {
+struct TinybirdBatch {
     web_events: Vec<(WebEventRow, Option<TrackingContext>)>,
     mods_events: Vec<(ModsEventRow, Option<TrackingContext>)>,
-    error_occurrences_v3: Vec<(
-        ErrorOccurrenceV3Row,
-        ErrorLanguage,
-        ProjectGrouping,
-        Option<TrackingContext>,
-    )>,
+    error_occurrences_v3: Vec<(ErrorOccurrenceV3Row, Option<TrackingContext>)>,
     web_vitals: Vec<(WebVitalRow, Option<TrackingContext>)>,
 }
 
-impl InMemoryBatch {
+impl TinybirdBatch {
     fn is_empty(&self) -> bool {
         self.web_events.is_empty()
             && self.mods_events.is_empty()
@@ -96,12 +109,10 @@ impl InMemoryBatch {
             QueuedEvent::ModsEvent { row, tracking } => self.mods_events.push((row, tracking)),
             QueuedEvent::ErrorOccurrenceV3 {
                 row,
-                language,
-                grouping,
+                language: _,
+                grouping: _,
                 tracking,
-            } => self
-                .error_occurrences_v3
-                .push((*row, language, grouping, tracking)),
+            } => self.error_occurrences_v3.push((*row, tracking)),
             QueuedEvent::WebVital { row, tracking } => self.web_vitals.push((row, tracking)),
         }
     }
@@ -131,7 +142,7 @@ impl InMemoryBatch {
 
         count_usage!(&self.web_events, events);
         count_usage!(&self.mods_events, events);
-        for (_, _, _, ctx) in &self.error_occurrences_v3 {
+        for (_, ctx) in &self.error_occurrences_v3 {
             if let Some(ctx) = ctx {
                 usage
                     .entry(Arc::clone(&ctx.owner_id))
@@ -150,27 +161,22 @@ impl InMemoryBatch {
 }
 
 #[derive(Debug, Default)]
-struct BatchSendResult {
+struct TinybirdBatchSendResult {
     failed_web_events: Vec<(WebEventRow, Option<TrackingContext>)>,
     failed_mods_events: Vec<(ModsEventRow, Option<TrackingContext>)>,
-    failed_error_occurrences_v3: Vec<(
-        ErrorOccurrenceV3Row,
-        ErrorLanguage,
-        ProjectGrouping,
-        Option<TrackingContext>,
-    )>,
+    failed_error_occurrences_v3: Vec<(ErrorOccurrenceV3Row, Option<TrackingContext>)>,
     failed_web_vitals: Vec<(WebVitalRow, Option<TrackingContext>)>,
     had_permanent_failure: bool,
     errors: Vec<String>,
 }
 
-impl BatchSendResult {
+impl TinybirdBatchSendResult {
     fn has_failures(&self) -> bool {
         self.failure_count() > 0
     }
 
-    fn into_in_memory_batch(self) -> InMemoryBatch {
-        InMemoryBatch {
+    fn into_tinybird_batch(self) -> TinybirdBatch {
+        TinybirdBatch {
             web_events: self.failed_web_events,
             mods_events: self.failed_mods_events,
             error_occurrences_v3: self.failed_error_occurrences_v3,
@@ -195,7 +201,7 @@ impl BatchSendResult {
 }
 
 fn record_batch_error(
-    result: &mut BatchSendResult,
+    result: &mut TinybirdBatchSendResult,
     datasource: &'static str,
     rows: usize,
     error: &crate::tinybird::TinybirdError,
@@ -210,20 +216,16 @@ fn record_batch_error(
         .push(format!("{datasource} rows={rows} {permanence}: {error}"));
 }
 
-fn record_kafka_error(result: &mut BatchSendResult, datasource: &str, rows: usize, error: &str) {
-    result
-        .errors
-        .push(format!("{datasource} rows={rows} transient Kafka: {error}"));
-}
-
 pub struct BatchQueue {
     tinybird: Arc<TinybirdClient>,
     polar: Option<Arc<PolarClient>>,
     mappings: Option<Arc<MappingResolver>>,
     event_publisher: Arc<crate::kafka::EventPublisher>,
     sender: mpsc::Sender<QueuedEvent>,
-    in_memory_batch: Arc<Mutex<InMemoryBatch>>,
-    flush_lock: Arc<Mutex<()>>,
+    tinybird_batch: Arc<Mutex<TinybirdBatch>>,
+    tinybird_flush_lock: Arc<Mutex<()>>,
+    pending_kafka: AtomicUsize,
+    kafka_drained: Notify,
 }
 
 impl BatchQueue {
@@ -234,8 +236,9 @@ impl BatchQueue {
         event_publisher: Arc<crate::kafka::EventPublisher>,
     ) -> Arc<Self> {
         let (sender, receiver) = mpsc::channel(CHANNEL_CAPACITY);
-        let in_memory_batch = Arc::new(Mutex::new(InMemoryBatch::default()));
-        let flush_lock = Arc::new(Mutex::new(()));
+        let (kafka_sender, kafka_receiver) = mpsc::channel(CHANNEL_CAPACITY);
+        let tinybird_batch = Arc::new(Mutex::new(TinybirdBatch::default()));
+        let tinybird_flush_lock = Arc::new(Mutex::new(()));
 
         let queue = Arc::new(Self {
             tinybird,
@@ -243,20 +246,27 @@ impl BatchQueue {
             mappings,
             event_publisher,
             sender,
-            in_memory_batch,
-            flush_lock,
+            tinybird_batch,
+            tinybird_flush_lock,
+            pending_kafka: AtomicUsize::new(0),
+            kafka_drained: Notify::new(),
         });
 
-        queue.start_batch_processor(receiver);
-        queue.start_batch_flusher();
+        queue.start_event_processor(receiver, kafka_sender);
+        queue.start_kafka_publisher(kafka_receiver);
+        queue.start_tinybird_batch_flusher();
 
         queue
     }
 
     pub fn queue_event(&self, event: QueuedEvent) -> Result<(), QueueError> {
-        self.sender.try_send(event).map_err(|error| match error {
-            mpsc::error::TrySendError::Full(_) => QueueError::Full,
-            mpsc::error::TrySendError::Closed(_) => QueueError::Closed,
+        self.pending_kafka.fetch_add(1, Ordering::Relaxed);
+        self.sender.try_send(event).map_err(|error| {
+            self.finish_kafka_event();
+            match error {
+                mpsc::error::TrySendError::Full(_) => QueueError::Full,
+                mpsc::error::TrySendError::Closed(_) => QueueError::Closed,
+            }
         })
     }
 
@@ -290,47 +300,103 @@ impl BatchQueue {
     }
 
     pub async fn current_batch_size(&self) -> usize {
-        self.in_memory_batch.lock().await.total_count()
+        self.tinybird_batch.lock().await.total_count()
+    }
+
+    fn finish_kafka_event(&self) {
+        if self.pending_kafka.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.kafka_drained.notify_waiters();
+        }
+    }
+
+    pub(crate) async fn drain(&self) {
+        loop {
+            let notified = self.kafka_drained.notified();
+            if self.pending_kafka.load(Ordering::Acquire) == 0 {
+                break;
+            }
+            notified.await;
+        }
+        self.flush_tinybird_batch().await;
     }
 
     fn is_channel_under_pressure(&self) -> bool {
         self.sender.capacity() < (CHANNEL_CAPACITY - CHANNEL_BACKPRESSURE_THRESHOLD)
     }
 
-    fn start_batch_processor(self: &Arc<Self>, mut receiver: mpsc::Receiver<QueuedEvent>) {
+    fn start_event_processor(
+        self: &Arc<Self>,
+        receiver: mpsc::Receiver<QueuedEvent>,
+        kafka_sender: mpsc::Sender<collector_message::Payload>,
+    ) {
         let queue = Arc::clone(self);
         tokio::spawn(async move {
-            while let Some(event) = receiver.recv().await {
-                let should_flush = {
-                    let mut batch = queue.in_memory_batch.lock().await;
-                    batch.push(event);
-                    batch.total_count() >= MAX_BATCH_SIZE
-                        || (queue.is_channel_under_pressure() && batch.total_count() >= 100)
-                };
+            futures_util::stream::unfold(receiver, |mut receiver| async move {
+                receiver.recv().await.map(|event| (event, receiver))
+            })
+            .for_each_concurrent(EVENT_PROCESSING_CONCURRENCY, |event| {
+                let queue = Arc::clone(&queue);
+                let kafka_sender = kafka_sender.clone();
+                async move {
+                    let event = queue.enrich_event(event).await;
+                    let payload = event.kafka_payload();
+                    let should_flush = {
+                        let mut batch = queue.tinybird_batch.lock().await;
+                        batch.push(event);
+                        batch.total_count() >= TINYBIRD_MAX_BATCH_SIZE
+                            || (queue.is_channel_under_pressure() && batch.total_count() >= 100)
+                    };
 
-                if should_flush {
-                    warn!("Batch size limit or backpressure detected, triggering early flush");
-                    queue.flush_in_memory_batch().await;
+                    if kafka_sender.send(payload).await.is_err() {
+                        error!("Kafka publisher queue closed; dropping event");
+                        queue.finish_kafka_event();
+                    }
+
+                    if should_flush {
+                        warn!("Tinybird batch size limit or backpressure detected, triggering early flush");
+                        queue.flush_tinybird_batch().await;
+                    }
                 }
-            }
+            })
+            .await;
         });
     }
 
-    fn start_batch_flusher(self: &Arc<Self>) {
+    fn start_kafka_publisher(
+        self: &Arc<Self>,
+        receiver: mpsc::Receiver<collector_message::Payload>,
+    ) {
+        let queue = Arc::clone(self);
+        tokio::spawn(async move {
+            futures_util::stream::unfold(receiver, |mut receiver| async move {
+                receiver.recv().await.map(|payload| (payload, receiver))
+            })
+            .for_each_concurrent(KAFKA_PUBLISH_CONCURRENCY, |payload| {
+                let queue = Arc::clone(&queue);
+                async move {
+                    queue.publish_kafka_with_retry(payload).await;
+                    queue.finish_kafka_event();
+                }
+            })
+            .await;
+        });
+    }
+
+    fn start_tinybird_batch_flusher(self: &Arc<Self>) {
         let queue = Arc::clone(self);
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(BATCH_WINDOW).await;
-                queue.flush_in_memory_batch().await;
+                tokio::time::sleep(TINYBIRD_BATCH_WINDOW).await;
+                queue.flush_tinybird_batch().await;
             }
         });
     }
 
-    pub(crate) async fn flush_in_memory_batch(&self) {
-        let _flush_guard = self.flush_lock.lock().await;
+    async fn flush_tinybird_batch(&self) {
+        let _flush_guard = self.tinybird_flush_lock.lock().await;
 
         let batch = {
-            let mut current = self.in_memory_batch.lock().await;
+            let mut current = self.tinybird_batch.lock().await;
             if current.is_empty() {
                 return;
             }
@@ -342,7 +408,7 @@ impl BatchQueue {
 
         let usage = batch.aggregate_usage();
 
-        self.send_batch_with_retry(batch).await;
+        self.send_tinybird_batch_with_retry(batch).await;
 
         if let Some(polar) = &self.polar
             && !usage.is_empty()
@@ -372,12 +438,12 @@ impl BatchQueue {
         Duration::from_millis(capped.saturating_sub(jitter))
     }
 
-    async fn send_batch_with_retry(&self, batch: InMemoryBatch) {
+    async fn send_tinybird_batch_with_retry(&self, batch: TinybirdBatch) {
         let mut retry_count = 0u32;
         let mut current_batch = batch;
 
         loop {
-            let result = self.send_grouped_batch(current_batch).await;
+            let result = self.send_tinybird_batch(current_batch).await;
 
             if !result.has_failures() {
                 return;
@@ -407,7 +473,7 @@ impl BatchQueue {
             }
 
             let error_summary = result.error_summary();
-            current_batch = result.into_in_memory_batch();
+            current_batch = result.into_tinybird_batch();
 
             let delay = Self::calculate_retry_delay(retry_count);
             warn!(
@@ -422,10 +488,10 @@ impl BatchQueue {
         }
     }
 
-    async fn send_grouped_batch(&self, batch: InMemoryBatch) -> BatchSendResult {
-        let mut result = BatchSendResult::default();
+    async fn send_tinybird_batch(&self, batch: TinybirdBatch) -> TinybirdBatchSendResult {
+        let mut result = TinybirdBatchSendResult::default();
 
-        let InMemoryBatch {
+        let TinybirdBatch {
             web_events,
             mods_events,
             error_occurrences_v3,
@@ -434,19 +500,9 @@ impl BatchQueue {
 
         let web_event_rows: Vec<_> = web_events.iter().map(|(e, _)| e).collect();
         let mods_event_rows: Vec<_> = mods_events.iter().map(|(e, _)| e).collect();
-        let error_occurrences_v3 = self.enrich_error_occurrences_v3(error_occurrences_v3).await;
         let error_occurrence_v3_rows: Vec<_> =
-            error_occurrences_v3.iter().map(|(e, _, _, _)| e).collect();
+            error_occurrences_v3.iter().map(|(e, _)| e).collect();
         let web_vital_rows: Vec<_> = web_vitals.iter().map(|(e, _)| e).collect();
-
-        // This runs after sourcemap enrichment, so error messages contain the final mapped
-        // stacktrace and the group hash recalculated from it.
-        let (web_events_kafka, mods_events_kafka, errors_kafka, vitals_kafka) = tokio::join!(
-            self.publish_web_events(&web_event_rows),
-            self.publish_mods_events(&mods_event_rows),
-            self.publish_errors(&error_occurrence_v3_rows),
-            self.publish_vitals(&web_vital_rows),
-        );
 
         let (web_events_res, mods_events_res, error_occurrences_v3_res, web_vitals_res) = tokio::join!(
             async {
@@ -481,29 +537,23 @@ impl BatchQueue {
             },
         );
 
-        if web_events_res.is_err() || web_events_kafka.is_err() {
+        if web_events_res.is_err() {
             if let Err(e) = web_events_res {
                 record_batch_error(&mut result, "web_events", web_events.len(), &e);
                 result.had_permanent_failure |= !e.is_transient();
             }
-            if let Err(e) = web_events_kafka {
-                record_kafka_error(&mut result, "web_events", web_events.len(), &e);
-            }
             result.failed_web_events = web_events;
         }
 
-        if mods_events_res.is_err() || mods_events_kafka.is_err() {
+        if mods_events_res.is_err() {
             if let Err(e) = mods_events_res {
                 record_batch_error(&mut result, "mods_events", mods_events.len(), &e);
                 result.had_permanent_failure |= !e.is_transient();
             }
-            if let Err(e) = mods_events_kafka {
-                record_kafka_error(&mut result, "mods_events", mods_events.len(), &e);
-            }
             result.failed_mods_events = mods_events;
         }
 
-        if error_occurrences_v3_res.is_err() || errors_kafka.is_err() {
+        if error_occurrences_v3_res.is_err() {
             if let Err(e) = error_occurrences_v3_res {
                 record_batch_error(
                     &mut result,
@@ -513,24 +563,13 @@ impl BatchQueue {
                 );
                 result.had_permanent_failure |= !e.is_transient();
             }
-            if let Err(e) = errors_kafka {
-                record_kafka_error(
-                    &mut result,
-                    "error_tracking_v3",
-                    error_occurrences_v3.len(),
-                    &e,
-                );
-            }
             result.failed_error_occurrences_v3 = error_occurrences_v3;
         }
 
-        if web_vitals_res.is_err() || vitals_kafka.is_err() {
+        if web_vitals_res.is_err() {
             if let Err(e) = web_vitals_res {
                 record_batch_error(&mut result, "web_vitals", web_vitals.len(), &e);
                 result.had_permanent_failure |= !e.is_transient();
-            }
-            if let Err(e) = vitals_kafka {
-                record_kafka_error(&mut result, "web_vitals", web_vitals.len(), &e);
             }
             result.failed_web_vitals = web_vitals;
         }
@@ -538,78 +577,63 @@ impl BatchQueue {
         result
     }
 
-    async fn publish_web_events(&self, rows: &[&WebEventRow]) -> Result<(), String> {
-        self.event_publisher
-            .publish_all(
-                rows.iter()
-                    .map(|row| collector_message::Payload::WebEvent((**row).clone()))
-                    .collect(),
-            )
-            .await
-    }
-
-    async fn publish_mods_events(&self, rows: &[&ModsEventRow]) -> Result<(), String> {
-        self.event_publisher
-            .publish_all(
-                rows.iter()
-                    .map(|row| collector_message::Payload::ModsEvent((**row).clone()))
-                    .collect(),
-            )
-            .await
-    }
-
-    async fn publish_errors(&self, rows: &[&ErrorOccurrenceV3Row]) -> Result<(), String> {
-        self.event_publisher
-            .publish_all(
-                rows.iter()
-                    .map(|row| collector_message::Payload::ErrorOccurrence((**row).clone()))
-                    .collect(),
-            )
-            .await
-    }
-
-    async fn publish_vitals(&self, rows: &[&WebVitalRow]) -> Result<(), String> {
-        self.event_publisher
-            .publish_all(
-                rows.iter()
-                    .map(|row| collector_message::Payload::WebVital((**row).clone()))
-                    .collect(),
-            )
-            .await
-    }
-
-    async fn enrich_error_occurrences_v3(
-        &self,
-        rows: Vec<(
-            ErrorOccurrenceV3Row,
-            ErrorLanguage,
-            ProjectGrouping,
-            Option<TrackingContext>,
-        )>,
-    ) -> Vec<(
-        ErrorOccurrenceV3Row,
-        ErrorLanguage,
-        ProjectGrouping,
-        Option<TrackingContext>,
-    )> {
-        if rows.is_empty() {
-            return rows;
+    async fn publish_kafka_with_retry(&self, payload: collector_message::Payload) {
+        let mut retry_count = 0u32;
+        loop {
+            match self.event_publisher.publish(payload.clone()).await {
+                Ok(()) => return,
+                Err(error) => {
+                    retry_count += 1;
+                    if retry_count >= MAX_RETRIES {
+                        error!(
+                            %error,
+                            "Dropping Kafka event after {} delivery attempts",
+                            retry_count
+                        );
+                        return;
+                    }
+                    let delay = Self::calculate_retry_delay(retry_count);
+                    warn!(
+                        %error,
+                        "Kafka delivery failed (attempt {}), retrying in {:?}",
+                        retry_count,
+                        delay
+                    );
+                    tokio::time::sleep(delay).await;
+                }
+            }
         }
+    }
+
+    async fn enrich_event(&self, event: QueuedEvent) -> QueuedEvent {
+        let QueuedEvent::ErrorOccurrenceV3 {
+            row,
+            language,
+            grouping,
+            tracking,
+        } = event
+        else {
+            return event;
+        };
 
         let Some(resolver) = self.mappings.as_deref() else {
-            return rows;
-        };
-        let mut enriched = Vec::with_capacity(rows.len());
-        for (row, language, grouping, tracking) in rows {
-            enriched.push((
-                crate::error_tracking::v3::enrich_with_mapping(resolver, row, language, &grouping)
-                    .await,
+            return QueuedEvent::ErrorOccurrenceV3 {
+                row,
                 language,
                 grouping,
                 tracking,
-            ));
+            };
+        };
+
+        let row =
+            crate::error_tracking::v3::enrich_with_mapping(resolver, *row, language, &grouping)
+                .await;
+        QueuedEvent::ErrorOccurrenceV3 {
+            row: Box::new(row),
+            language,
+            grouping,
+            tracking,
         }
-        enriched
     }
 }
 

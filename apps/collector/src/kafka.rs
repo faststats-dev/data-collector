@@ -5,6 +5,9 @@ use std::time::Duration;
 use tracing::info;
 
 const DEFAULT_MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024 + 256 * 1024;
+// Five seconds is not long enough for an idempotent producer to acquire its
+// producer ID while a managed Kafka cluster is starting or changing leaders.
+const DEFAULT_DELIVERY_TIMEOUT_MS: u32 = 60_000;
 
 #[derive(Clone)]
 pub struct Publisher {
@@ -18,10 +21,12 @@ impl Publisher {
             .ok()
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(DEFAULT_MAX_MESSAGE_BYTES);
+        let delivery_timeout_ms =
+            optional_u32_env("KAFKA_DELIVERY_TIMEOUT_MS", DEFAULT_DELIVERY_TIMEOUT_MS)?;
         let mut config = ClientConfig::new();
         config
             .set("bootstrap.servers", brokers)
-            .set("message.timeout.ms", "5000")
+            .set("delivery.timeout.ms", delivery_timeout_ms.to_string())
             .set("enable.idempotence", "true")
             .set("acks", "all")
             .set("compression.type", "zstd")
@@ -70,6 +75,16 @@ fn apply_security_config(config: &mut ClientConfig) -> Result<(), String> {
 
 fn required_env(name: &str) -> Result<String, String> {
     std::env::var(name).map_err(|_| format!("{name} must be set when using SASL"))
+}
+
+fn optional_u32_env(name: &str, default: u32) -> Result<u32, String> {
+    match std::env::var(name) {
+        Ok(value) => value
+            .parse::<u32>()
+            .map_err(|_| format!("{name} must be an integer between 0 and {}", u32::MAX)),
+        Err(std::env::VarError::NotPresent) => Ok(default),
+        Err(error) => Err(format!("Invalid {name}: {error}")),
+    }
 }
 
 #[derive(Clone)]

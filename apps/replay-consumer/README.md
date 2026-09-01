@@ -53,6 +53,10 @@ For a SASL/TLS cluster such as Aiven, set `KAFKA_SECURITY_PROTOCOL=SASL_SSL`,
 `KAFKA_SSL_CA_LOCATION` (the path to the provider's CA certificate). Plaintext remains the
 default for local development.
 
+The collector allows Kafka up to 60 seconds to acknowledge a message so an idempotent producer
+can recover while a managed broker starts or changes leaders. Override this with
+`KAFKA_DELIVERY_TIMEOUT_MS` when a deployment needs a different delivery deadline.
+
 Build the worker image from the repository root so workspace crates are available:
 
 ```sh

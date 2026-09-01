@@ -1,0 +1,449 @@
+{
+  "$schema": "https://api.northflank.com/v1/schemas/template",
+  "apiVersion": "v1.2",
+  "spec": {
+    "kind": "Workflow",
+    "spec": {
+      "type": "sequential",
+      "context": {
+        "projectId": "data-collection"
+      },
+      "steps": [
+        {
+          "kind": "OpenTofu",
+          "ref": "collector-events-topic",
+          "spec": {
+            "stateKey": "5e3c4ee5-3dce-4425-bfe2-d887e8164326",
+            "usePlan": false,
+            "spec": {
+              "provider": {
+                "aiven": {
+                  "integrationId": "aiven"
+                }
+              },
+              "resource": {
+                "aiven_kafka_topic": {
+                  "web_events": {
+                    "project": "faststats",
+                    "service_name": "trying-out-kafka",
+                    "topic_name": "web-events-v1",
+                    "partitions": 2,
+                    "replication": 2,
+                    "topic_description": "Versioned web analytics events"
+                  },
+                  "mods_events": {
+                    "project": "faststats",
+                    "service_name": "trying-out-kafka",
+                    "topic_name": "mods-events-v1",
+                    "partitions": 2,
+                    "replication": 2,
+                    "topic_description": "Versioned mod and server analytics events"
+                  },
+                  "error_occurrences": {
+                    "project": "faststats",
+                    "service_name": "trying-out-kafka",
+                    "topic_name": "error-occurrences-v1",
+                    "partitions": 2,
+                    "replication": 2,
+                    "topic_description": "Versioned enriched error occurrences"
+                  },
+                  "web_vitals": {
+                    "project": "faststats",
+                    "service_name": "trying-out-kafka",
+                    "topic_name": "web-vitals-v1",
+                    "partitions": 2,
+                    "replication": 2,
+                    "topic_description": "Versioned web vital measurements"
+                  }
+                },
+                "aiven_kafka_schema_configuration": {
+                  "collector_schemas": {
+                    "project": "faststats",
+                    "service_name": "trying-out-kafka",
+                    "compatibility_level": "BACKWARD_TRANSITIVE"
+                  }
+                },
+                "aiven_kafka_schema": {
+                  "web_events": {
+                    "project": "faststats",
+                    "service_name": "trying-out-kafka",
+                    "subject_name": "web-events-v1-value",
+                    "schema_type": "JSON",
+                    "compatibility_level": "BACKWARD_TRANSITIVE",
+                    "schema": "{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"title\":\"FastStats web event v1\",\"type\":\"object\",\"additionalProperties\":false,\"required\":[\"schema_version\",\"message_id\",\"type\",\"data\"],\"properties\":{\"schema_version\":{\"const\":1},\"message_id\":{\"type\":\"string\",\"format\":\"uuid\"},\"type\":{\"const\":\"web_event\"},\"data\":{\"type\":\"object\",\"additionalProperties\":false,\"required\":[\"id\",\"project_id\",\"user_id\",\"person_id\",\"external_id\",\"is_identified\",\"session_id\",\"event\",\"browser\",\"browser_version\",\"device\",\"os\",\"os_version\",\"referrer\",\"utm_source\",\"utm_medium\",\"utm_campaign\",\"utm_term\",\"utm_content\",\"title\",\"page\",\"url\",\"country\",\"cookieless\",\"time_on_page\",\"session_duration\",\"properties\",\"created_at\"],\"properties\":{\"id\":{\"type\":\"string\",\"format\":\"uuid\"},\"project_id\":{\"type\":\"string\",\"format\":\"uuid\"},\"user_id\":{\"type\":[\"string\",\"null\"]},\"person_id\":{\"type\":[\"string\",\"null\"]},\"external_id\":{\"type\":[\"string\",\"null\"]},\"is_identified\":{\"type\":\"boolean\"},\"session_id\":{\"type\":[\"string\",\"null\"]},\"event\":{\"type\":[\"string\",\"null\"]},\"browser\":{\"type\":[\"string\",\"null\"]},\"browser_version\":{\"type\":[\"string\",\"null\"]},\"device\":{\"type\":[\"string\",\"null\"]},\"os\":{\"type\":[\"string\",\"null\"]},\"os_version\":{\"type\":[\"string\",\"null\"]},\"referrer\":{\"type\":[\"string\",\"null\"]},\"utm_source\":{\"type\":[\"string\",\"null\"]},\"utm_medium\":{\"type\":[\"string\",\"null\"]},\"utm_campaign\":{\"type\":[\"string\",\"null\"]},\"utm_term\":{\"type\":[\"string\",\"null\"]},\"utm_content\":{\"type\":[\"string\",\"null\"]},\"title\":{\"type\":[\"string\",\"null\"]},\"page\":{\"type\":[\"string\",\"null\"]},\"url\":{\"type\":[\"string\",\"null\"]},\"country\":{\"type\":[\"string\",\"null\"]},\"cookieless\":{\"type\":[\"boolean\",\"null\"]},\"time_on_page\":{\"type\":[\"integer\",\"null\"],\"minimum\":0},\"session_duration\":{\"type\":[\"integer\",\"null\"],\"minimum\":0},\"properties\":{\"type\":\"string\"},\"created_at\":{\"type\":\"integer\"}}}}}"
+                  },
+                  "mods_events": {
+                    "project": "faststats",
+                    "service_name": "trying-out-kafka",
+                    "subject_name": "mods-events-v1-value",
+                    "schema_type": "JSON",
+                    "compatibility_level": "BACKWARD_TRANSITIVE",
+                    "schema": "{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"title\":\"FastStats mods event v1\",\"type\":\"object\",\"additionalProperties\":false,\"required\":[\"schema_version\",\"message_id\",\"type\",\"data\"],\"properties\":{\"schema_version\":{\"const\":1},\"message_id\":{\"type\":\"string\",\"format\":\"uuid\"},\"type\":{\"const\":\"mods_event\"},\"data\":{\"type\":\"object\",\"additionalProperties\":false,\"required\":[\"id\",\"project_id\",\"server_id\",\"player_count\",\"online_mode\",\"client\",\"plugin_version\",\"minecraft_version\",\"server_type\",\"platform_version\",\"java_version\",\"java_vendor\",\"os_name\",\"os_arch\",\"os_version\",\"core_count\",\"country\",\"custom\",\"created_at\"],\"properties\":{\"id\":{\"type\":\"string\",\"format\":\"uuid\"},\"project_id\":{\"type\":\"string\",\"format\":\"uuid\"},\"server_id\":{\"type\":\"string\",\"format\":\"uuid\"},\"player_count\":{\"type\":[\"number\",\"null\"]},\"online_mode\":{\"type\":[\"boolean\",\"null\"]},\"client\":{\"type\":[\"boolean\",\"null\"]},\"plugin_version\":{\"type\":[\"string\",\"null\"]},\"minecraft_version\":{\"type\":[\"string\",\"null\"]},\"server_type\":{\"type\":[\"string\",\"null\"]},\"platform_version\":{\"type\":[\"string\",\"null\"]},\"java_version\":{\"type\":[\"string\",\"null\"]},\"java_vendor\":{\"type\":[\"string\",\"null\"]},\"os_name\":{\"type\":[\"string\",\"null\"]},\"os_arch\":{\"type\":[\"string\",\"null\"]},\"os_version\":{\"type\":[\"string\",\"null\"]},\"core_count\":{\"type\":[\"integer\",\"null\"],\"minimum\":0,\"maximum\":65535},\"country\":{\"type\":[\"string\",\"null\"]},\"custom\":{\"type\":\"string\"},\"created_at\":{\"type\":\"integer\"}}}}}"
+                  },
+                  "error_occurrences": {
+                    "project": "faststats",
+                    "service_name": "trying-out-kafka",
+                    "subject_name": "error-occurrences-v1-value",
+                    "schema_type": "JSON",
+                    "compatibility_level": "BACKWARD_TRANSITIVE",
+                    "schema": "{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"title\":\"FastStats error occurrence v1\",\"type\":\"object\",\"additionalProperties\":false,\"required\":[\"schema_version\",\"message_id\",\"type\",\"data\"],\"properties\":{\"schema_version\":{\"const\":1},\"message_id\":{\"type\":\"string\",\"format\":\"uuid\"},\"type\":{\"const\":\"error_occurrence\"},\"data\":{\"type\":\"object\",\"additionalProperties\":false,\"required\":[\"timestamp\",\"project_id\",\"environment\",\"language\",\"release\",\"group_hash\",\"exact_hash\",\"error_type\",\"error_message\",\"handled\",\"stacktrace\",\"identifier\",\"session_id\",\"window_id\",\"sdk_name\",\"sdk_version\",\"count\",\"context\"],\"properties\":{\"timestamp\":{\"type\":\"integer\"},\"project_id\":{\"type\":\"string\",\"format\":\"uuid\"},\"environment\":{\"type\":\"string\"},\"language\":{\"type\":\"string\"},\"release\":{\"type\":\"string\"},\"group_hash\":{\"type\":\"string\"},\"exact_hash\":{\"type\":\"string\"},\"error_type\":{\"type\":\"string\"},\"error_message\":{\"type\":\"string\"},\"handled\":{\"type\":\"boolean\"},\"stacktrace\":{\"type\":\"string\"},\"mapped_stacktrace\":{\"type\":\"string\"},\"mapping_used\":{\"type\":\"string\"},\"identifier\":{\"type\":\"string\"},\"session_id\":{\"type\":\"string\"},\"window_id\":{\"type\":\"string\"},\"sdk_name\":{\"type\":\"string\"},\"sdk_version\":{\"type\":\"string\"},\"count\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":4294967295},\"context\":{\"type\":\"string\"}}}}}"
+                  },
+                  "web_vitals": {
+                    "project": "faststats",
+                    "service_name": "trying-out-kafka",
+                    "subject_name": "web-vitals-v1-value",
+                    "schema_type": "JSON",
+                    "compatibility_level": "BACKWARD_TRANSITIVE",
+                    "schema": "{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"title\":\"FastStats web vital v1\",\"type\":\"object\",\"additionalProperties\":false,\"required\":[\"schema_version\",\"message_id\",\"type\",\"data\"],\"properties\":{\"schema_version\":{\"const\":1},\"message_id\":{\"type\":\"string\",\"format\":\"uuid\"},\"type\":{\"const\":\"web_vital\"},\"data\":{\"type\":\"object\",\"additionalProperties\":false,\"required\":[\"id\",\"project_id\",\"metric\",\"value\",\"device\",\"country\",\"os\",\"os_version\",\"browser\",\"browser_version\",\"url\",\"attributes\",\"session_id\",\"created_at\"],\"properties\":{\"id\":{\"type\":\"string\",\"format\":\"uuid\"},\"project_id\":{\"type\":\"string\",\"format\":\"uuid\"},\"metric\":{\"type\":\"string\"},\"value\":{\"type\":\"number\"},\"device\":{\"type\":[\"string\",\"null\"]},\"country\":{\"type\":[\"string\",\"null\"]},\"os\":{\"type\":[\"string\",\"null\"]},\"os_version\":{\"type\":[\"string\",\"null\"]},\"browser\":{\"type\":[\"string\",\"null\"]},\"browser_version\":{\"type\":[\"string\",\"null\"]},\"url\":{\"type\":\"string\"},\"attributes\":{\"type\":\"string\"},\"session_id\":{\"type\":[\"string\",\"null\"]},\"created_at\":{\"type\":\"integer\"}}}}}"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "kind": "OpenTofu",
+          "ref": "replay-snapshot-topic",
+          "spec": {
+            "stateKey": "1783e86f-51a4-47cc-9372-b1bd02f3a91e",
+            "usePlan": false,
+            "spec": {
+              "provider": {
+                "aiven": {
+                  "integrationId": "aiven"
+                }
+              },
+              "resource": {
+                "aiven_kafka_topic": {
+                  "replay_snapshot": {
+                    "project": "faststats",
+                    "service_name": "trying-out-kafka",
+                    "topic_name": "replay-snapshot",
+                    "partitions": 2,
+                    "replication": 2,
+                    "topic_description": "Replay snapshots and session patch commands"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "kind": "OpenTofu",
+          "ref": "collector-kafka-user",
+          "condition": "success",
+          "spec": {
+            "stateKey": "e3104133-1027-4d11-a535-ed973d720e44",
+            "usePlan": false,
+            "spec": {
+              "provider": {
+                "aiven": {
+                  "integrationId": "aiven"
+                }
+              },
+              "resource": {
+                "aiven_kafka_user": {
+                  "user": {
+                    "project": "faststats",
+                    "service_name": "trying-out-kafka",
+                    "username": "faststats-collector"
+                  }
+                }
+              },
+              "output": {
+                "password": {
+                  "value": "\\${aiven_kafka_user.user.password}",
+                  "sensitive": true
+                }
+              }
+            }
+          }
+        },
+        {
+          "kind": "OpenTofu",
+          "ref": "replay-consumer-kafka-user",
+          "condition": "success",
+          "spec": {
+            "stateKey": "ce460679-e0df-4440-b648-b8f46f49f187",
+            "usePlan": false,
+            "spec": {
+              "provider": {
+                "aiven": {
+                  "integrationId": "aiven"
+                }
+              },
+              "resource": {
+                "aiven_kafka_user": {
+                  "user": {
+                    "project": "faststats",
+                    "service_name": "trying-out-kafka",
+                    "username": "faststats-replay-consumer"
+                  }
+                }
+              },
+              "output": {
+                "password": {
+                  "value": "\\${aiven_kafka_user.user.password}",
+                  "sensitive": true
+                }
+              }
+            }
+          }
+        },
+        {
+          "kind": "OpenTofu",
+          "ref": "collector-events-write-acl",
+          "spec": {
+            "stateKey": "5af9fc53-6285-4985-907d-0f4b0cd1aa57",
+            "usePlan": false,
+            "spec": {
+              "provider": {
+                "aiven": {
+                  "integrationId": "aiven"
+                }
+              },
+              "resource": {
+                "aiven_kafka_acl": {
+                  "web_events": {
+                    "project": "faststats",
+                    "service_name": "trying-out-kafka",
+                    "topic": "web-events-v1",
+                    "permission": "write",
+                    "username": "faststats-collector"
+                  },
+                  "mods_events": {
+                    "project": "faststats",
+                    "service_name": "trying-out-kafka",
+                    "topic": "mods-events-v1",
+                    "permission": "write",
+                    "username": "faststats-collector"
+                  },
+                  "error_occurrences": {
+                    "project": "faststats",
+                    "service_name": "trying-out-kafka",
+                    "topic": "error-occurrences-v1",
+                    "permission": "write",
+                    "username": "faststats-collector"
+                  },
+                  "web_vitals": {
+                    "project": "faststats",
+                    "service_name": "trying-out-kafka",
+                    "topic": "web-vitals-v1",
+                    "permission": "write",
+                    "username": "faststats-collector"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "kind": "OpenTofu",
+          "ref": "collector-replay-write-acl",
+          "spec": {
+            "stateKey": "7cf21284-e539-46ac-9eb6-3558609a1c87",
+            "usePlan": false,
+            "spec": {
+              "provider": {
+                "aiven": {
+                  "integrationId": "aiven"
+                }
+              },
+              "resource": {
+                "aiven_kafka_acl": {
+                  "acl": {
+                    "project": "faststats",
+                    "service_name": "trying-out-kafka",
+                    "topic": "replay-snapshot",
+                    "permission": "write",
+                    "username": "faststats-collector"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "kind": "OpenTofu",
+          "ref": "replay-consumer-read-acl",
+          "spec": {
+            "stateKey": "d99c989f-5c93-4ac4-b34c-53097f60e388",
+            "usePlan": false,
+            "spec": {
+              "provider": {
+                "aiven": {
+                  "integrationId": "aiven"
+                }
+              },
+              "resource": {
+                "aiven_kafka_acl": {
+                  "acl": {
+                    "project": "faststats",
+                    "service_name": "trying-out-kafka",
+                    "topic": "replay-snapshot",
+                    "permission": "read",
+                    "username": "faststats-replay-consumer"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "kind": "CombinedService",
+          "ref": "collector-service",
+          "updateMode": "patch",
+          "spec": {
+            "name": "collector",
+            "description": "FastStats HTTP event collector",
+            "projectId": "data-collection",
+            "billing": {
+              "deploymentPlan": "nf-compute-20"
+            },
+            "deployment": {
+              "instances": 1,
+              "docker": {
+                "configType": "default"
+              },
+              "storage": {
+                "ephemeralStorage": {
+                  "storageSize": 1024
+                }
+              }
+            },
+            "ports": [
+              {
+                "name": "http",
+                "internalPort": 8080,
+                "protocol": "HTTP",
+                "public": true
+              },
+              {
+                "name": "metrics",
+                "internalPort": 9091,
+                "protocol": "HTTP",
+                "public": false
+              }
+            ],
+            "vcsData": {
+              "projectUrl": "https://github.com/faststats-dev/data-collector",
+              "projectType": "github",
+              "projectBranch": "replay-kafka"
+            },
+            "buildSettings": {
+              "dockerfile": {
+                "buildEngine": "buildkit",
+                "dockerFilePath": "/apps/collector/Dockerfile",
+                "dockerWorkDir": "/"
+              }
+            }
+          }
+        },
+        {
+          "kind": "CombinedService",
+          "ref": "replay-consumer-service",
+          "updateMode": "patch",
+          "spec": {
+            "name": "replay-consumer",
+            "description": "FastStats Kafka replay persistence worker",
+            "projectId": "data-collection",
+            "billing": {
+              "deploymentPlan": "nf-compute-20"
+            },
+            "deployment": {
+              "instances": 1,
+              "docker": {
+                "configType": "default"
+              },
+              "storage": {
+                "ephemeralStorage": {
+                  "storageSize": 1024
+                }
+              }
+            },
+            "ports": [],
+            "vcsData": {
+              "projectUrl": "https://github.com/faststats-dev/data-collector",
+              "projectType": "github",
+              "projectBranch": "replay-kafka"
+            },
+            "buildSettings": {
+              "dockerfile": {
+                "buildEngine": "buildkit",
+                "dockerFilePath": "/apps/replay-consumer/Dockerfile",
+                "dockerWorkDir": "/"
+              }
+            }
+          }
+        },
+        {
+          "kind": "SecretGroup",
+          "ref": "collector-kafka-credentials",
+          "spec": {
+            "name": "Collector Kafka credentials",
+            "description": "Aiven credentials generated for the collector",
+            "projectId": "data-collection",
+            "type": "secret",
+            "secretType": "environment",
+            "priority": 20,
+            "restrictions": {
+              "restricted": true,
+              "nfObjects": [
+                {
+                  "id": "${refs.collector-service.id}",
+                  "type": "service"
+                }
+              ]
+            },
+            "secrets": {
+              "variables": {
+                "KAFKA_BROKERS": "trying-out-kafka-faststats.g.aivencloud.com:16195",
+                "KAFKA_SECURITY_PROTOCOL": "SASL_SSL",
+                "KAFKA_SASL_MECHANISM": "PLAIN",
+                "KAFKA_SASL_USERNAME": "faststats-collector",
+                "KAFKA_SASL_PASSWORD": "${refs.collector-kafka-user.outputs.password.value}",
+                "WEB_EVENTS_KAFKA_TOPIC": "web-events-v1",
+                "MODS_EVENTS_KAFKA_TOPIC": "mods-events-v1",
+                "ERROR_OCCURRENCES_KAFKA_TOPIC": "error-occurrences-v1",
+                "WEB_VITALS_KAFKA_TOPIC": "web-vitals-v1",
+                "REPLAY_KAFKA_TOPIC": "replay-snapshot"
+              }
+            }
+          }
+        },
+        {
+          "kind": "SecretGroup",
+          "ref": "replay-consumer-kafka-credentials",
+          "spec": {
+            "name": "Replay consumer Kafka credentials",
+            "description": "Aiven credentials generated for the replay consumer",
+            "projectId": "data-collection",
+            "type": "secret",
+            "secretType": "environment",
+            "priority": 20,
+            "restrictions": {
+              "restricted": true,
+              "nfObjects": [
+                {
+                  "id": "${refs.replay-consumer-service.id}",
+                  "type": "service"
+                }
+              ]
+            },
+            "secrets": {
+              "variables": {
+                "KAFKA_BROKERS": "trying-out-kafka-faststats.g.aivencloud.com:16195",
+                "KAFKA_SECURITY_PROTOCOL": "SASL_SSL",
+                "KAFKA_SASL_MECHANISM": "PLAIN",
+                "KAFKA_SASL_USERNAME": "faststats-replay-consumer",
+                "KAFKA_SASL_PASSWORD": "${refs.replay-consumer-kafka-user.outputs.password.value}",
+                "REPLAY_KAFKA_TOPIC": "replay-snapshot",
+                "REPLAY_KAFKA_GROUP_ID": "replay-consumer"
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

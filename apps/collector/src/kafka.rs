@@ -2,6 +2,7 @@ use futures_util::{StreamExt, TryStreamExt};
 use rdkafka::ClientConfig;
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use std::time::Duration;
+use tracing::info;
 
 const DEFAULT_MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024 + 256 * 1024;
 
@@ -21,6 +22,8 @@ impl Publisher {
         config
             .set("bootstrap.servers", brokers)
             .set("message.timeout.ms", "5000")
+            .set("enable.idempotence", "true")
+            .set("acks", "all")
             .set("compression.type", "zstd")
             .set("compression.level", "3")
             .set("linger.ms", "10")
@@ -72,21 +75,58 @@ fn required_env(name: &str) -> Result<String, String> {
 #[derive(Clone)]
 pub struct EventPublisher {
     publisher: Publisher,
-    topic: String,
+    topics: EventTopics,
+}
+
+#[derive(Clone)]
+struct EventTopics {
+    web_events: String,
+    mods_events: String,
+    error_occurrences: String,
+    web_vitals: String,
 }
 
 impl EventPublisher {
     pub fn from_env(publisher: Publisher) -> Self {
-        let topic = std::env::var(collector_message::TOPIC_ENV)
-            .unwrap_or_else(|_| collector_message::DEFAULT_TOPIC.into());
-        Self { publisher, topic }
+        let topics = EventTopics {
+            web_events: topic_from_env(
+                collector_message::WEB_EVENTS_TOPIC_ENV,
+                collector_message::DEFAULT_WEB_EVENTS_TOPIC,
+            ),
+            mods_events: topic_from_env(
+                collector_message::MODS_EVENTS_TOPIC_ENV,
+                collector_message::DEFAULT_MODS_EVENTS_TOPIC,
+            ),
+            error_occurrences: topic_from_env(
+                collector_message::ERROR_OCCURRENCES_TOPIC_ENV,
+                collector_message::DEFAULT_ERROR_OCCURRENCES_TOPIC,
+            ),
+            web_vitals: topic_from_env(
+                collector_message::WEB_VITALS_TOPIC_ENV,
+                collector_message::DEFAULT_WEB_VITALS_TOPIC,
+            ),
+        };
+        info!(
+            web_events = %topics.web_events,
+            mods_events = %topics.mods_events,
+            error_occurrences = %topics.error_occurrences,
+            web_vitals = %topics.web_vitals,
+            "Kafka event publishing enabled"
+        );
+        Self { publisher, topics }
     }
 
     pub async fn publish(&self, payload: collector_message::Payload) -> Result<(), String> {
         let message = collector_message::Message::new(payload);
+        let topic = match &message.payload {
+            collector_message::Payload::WebEvent(_) => &self.topics.web_events,
+            collector_message::Payload::ModsEvent(_) => &self.topics.mods_events,
+            collector_message::Payload::ErrorOccurrence(_) => &self.topics.error_occurrences,
+            collector_message::Payload::WebVital(_) => &self.topics.web_vitals,
+        };
         let key = message.key();
         let bytes = serde_json::to_vec(&message).map_err(|error| error.to_string())?;
-        self.publisher.publish(&self.topic, &key, &bytes).await
+        self.publisher.publish(topic, &key, &bytes).await
     }
 
     pub async fn publish_all(
@@ -100,4 +140,8 @@ impl EventPublisher {
             .await?;
         Ok(())
     }
+}
+
+fn topic_from_env(name: &str, default: &str) -> String {
+    std::env::var(name).unwrap_or_else(|_| default.into())
 }

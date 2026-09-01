@@ -36,7 +36,13 @@ services:
         kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists
           --topic replay-snapshot --partitions 3 --replication-factor 1;
         kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists
-          --topic collector-events-v1 --partitions 6 --replication-factor 1
+          --topic web-events-v1 --partitions 6 --replication-factor 1;
+        kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists
+          --topic mods-events-v1 --partitions 6 --replication-factor 1;
+        kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists
+          --topic error-occurrences-v1 --partitions 6 --replication-factor 1;
+        kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists
+          --topic web-vitals-v1 --partitions 6 --replication-factor 1
       '
 
   kafka-ui:

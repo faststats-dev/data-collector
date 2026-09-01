@@ -9,6 +9,11 @@ coverage.out
 backup.db
 .DS_STORE
 .env
+*.tfvars
+*.tfstate
+*.tfstate.*
+.terraform/
+tfplan
 
 # Agent Stuff
 

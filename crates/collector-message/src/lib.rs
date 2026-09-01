@@ -3,8 +3,15 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub const SCHEMA_VERSION: u16 = 1;
-pub const TOPIC_ENV: &str = "COLLECTOR_KAFKA_TOPIC";
-pub const DEFAULT_TOPIC: &str = "collector-events-v1";
+pub const WEB_EVENTS_TOPIC_ENV: &str = "WEB_EVENTS_KAFKA_TOPIC";
+pub const MODS_EVENTS_TOPIC_ENV: &str = "MODS_EVENTS_KAFKA_TOPIC";
+pub const ERROR_OCCURRENCES_TOPIC_ENV: &str = "ERROR_OCCURRENCES_KAFKA_TOPIC";
+pub const WEB_VITALS_TOPIC_ENV: &str = "WEB_VITALS_KAFKA_TOPIC";
+
+pub const DEFAULT_WEB_EVENTS_TOPIC: &str = "web-events-v1";
+pub const DEFAULT_MODS_EVENTS_TOPIC: &str = "mods-events-v1";
+pub const DEFAULT_ERROR_OCCURRENCES_TOPIC: &str = "error-occurrences-v1";
+pub const DEFAULT_WEB_VITALS_TOPIC: &str = "web-vitals-v1";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Message {
@@ -217,5 +224,17 @@ mod tests {
         assert_eq!(value["schema_version"], SCHEMA_VERSION);
         assert_eq!(value["type"], "web_event");
         assert!(value["data"].is_object());
+    }
+
+    #[test]
+    fn event_types_have_separate_topics() {
+        let topics = [
+            DEFAULT_WEB_EVENTS_TOPIC,
+            DEFAULT_MODS_EVENTS_TOPIC,
+            DEFAULT_ERROR_OCCURRENCES_TOPIC,
+            DEFAULT_WEB_VITALS_TOPIC,
+        ];
+        let unique: std::collections::HashSet<_> = topics.into_iter().collect();
+        assert_eq!(unique.len(), topics.len());
     }
 }

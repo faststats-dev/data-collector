@@ -16,10 +16,10 @@ Kafka itself has no schema registry in this setup. The wire contract is the serd
 in `crates/replay-message/src/lib.rs`; both producer and consumer depend on that crate. The
 topic setting is shared there too: `REPLAY_KAFKA_TOPIC`, defaulting to `replay-snapshot`.
 
-For local development, `docker-compose.yml` creates that topic with three partitions. In
-deployed environments the platform must create/configure the same topic; partition count,
-replication, retention, and a dead-letter policy are infrastructure concerns and are not
-currently declared in this repository.
+For local development, `docker-compose.yml` creates that topic with three partitions.
+Production topic partitioning, replication, retention, compression, and message-size limits
+are declared in `northflank/production.template.json` and reconciled with Aiven by a
+Northflank OpenTofu template.
 
 The collector uses Kafka's native Zstandard record-batch compression with a short batching
 window. Kafka handles decompression transparently, so messages remain readable in Kafka UI.

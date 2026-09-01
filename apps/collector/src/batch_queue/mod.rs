@@ -550,10 +550,12 @@ impl BatchQueue {
 
         // This runs after sourcemap enrichment, so error messages contain the final mapped
         // stacktrace and the group hash recalculated from it.
-        let web_events_kafka = self.publish_web_events(&web_event_rows).await;
-        let mods_events_kafka = self.publish_mods_events(&mods_event_rows).await;
-        let errors_kafka = self.publish_errors(&error_occurrence_v3_rows).await;
-        let vitals_kafka = self.publish_vitals(&web_vital_rows).await;
+        let (web_events_kafka, mods_events_kafka, errors_kafka, vitals_kafka) = tokio::join!(
+            self.publish_web_events(&web_event_rows),
+            self.publish_mods_events(&mods_event_rows),
+            self.publish_errors(&error_occurrence_v3_rows),
+            self.publish_vitals(&web_vital_rows),
+        );
 
         let (web_events_res, mods_events_res, error_occurrences_v3_res, web_vitals_res) = tokio::join!(
             async {

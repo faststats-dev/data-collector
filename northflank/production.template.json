@@ -334,6 +334,30 @@
                 }
               }
             ],
+            "healthChecks": [
+              {
+                "protocol": "HTTP",
+                "type": "readinessProbe",
+                "path": "/v1/health",
+                "port": 8080,
+                "initialDelaySeconds": 5,
+                "periodSeconds": 10,
+                "timeoutSeconds": 3,
+                "failureThreshold": 3,
+                "successThreshold": 1
+              },
+              {
+                "protocol": "HTTP",
+                "type": "livenessProbe",
+                "path": "/v1/health",
+                "port": 8080,
+                "initialDelaySeconds": 10,
+                "periodSeconds": 30,
+                "timeoutSeconds": 3,
+                "failureThreshold": 3,
+                "successThreshold": 1
+              }
+            ],
             "vcsData": {
               "projectUrl": "https://github.com/faststats-dev/data-collector",
               "projectType": "github",

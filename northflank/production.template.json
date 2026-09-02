@@ -441,7 +441,7 @@
               "variables": {
                 "KAFKA_BROKERS": "trying-out-kafka-faststats.g.aivencloud.com:16195",
                 "KAFKA_SECURITY_PROTOCOL": "SASL_SSL",
-                "KAFKA_SASL_MECHANISM": "PLAIN",
+                "KAFKA_SASL_MECHANISM": "SCRAM-SHA-256",
                 "KAFKA_SASL_USERNAME": "faststats-collector",
                 "KAFKA_SASL_PASSWORD": "${args.COLLECTOR_KAFKA_PASSWORD}",
                 "WEB_EVENTS_KAFKA_TOPIC": "web-events-v1",
@@ -479,7 +479,7 @@
               "variables": {
                 "KAFKA_BROKERS": "trying-out-kafka-faststats.g.aivencloud.com:16195",
                 "KAFKA_SECURITY_PROTOCOL": "SASL_SSL",
-                "KAFKA_SASL_MECHANISM": "PLAIN",
+                "KAFKA_SASL_MECHANISM": "SCRAM-SHA-256",
                 "KAFKA_SASL_USERNAME": "faststats-replay-consumer",
                 "KAFKA_SASL_PASSWORD": "${args.REPLAY_CONSUMER_KAFKA_PASSWORD}",
                 "REPLAY_KAFKA_TOPIC": "replay-snapshot",

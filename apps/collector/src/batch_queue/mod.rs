@@ -347,8 +347,10 @@ impl BatchQueue {
                             || (queue.is_channel_under_pressure() && batch.total_count() >= 100)
                     };
 
-                    if kafka_sender.send(payload).await.is_err() {
-                        error!("Kafka publisher queue closed; dropping event");
+                    // Kafka is a secondary sink. Never let its bounded backlog apply
+                    // backpressure to Tinybird ingestion.
+                    if kafka_sender.try_send(payload).is_err() {
+                        metrics::counter!("kafka_events_dropped_total").increment(1);
                         queue.finish_kafka_event();
                     }
 

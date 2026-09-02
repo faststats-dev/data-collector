@@ -88,12 +88,12 @@ async fn main() {
         .await
         .expect("Failed to connect to database");
 
-    let tinybird_client = Arc::new(tinybird::TinybirdClient::new(
+    let tinybird_client = tinybird::TinybirdClient::new(
         std::env::var("TINYBIRD_URL")
             .expect("TINYBIRD_URL must be set in .env file or environment variables"),
         std::env::var("TINYBIRD_TOKEN")
             .expect("TINYBIRD_TOKEN must be set in .env file or environment variables"),
-    ));
+    );
 
     let polar_client = std::env::var("POLAR_TOKEN").ok().map(|token| {
         info!("Polar integration enabled for usage tracking");
@@ -101,11 +101,11 @@ async fn main() {
     });
 
     let kafka_publisher = kafka::Publisher::from_env().expect("Invalid Kafka configuration");
-    let event_publisher = Arc::new(kafka::EventPublisher::from_env(kafka_publisher.clone()));
+    let event_publisher = kafka::EventPublisher::from_env(kafka_publisher.clone());
     let batch_queue = batch_queue::BatchQueue::new(
-        Arc::clone(&tinybird_client),
+        tinybird_client,
         polar_client,
-        error_tracking::mapping::MappingResolver::from_env(pool.clone()).map(Arc::new),
+        error_tracking::mapping::MappingResolver::from_env(pool.clone()),
         event_publisher,
     );
     let replay_publisher = Arc::new(handler::ReplayPublisher::from_env(kafka_publisher));

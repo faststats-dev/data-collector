@@ -222,28 +222,26 @@ fn classify_delivery<T>(
 }
 
 pub struct BatchQueue {
-    tinybird: Arc<TinybirdClient>,
+    tinybird: TinybirdClient,
     polar: Option<Arc<PolarClient>>,
-    mappings: Option<Arc<MappingResolver>>,
-    event_publisher: Arc<crate::kafka::EventPublisher>,
+    mappings: Option<MappingResolver>,
+    event_publisher: crate::kafka::EventPublisher,
     sender: mpsc::Sender<QueuedEvent>,
-    tinybird_batch: Arc<Mutex<TinybirdBatch>>,
-    tinybird_flush_lock: Arc<Mutex<()>>,
+    tinybird_batch: Mutex<TinybirdBatch>,
+    tinybird_flush_lock: Mutex<()>,
     pending_kafka: AtomicUsize,
     kafka_drained: Notify,
 }
 
 impl BatchQueue {
     pub fn new(
-        tinybird: Arc<TinybirdClient>,
+        tinybird: TinybirdClient,
         polar: Option<Arc<PolarClient>>,
-        mappings: Option<Arc<MappingResolver>>,
-        event_publisher: Arc<crate::kafka::EventPublisher>,
+        mappings: Option<MappingResolver>,
+        event_publisher: crate::kafka::EventPublisher,
     ) -> Arc<Self> {
         let (sender, receiver) = mpsc::channel(CHANNEL_CAPACITY);
         let (kafka_sender, kafka_receiver) = mpsc::channel(CHANNEL_CAPACITY);
-        let tinybird_batch = Arc::new(Mutex::new(TinybirdBatch::default()));
-        let tinybird_flush_lock = Arc::new(Mutex::new(()));
 
         let queue = Arc::new(Self {
             tinybird,
@@ -251,8 +249,8 @@ impl BatchQueue {
             mappings,
             event_publisher,
             sender,
-            tinybird_batch,
-            tinybird_flush_lock,
+            tinybird_batch: Mutex::new(TinybirdBatch::default()),
+            tinybird_flush_lock: Mutex::new(()),
             pending_kafka: AtomicUsize::new(0),
             kafka_drained: Notify::new(),
         });
@@ -616,7 +614,7 @@ impl BatchQueue {
             return event;
         };
 
-        let Some(resolver) = self.mappings.as_deref() else {
+        let Some(resolver) = self.mappings.as_ref() else {
             return QueuedEvent::ErrorOccurrenceV3 {
                 row,
                 language,

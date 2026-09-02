@@ -13,10 +13,10 @@ pub use replay::replay;
 pub use vitals::vitals;
 pub use web::web;
 
-use crate::batch_queue::{BatchQueue, QueueError, QueuedEvent, TrackingContext};
+use crate::batch_queue::{QueueError, TrackingContext};
 use crate::error_tracking::ProjectGrouping;
 use crate::models::DataSource;
-use crate::tinybird::{ErrorOccurrenceV3Row, ModsEventRow, WebEventRow};
+use crate::tinybird::{ModsEventRow, WebEventRow};
 use axum::Json;
 use axum::http::{HeaderMap, StatusCode};
 use moka::future::Cache;
@@ -704,20 +704,6 @@ pub fn build_web_event_row(
     }
 }
 
-pub fn insert_web_event(
-    batch_queue: &BatchQueue,
-    row: WebEventRow,
-    tracking: Option<TrackingContext>,
-) -> Result<(), HandlerResponse> {
-    batch_queue
-        .queue_event(QueuedEvent::WebEvent {
-            row: Box::new(row),
-            tracking,
-        })
-        .map_err(|e| queue_error_response(e, "web event"))?;
-    Ok(())
-}
-
 pub fn build_mods_event_row(
     project_id: Uuid,
     server_id: Uuid,
@@ -747,35 +733,6 @@ pub fn build_mods_event_row(
         custom: to_custom_json(custom),
         created_at: chrono::Utc::now(),
     }
-}
-
-pub fn insert_mods_event(
-    batch_queue: &BatchQueue,
-    row: ModsEventRow,
-    tracking: Option<TrackingContext>,
-) -> Result<(), HandlerResponse> {
-    batch_queue
-        .queue_event(QueuedEvent::ModsEvent { row, tracking })
-        .map_err(|e| queue_error_response(e, "mods event"))?;
-    Ok(())
-}
-
-pub fn insert_error_occurrence_v3(
-    batch_queue: &BatchQueue,
-    row: ErrorOccurrenceV3Row,
-    language: crate::error_tracking::ErrorLanguage,
-    grouping: &crate::error_tracking::ProjectGrouping,
-    tracking: Option<TrackingContext>,
-) -> Result<(), HandlerResponse> {
-    batch_queue
-        .queue_event(QueuedEvent::ErrorOccurrenceV3 {
-            row: Box::new(row),
-            language,
-            grouping: grouping.clone(),
-            tracking,
-        })
-        .map_err(|e| queue_error_response(e, "error occurrence"))?;
-    Ok(())
 }
 
 #[cfg(test)]

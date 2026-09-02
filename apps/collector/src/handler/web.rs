@@ -1,8 +1,9 @@
 use super::{
     EncodingQuery, WEB_EVENT_FIELDS, authenticate_project, check_ip_allowed, decompress_body,
     error_response, extract_known_fields, get_client_ip, get_country, get_request_origin,
-    insert_error_occurrence_v3, insert_web_event, success_response, validate_hostname,
+    queue_error_response, success_response, validate_hostname,
 };
+use crate::batch_queue::QueuedEvent;
 use crate::error_tracking::ErrorLanguage;
 use crate::error_tracking::v3::{OccurrenceInput, build_occurrence, web_context};
 use crate::identity::resolve_person_for_distinct_id;
@@ -170,11 +171,13 @@ pub async fn web(
     let error_v3_context = should_process_errors
         .then(|| context.unwrap_or_else(|| web_context(&event_row, &properties)));
 
-    if !is_debounced {
-        match insert_web_event(&state.batch_queue, event_row, Some(tracking_ctx.clone())) {
-            Ok(_) => {}
-            Err(e) => return e,
-        }
+    if !is_debounced
+        && let Err(error) = state.batch_queue.queue_event(QueuedEvent::WebEvent {
+            row: Box::new(event_row),
+            tracking: Some(tracking_ctx.clone()),
+        })
+    {
+        return queue_error_response(error, "web event");
     }
 
     if let (true, Some(error_list), Some(error_v3_context)) =
@@ -197,14 +200,16 @@ pub async fn web(
                 },
                 error,
             );
-            if let Err(e) = insert_error_occurrence_v3(
-                &state.batch_queue,
-                occurrence,
-                ErrorLanguage::JavaScript,
-                &ctx.error_grouping,
-                Some(tracking_ctx.clone()),
-            ) {
-                return e;
+            if let Err(error) = state
+                .batch_queue
+                .queue_event(QueuedEvent::ErrorOccurrenceV3 {
+                    row: Box::new(occurrence),
+                    language: ErrorLanguage::JavaScript,
+                    grouping: ctx.error_grouping.clone(),
+                    tracking: Some(tracking_ctx.clone()),
+                })
+            {
+                return queue_error_response(error, "error occurrence");
             }
         }
 

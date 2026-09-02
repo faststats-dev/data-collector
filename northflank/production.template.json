@@ -2,8 +2,8 @@
   "$schema": "https://api.northflank.com/v1/schemas/template",
   "apiVersion": "v1.2",
   "arguments": {
-    "COLLECTOR_KAFKA_PASSWORD": "${fn.randomSecret(64, 'hex')}",
-    "REPLAY_CONSUMER_KAFKA_PASSWORD": "${fn.randomSecret(64, 'hex')}"
+    "COLLECTOR_KAFKA_PASSWORD": "${fn.randomSecret(64)}",
+    "REPLAY_CONSUMER_KAFKA_PASSWORD": "${fn.randomSecret(64)}"
   },
   "spec": {
     "kind": "Workflow",

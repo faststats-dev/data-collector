@@ -319,6 +319,18 @@
                 }
               }
             },
+            "runtimeEnvironment": {
+              "KAFKA_BROKERS": "trying-out-kafka-faststats.g.aivencloud.com:16195",
+              "KAFKA_SECURITY_PROTOCOL": "SASL_SSL",
+              "KAFKA_SASL_MECHANISM": "SCRAM-SHA-256",
+              "KAFKA_SASL_USERNAME": "faststats-collector",
+              "KAFKA_SASL_PASSWORD": "${args.COLLECTOR_KAFKA_PASSWORD}",
+              "WEB_EVENTS_KAFKA_TOPIC": "web-events-v1",
+              "MODS_EVENTS_KAFKA_TOPIC": "mods-events-v1",
+              "ERROR_OCCURRENCES_KAFKA_TOPIC": "error-occurrences-v1",
+              "WEB_VITALS_KAFKA_TOPIC": "web-vitals-v1",
+              "REPLAY_KAFKA_TOPIC": "replay-snapshot"
+            },
             "ports": [
               {
                 "name": "http",
@@ -400,6 +412,15 @@
                   "storageSize": 1024
                 }
               }
+            },
+            "runtimeEnvironment": {
+              "KAFKA_BROKERS": "trying-out-kafka-faststats.g.aivencloud.com:16195",
+              "KAFKA_SECURITY_PROTOCOL": "SASL_SSL",
+              "KAFKA_SASL_MECHANISM": "SCRAM-SHA-256",
+              "KAFKA_SASL_USERNAME": "faststats-replay-consumer",
+              "KAFKA_SASL_PASSWORD": "${args.REPLAY_CONSUMER_KAFKA_PASSWORD}",
+              "REPLAY_KAFKA_TOPIC": "replay-snapshot",
+              "REPLAY_KAFKA_GROUP_ID": "replay-consumer"
             },
             "ports": [],
             "vcsData": {

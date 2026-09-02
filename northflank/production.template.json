@@ -1,10 +1,6 @@
 {
   "$schema": "https://api.northflank.com/v1/schemas/template",
   "apiVersion": "v1.2",
-  "arguments": {
-    "COLLECTOR_KAFKA_PASSWORD": "${fn.randomSecret(64)}",
-    "REPLAY_CONSUMER_KAFKA_PASSWORD": "${fn.randomSecret(64)}"
-  },
   "spec": {
     "kind": "Workflow",
     "spec": {
@@ -166,8 +162,14 @@
                     "project": "faststats",
                     "service_name": "trying-out-kafka",
                     "username": "faststats-collector",
-                    "password": "${args.COLLECTOR_KAFKA_PASSWORD}"
+                    "password": "${fn.randomSecret(64)}"
                   }
+                }
+              },
+              "output": {
+                "password": {
+                  "value": "\\${aiven_kafka_user.user.password}",
+                  "sensitive": true
                 }
               }
             }
@@ -192,8 +194,14 @@
                     "project": "faststats",
                     "service_name": "trying-out-kafka",
                     "username": "faststats-replay-consumer",
-                    "password": "${args.REPLAY_CONSUMER_KAFKA_PASSWORD}"
+                    "password": "${fn.randomSecret(64)}"
                   }
+                }
+              },
+              "output": {
+                "password": {
+                  "value": "\\${aiven_kafka_user.user.password}",
+                  "sensitive": true
                 }
               }
             }
@@ -324,7 +332,7 @@
               "KAFKA_SECURITY_PROTOCOL": "SASL_SSL",
               "KAFKA_SASL_MECHANISM": "SCRAM-SHA-256",
               "KAFKA_SASL_USERNAME": "faststats-collector",
-              "KAFKA_SASL_PASSWORD": "${args.COLLECTOR_KAFKA_PASSWORD}",
+              "KAFKA_SASL_PASSWORD": "${refs.collector-kafka-user.outputs.password.value}",
               "WEB_EVENTS_KAFKA_TOPIC": "web-events-v1",
               "MODS_EVENTS_KAFKA_TOPIC": "mods-events-v1",
               "ERROR_OCCURRENCES_KAFKA_TOPIC": "error-occurrences-v1",
@@ -418,7 +426,7 @@
               "KAFKA_SECURITY_PROTOCOL": "SASL_SSL",
               "KAFKA_SASL_MECHANISM": "SCRAM-SHA-256",
               "KAFKA_SASL_USERNAME": "faststats-replay-consumer",
-              "KAFKA_SASL_PASSWORD": "${args.REPLAY_CONSUMER_KAFKA_PASSWORD}",
+              "KAFKA_SASL_PASSWORD": "${refs.replay-consumer-kafka-user.outputs.password.value}",
               "REPLAY_KAFKA_TOPIC": "replay-snapshot",
               "REPLAY_KAFKA_GROUP_ID": "replay-consumer"
             },
@@ -464,7 +472,7 @@
                 "KAFKA_SECURITY_PROTOCOL": "SASL_SSL",
                 "KAFKA_SASL_MECHANISM": "SCRAM-SHA-256",
                 "KAFKA_SASL_USERNAME": "faststats-collector",
-                "KAFKA_SASL_PASSWORD": "${args.COLLECTOR_KAFKA_PASSWORD}",
+                "KAFKA_SASL_PASSWORD": "${refs.collector-kafka-user.outputs.password.value}",
                 "WEB_EVENTS_KAFKA_TOPIC": "web-events-v1",
                 "MODS_EVENTS_KAFKA_TOPIC": "mods-events-v1",
                 "ERROR_OCCURRENCES_KAFKA_TOPIC": "error-occurrences-v1",
@@ -502,7 +510,7 @@
                 "KAFKA_SECURITY_PROTOCOL": "SASL_SSL",
                 "KAFKA_SASL_MECHANISM": "SCRAM-SHA-256",
                 "KAFKA_SASL_USERNAME": "faststats-replay-consumer",
-                "KAFKA_SASL_PASSWORD": "${args.REPLAY_CONSUMER_KAFKA_PASSWORD}",
+                "KAFKA_SASL_PASSWORD": "${refs.replay-consumer-kafka-user.outputs.password.value}",
                 "REPLAY_KAFKA_TOPIC": "replay-snapshot",
                 "REPLAY_KAFKA_GROUP_ID": "replay-consumer"
               }

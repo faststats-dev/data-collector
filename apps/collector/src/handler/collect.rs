@@ -1,7 +1,7 @@
 use super::{
-    MODS_EVENT_FIELDS, ProjectContext, build_mods_event_row, check_ip_allowed, error_response,
-    extract_known_fields, get_authorization, get_client_ip, get_country,
-    insert_error_occurrence_v3, insert_mods_event, load_project_context, success_response,
+    MODS_EVENT_FIELDS, ProjectContext, authenticate_project, build_mods_event_row,
+    check_ip_allowed, error_response, extract_known_fields, get_client_ip, get_country,
+    insert_error_occurrence_v3, insert_mods_event, success_response,
 };
 use crate::batch_queue::TrackingContext;
 use crate::error_tracking::ErrorLanguage;
@@ -21,13 +21,8 @@ pub async fn collect(
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    let token = match get_authorization(&headers) {
-        Some(t) => t,
-        None => return error_response(StatusCode::UNAUTHORIZED, "Unauthorized"),
-    };
-
-    let ctx = match load_project_context(&state.pool, &token).await {
-        Ok(ctx) => ctx,
+    let (token, ctx) = match authenticate_project(&state.pool, &headers, None).await {
+        Ok(authenticated) => authenticated,
         Err(error) => return error,
     };
 

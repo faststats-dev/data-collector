@@ -1,7 +1,7 @@
 use super::{
-    EncodingQuery, check_ip_allowed, decompress_body, error_response, get_authorization,
-    get_client_ip, get_country, get_request_origin, load_project_context, queue_error_response,
-    success_response, validate_hostname,
+    EncodingQuery, authenticate_project, check_ip_allowed, decompress_body, error_response,
+    get_client_ip, get_country, get_request_origin, queue_error_response, success_response,
+    validate_hostname,
 };
 use crate::batch_queue::QueuedEvent;
 use crate::models::AppState;
@@ -158,15 +158,10 @@ pub async fn vitals(
         Err(_) => return error_response(StatusCode::BAD_REQUEST, "Invalid JSON"),
     };
 
-    let token = match request.token.take().or_else(|| get_authorization(&headers)) {
-        Some(t) => t,
-        None => return error_response(StatusCode::UNAUTHORIZED, "Unauthorized"),
-    };
-
     let request_origin = get_request_origin(&headers);
-
-    let ctx = match load_project_context(&state.pool, &token).await {
-        Ok(ctx) => ctx,
+    let (token, ctx) = match authenticate_project(&state.pool, &headers, request.token.take()).await
+    {
+        Ok(authenticated) => authenticated,
         Err(error) => return error,
     };
 

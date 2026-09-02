@@ -162,35 +162,13 @@ impl TinybirdBatch {
 
 #[derive(Debug, Default)]
 struct TinybirdBatchSendResult {
-    failed_web_events: Vec<(WebEventRow, Option<TrackingContext>)>,
-    failed_mods_events: Vec<(ModsEventRow, Option<TrackingContext>)>,
-    failed_error_occurrences_v3: Vec<(ErrorOccurrenceV3Row, Option<TrackingContext>)>,
-    failed_web_vitals: Vec<(WebVitalRow, Option<TrackingContext>)>,
-    had_permanent_failure: bool,
+    delivered: TinybirdBatch,
+    retryable: TinybirdBatch,
+    permanent_failure_count: usize,
     errors: Vec<String>,
 }
 
 impl TinybirdBatchSendResult {
-    fn has_failures(&self) -> bool {
-        self.failure_count() > 0
-    }
-
-    fn into_tinybird_batch(self) -> TinybirdBatch {
-        TinybirdBatch {
-            web_events: self.failed_web_events,
-            mods_events: self.failed_mods_events,
-            error_occurrences_v3: self.failed_error_occurrences_v3,
-            web_vitals: self.failed_web_vitals,
-        }
-    }
-
-    fn failure_count(&self) -> usize {
-        self.failed_web_events.len()
-            + self.failed_mods_events.len()
-            + self.failed_error_occurrences_v3.len()
-            + self.failed_web_vitals.len()
-    }
-
     fn error_summary(&self) -> String {
         if self.errors.is_empty() {
             "unknown error".to_string()
@@ -200,20 +178,47 @@ impl TinybirdBatchSendResult {
     }
 }
 
-fn record_batch_error(
-    result: &mut TinybirdBatchSendResult,
+fn merge_usage(target: &mut AggregatedUsage, source: AggregatedUsage) {
+    for (owner_id, source_usage) in source {
+        let target_usage = target.entry(owner_id).or_insert_with(|| OwnerUsage {
+            counts: UsageCounts::default(),
+            token: Arc::clone(&source_usage.token),
+            org: source_usage.org.as_ref().map(Arc::clone),
+        });
+        target_usage.counts.events += source_usage.counts.events;
+        target_usage.counts.error_tracking += source_usage.counts.error_tracking;
+        target_usage.counts.web_vitals += source_usage.counts.web_vitals;
+        target_usage
+            .counts
+            .session_replay_ids
+            .extend(source_usage.counts.session_replay_ids);
+    }
+}
+
+fn classify_delivery<T>(
+    outcome: Result<(), crate::tinybird::TinybirdError>,
+    rows: Vec<T>,
     datasource: &'static str,
-    rows: usize,
-    error: &crate::tinybird::TinybirdError,
-) {
+    errors: &mut Vec<String>,
+) -> (Vec<T>, Vec<T>, usize) {
+    let Err(error) = outcome else {
+        return (rows, Vec::new(), 0);
+    };
     let permanence = if error.is_transient() {
         "transient"
     } else {
         "permanent"
     };
-    result
-        .errors
-        .push(format!("{datasource} rows={rows} {permanence}: {error}"));
+    errors.push(format!(
+        "{datasource} rows={} {permanence}: {error}",
+        rows.len()
+    ));
+    if error.is_transient() {
+        (Vec::new(), rows, 0)
+    } else {
+        let count = rows.len();
+        (Vec::new(), Vec::new(), count)
+    }
 }
 
 pub struct BatchQueue {
@@ -408,9 +413,7 @@ impl BatchQueue {
         let total = batch.total_count();
         info!("Flushing in-memory batch of {} events", total);
 
-        let usage = batch.aggregate_usage();
-
-        self.send_tinybird_batch_with_retry(batch).await;
+        let usage = self.send_tinybird_batch_with_retry(batch).await;
 
         if let Some(polar) = &self.polar
             && !usage.is_empty()
@@ -440,27 +443,27 @@ impl BatchQueue {
         Duration::from_millis(capped.saturating_sub(jitter))
     }
 
-    async fn send_tinybird_batch_with_retry(&self, batch: TinybirdBatch) {
+    async fn send_tinybird_batch_with_retry(&self, batch: TinybirdBatch) -> AggregatedUsage {
         let mut retry_count = 0u32;
         let mut current_batch = batch;
+        let mut delivered_usage = AggregatedUsage::new();
 
         loop {
             let result = self.send_tinybird_batch(current_batch).await;
+            merge_usage(&mut delivered_usage, result.delivered.aggregate_usage());
 
-            if !result.has_failures() {
-                return;
-            }
-
-            if result.had_permanent_failure {
+            if result.permanent_failure_count > 0 {
                 let error_summary = result.error_summary();
                 error!(
                     errors = %error_summary,
                     "Dropping {} events after a permanent delivery failure",
-                    result.failure_count(),
+                    result.permanent_failure_count,
                 );
-                return;
             }
 
+            if result.retryable.is_empty() {
+                return delivered_usage;
+            }
             retry_count += 1;
 
             if retry_count >= MAX_RETRIES {
@@ -468,14 +471,14 @@ impl BatchQueue {
                 error!(
                     errors = %error_summary,
                     "Dropping {} events after {} delivery attempts",
-                    result.failure_count(),
+                    result.retryable.total_count(),
                     retry_count
                 );
-                return;
+                return delivered_usage;
             }
 
             let error_summary = result.error_summary();
-            current_batch = result.into_tinybird_batch();
+            current_batch = result.retryable;
 
             let delay = Self::calculate_retry_delay(retry_count);
             warn!(
@@ -539,42 +542,37 @@ impl BatchQueue {
             },
         );
 
-        if web_events_res.is_err() {
-            if let Err(e) = web_events_res {
-                record_batch_error(&mut result, "web_events", web_events.len(), &e);
-                result.had_permanent_failure |= !e.is_transient();
-            }
-            result.failed_web_events = web_events;
-        }
+        let (delivered, retryable, permanent) =
+            classify_delivery(web_events_res, web_events, "web_events", &mut result.errors);
+        result.delivered.web_events = delivered;
+        result.retryable.web_events = retryable;
+        result.permanent_failure_count += permanent;
 
-        if mods_events_res.is_err() {
-            if let Err(e) = mods_events_res {
-                record_batch_error(&mut result, "mods_events", mods_events.len(), &e);
-                result.had_permanent_failure |= !e.is_transient();
-            }
-            result.failed_mods_events = mods_events;
-        }
+        let (delivered, retryable, permanent) = classify_delivery(
+            mods_events_res,
+            mods_events,
+            "mods_events",
+            &mut result.errors,
+        );
+        result.delivered.mods_events = delivered;
+        result.retryable.mods_events = retryable;
+        result.permanent_failure_count += permanent;
 
-        if error_occurrences_v3_res.is_err() {
-            if let Err(e) = error_occurrences_v3_res {
-                record_batch_error(
-                    &mut result,
-                    "error_tracking_v3",
-                    error_occurrences_v3.len(),
-                    &e,
-                );
-                result.had_permanent_failure |= !e.is_transient();
-            }
-            result.failed_error_occurrences_v3 = error_occurrences_v3;
-        }
+        let (delivered, retryable, permanent) = classify_delivery(
+            error_occurrences_v3_res,
+            error_occurrences_v3,
+            "error_tracking_v3",
+            &mut result.errors,
+        );
+        result.delivered.error_occurrences_v3 = delivered;
+        result.retryable.error_occurrences_v3 = retryable;
+        result.permanent_failure_count += permanent;
 
-        if web_vitals_res.is_err() {
-            if let Err(e) = web_vitals_res {
-                record_batch_error(&mut result, "web_vitals", web_vitals.len(), &e);
-                result.had_permanent_failure |= !e.is_transient();
-            }
-            result.failed_web_vitals = web_vitals;
-        }
+        let (delivered, retryable, permanent) =
+            classify_delivery(web_vitals_res, web_vitals, "web_vitals", &mut result.errors);
+        result.delivered.web_vitals = delivered;
+        result.retryable.web_vitals = retryable;
+        result.permanent_failure_count += permanent;
 
         result
     }
@@ -642,6 +640,79 @@ impl BatchQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn classifies_delivery_per_datasource() {
+        let mut errors = Vec::new();
+        let (delivered, retryable, permanent) = classify_delivery(
+            Err(crate::tinybird::TinybirdError::Api {
+                status: 503,
+                message: "unavailable".into(),
+            }),
+            vec![1, 2],
+            "transient_source",
+            &mut errors,
+        );
+        assert!(delivered.is_empty());
+        assert_eq!(retryable, vec![1, 2]);
+        assert_eq!(permanent, 0);
+
+        let (delivered, retryable, permanent) = classify_delivery(
+            Err(crate::tinybird::TinybirdError::Api {
+                status: 400,
+                message: "invalid".into(),
+            }),
+            vec![3, 4, 5],
+            "permanent_source",
+            &mut errors,
+        );
+        assert!(delivered.is_empty());
+        assert!(retryable.is_empty());
+        assert_eq!(permanent, 3);
+        assert_eq!(errors.len(), 2);
+    }
+
+    #[test]
+    fn merges_delivered_usage_counts() {
+        let owner: Arc<str> = "owner".into();
+        let context = TrackingContext {
+            owner_id: Arc::clone(&owner),
+            token: "token".into(),
+            organization_id: None,
+        };
+        let mut target = AggregatedUsage::new();
+        let source = AggregatedUsage::from([(
+            owner,
+            OwnerUsage {
+                counts: UsageCounts {
+                    events: 2,
+                    error_tracking: 1,
+                    ..UsageCounts::default()
+                },
+                token: Arc::clone(&context.token),
+                org: None,
+            },
+        )]);
+        merge_usage(&mut target, source);
+        let source = AggregatedUsage::from([(
+            Arc::clone(&context.owner_id),
+            OwnerUsage {
+                counts: UsageCounts {
+                    events: 3,
+                    web_vitals: 4,
+                    ..UsageCounts::default()
+                },
+                token: context.token,
+                org: None,
+            },
+        )]);
+        merge_usage(&mut target, source);
+
+        let counts = &target[&context.owner_id].counts;
+        assert_eq!(counts.events, 5);
+        assert_eq!(counts.error_tracking, 1);
+        assert_eq!(counts.web_vitals, 4);
+    }
 
     mod retry_delay {
         use super::*;

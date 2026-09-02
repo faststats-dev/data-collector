@@ -15,7 +15,7 @@ pub struct AppState {
 
 pub struct DataSource {
     pub data_type: String,
-    pub regex: Option<String>,
+    pub regex: Option<regex::Regex>,
     pub allow_negative: Option<bool>,
     pub allow_float: Option<bool>,
     pub min_value: Option<f64>,

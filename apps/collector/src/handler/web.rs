@@ -1,8 +1,7 @@
 use super::{
-    EncodingQuery, WEB_EVENT_FIELDS, check_ip_allowed, decompress_body, error_response,
-    extract_known_fields, get_authorization, get_client_ip, get_country, get_request_origin,
-    insert_error_occurrence_v3, insert_web_event, load_project_context, success_response,
-    validate_hostname,
+    EncodingQuery, WEB_EVENT_FIELDS, authenticate_project, check_ip_allowed, decompress_body,
+    error_response, extract_known_fields, get_client_ip, get_country, get_request_origin,
+    insert_error_occurrence_v3, insert_web_event, success_response, validate_hostname,
 };
 use crate::error_tracking::ErrorLanguage;
 use crate::error_tracking::v3::{OccurrenceInput, build_occurrence, web_context};
@@ -54,8 +53,6 @@ pub async fn web(
         Err(e) => return error_response(StatusCode::BAD_REQUEST, &e),
     };
 
-    let header_token = get_authorization(&headers);
-
     let WebRequest {
         token: body_token,
         user_id,
@@ -73,15 +70,9 @@ pub async fn web(
         Err(_) => return error_response(StatusCode::BAD_REQUEST, "Invalid JSON"),
     };
 
-    let token = match body_token.or(header_token) {
-        Some(t) => t,
-        None => return error_response(StatusCode::UNAUTHORIZED, "Unauthorized"),
-    };
-
     let request_origin = get_request_origin(&headers);
-
-    let ctx = match load_project_context(&state.pool, &token).await {
-        Ok(ctx) => ctx,
+    let (token, ctx) = match authenticate_project(&state.pool, &headers, body_token).await {
+        Ok(authenticated) => authenticated,
         Err(error) => return error,
     };
 

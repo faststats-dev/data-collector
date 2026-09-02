@@ -1,6 +1,6 @@
 use super::{
-    EncodingQuery, ProjectContext, check_ip_allowed, decompress_body, error_response,
-    get_client_ip, get_country, get_request_origin, load_project_context, success_response,
+    EncodingQuery, ProjectContext, authenticate_project, check_ip_allowed, decompress_body,
+    error_response, get_client_ip, get_country, get_request_origin, success_response,
     validate_hostname,
 };
 use crate::batch_queue::TrackingContext;
@@ -243,12 +243,13 @@ pub async fn replay(
             return error_response(StatusCode::BAD_REQUEST, &format!("Invalid JSON: {}", e));
         }
     };
-    let token = parsed.token.clone();
+    let body_token = parsed.token.clone();
     let request_origin = get_request_origin(&headers);
     let country = get_country(&headers);
 
-    let context = match load_project_context(&state.pool, &token).await {
-        Ok(ctx) => ctx,
+    let (token, context) = match authenticate_project(&state.pool, &headers, Some(body_token)).await
+    {
+        Ok(authenticated) => authenticated,
         Err(error) => return error,
     };
 

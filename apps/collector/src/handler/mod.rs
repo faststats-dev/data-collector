@@ -97,6 +97,18 @@ pub fn get_authorization(headers: &HeaderMap) -> Option<String> {
         .map(|auth| auth.strip_prefix("Bearer ").unwrap_or(auth).to_owned())
 }
 
+pub async fn authenticate_project(
+    pool: &sqlx::PgPool,
+    headers: &HeaderMap,
+    body_token: Option<String>,
+) -> Result<(String, Arc<ProjectContext>), HandlerResponse> {
+    let token = body_token
+        .or_else(|| get_authorization(headers))
+        .ok_or_else(|| error_response(StatusCode::UNAUTHORIZED, "Unauthorized"))?;
+    let context = load_project_context(pool, &token).await?;
+    Ok((token, context))
+}
+
 pub fn error_response(status: StatusCode, message: &str) -> HandlerResponse {
     (status, Json(serde_json::json!({ "error": message })))
 }
@@ -203,7 +215,10 @@ pub async fn load_project_context(
                 ref_id,
                 DataSource {
                     data_type: row.try_get::<String, _>("data_type").unwrap_or_default(),
-                    regex: row.try_get("regex").ok(),
+                    regex: row
+                        .try_get::<String, _>("regex")
+                        .ok()
+                        .and_then(|pattern| regex::Regex::new(&pattern).ok()),
                     allow_negative: row.try_get("allow_negative").ok(),
                     allow_float: row.try_get("allow_float").ok(),
                     min_value: row.try_get("min_value").ok(),

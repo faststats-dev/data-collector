@@ -29,6 +29,9 @@
                     "topic_name": "web-events-v1",
                     "partitions": 2,
                     "replication": 2,
+                    "config": {
+                      "retention_ms": "86400000"
+                    },
                     "topic_description": "Versioned web analytics events"
                   },
                   "mods_events": {
@@ -37,6 +40,9 @@
                     "topic_name": "mods-events-v1",
                     "partitions": 2,
                     "replication": 2,
+                    "config": {
+                      "retention_ms": "86400000"
+                    },
                     "topic_description": "Versioned mod and server analytics events"
                   },
                   "error_occurrences": {
@@ -45,6 +51,9 @@
                     "topic_name": "error-occurrences-v1",
                     "partitions": 2,
                     "replication": 2,
+                    "config": {
+                      "retention_ms": "86400000"
+                    },
                     "topic_description": "Versioned enriched error occurrences"
                   },
                   "web_vitals": {
@@ -53,6 +62,9 @@
                     "topic_name": "web-vitals-v1",
                     "partitions": 2,
                     "replication": 2,
+                    "config": {
+                      "retention_ms": "86400000"
+                    },
                     "topic_description": "Versioned web vital measurements"
                   }
                 },
@@ -121,6 +133,9 @@
                     "topic_name": "replay-snapshot",
                     "partitions": 2,
                     "replication": 2,
+                    "config": {
+                      "retention_ms": "86400000"
+                    },
                     "topic_description": "Replay snapshots and session patch commands"
                   }
                 }

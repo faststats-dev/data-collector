@@ -28,7 +28,7 @@
                     "service_name": "trying-out-kafka",
                     "topic_name": "web-events-v1",
                     "partitions": 2,
-                    "replication": 2,
+                    "replication": 1,
                     "config": {
                       "retention_ms": "86400000"
                     },
@@ -39,7 +39,7 @@
                     "service_name": "trying-out-kafka",
                     "topic_name": "mods-events-v1",
                     "partitions": 2,
-                    "replication": 2,
+                    "replication": 1,
                     "config": {
                       "retention_ms": "86400000"
                     },
@@ -50,7 +50,7 @@
                     "service_name": "trying-out-kafka",
                     "topic_name": "error-occurrences-v1",
                     "partitions": 2,
-                    "replication": 2,
+                    "replication": 1,
                     "config": {
                       "retention_ms": "86400000"
                     },
@@ -61,7 +61,7 @@
                     "service_name": "trying-out-kafka",
                     "topic_name": "web-vitals-v1",
                     "partitions": 2,
-                    "replication": 2,
+                    "replication": 1,
                     "config": {
                       "retention_ms": "86400000"
                     },
@@ -132,7 +132,7 @@
                     "service_name": "trying-out-kafka",
                     "topic_name": "replay-snapshot",
                     "partitions": 2,
-                    "replication": 2,
+                    "replication": 1,
                     "config": {
                       "retention_ms": "86400000"
                     },

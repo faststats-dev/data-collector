@@ -494,6 +494,40 @@
             }
           },
           "updateMode": "put"
+        },
+        {
+          "kind": "Workflow",
+          "spec": {
+            "type": "parallel",
+            "steps": [
+              {
+                "kind": "Action",
+                "ref": "restart-collector-after-kafka-credentials",
+                "spec": {
+                  "kind": "Service",
+                  "spec": {
+                    "data": {
+                      "serviceId": "${refs.collector-service.id}"
+                    },
+                    "type": "restart"
+                  }
+                }
+              },
+              {
+                "kind": "Action",
+                "ref": "restart-replay-consumer-after-kafka-credentials",
+                "spec": {
+                  "kind": "Service",
+                  "spec": {
+                    "data": {
+                      "serviceId": "${refs.replay-consumer-service.id}"
+                    },
+                    "type": "restart"
+                  }
+                }
+              }
+            ]
+          }
         }
       ]
     }

@@ -98,10 +98,6 @@ pub(crate) fn normalize_window_id(window_id: Option<String>, session_id: &str) -
         .unwrap_or_else(|| session_id.to_owned())
 }
 
-fn is_replay_origin_allowed(allowed_hostnames: &[String], request_origin: Option<&str>) -> bool {
-    validate_hostname(allowed_hostnames, request_origin)
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ReplayRequest {
@@ -253,7 +249,7 @@ pub async fn replay(
         Err(error) => return error,
     };
 
-    if !is_replay_origin_allowed(&context.allowed_hostnames, request_origin.as_deref()) {
+    if !validate_hostname(&context.allowed_hostnames, request_origin.as_deref()) {
         return error_response(StatusCode::FORBIDDEN, "Origin not allowed");
     }
 
@@ -327,7 +323,7 @@ pub async fn replay(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_replay_origin_allowed, normalize_window_id};
+    use super::normalize_window_id;
 
     #[test]
     fn normalize_window_id_trims_and_falls_back_to_session_id() {
@@ -340,19 +336,5 @@ mod tests {
             "session-1"
         );
         assert_eq!(normalize_window_id(None, "session-1"), "session-1");
-    }
-
-    #[test]
-    fn replay_origin_must_match_configured_hostname() {
-        let allowed = vec!["example.com".to_string()];
-
-        assert!(is_replay_origin_allowed(&allowed, Some("example.com")));
-        assert!(!is_replay_origin_allowed(&allowed, Some("attacker.test")));
-        assert!(!is_replay_origin_allowed(&allowed, None));
-    }
-
-    #[test]
-    fn replay_origin_is_unrestricted_without_configured_hostnames() {
-        assert!(is_replay_origin_allowed(&[], None));
     }
 }

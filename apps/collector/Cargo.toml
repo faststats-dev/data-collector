@@ -34,5 +34,6 @@ metrics = "0.24.6"
 metrics-exporter-prometheus = "0.18.3"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+thiserror = "2.0.18"
 rdkafka = { version = "0.38.0", features = ["cmake-build", "sasl", "ssl", "zstd"] }
 aws-sdk-s3 = { version = "1.144.0", features = ["behavior-version-latest"] }

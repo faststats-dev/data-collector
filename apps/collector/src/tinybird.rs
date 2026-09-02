@@ -77,43 +77,16 @@ where
     parsed.serialize(serializer)
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum TinybirdError {
-    Request(reqwest::Error),
+    #[error("Request error: {0}")]
+    Request(#[from] reqwest::Error),
+    #[error("Tinybird API error ({status}): {message}")]
     Api { status: u16, message: String },
-    Compression(std::io::Error),
-    Serialization(serde_json::Error),
-}
-
-impl From<reqwest::Error> for TinybirdError {
-    fn from(err: reqwest::Error) -> Self {
-        TinybirdError::Request(err)
-    }
-}
-
-impl From<std::io::Error> for TinybirdError {
-    fn from(err: std::io::Error) -> Self {
-        TinybirdError::Compression(err)
-    }
-}
-
-impl From<serde_json::Error> for TinybirdError {
-    fn from(err: serde_json::Error) -> Self {
-        TinybirdError::Serialization(err)
-    }
-}
-
-impl std::fmt::Display for TinybirdError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            TinybirdError::Request(e) => write!(f, "Request error: {}", e),
-            TinybirdError::Api { status, message } => {
-                write!(f, "Tinybird API error ({}): {}", status, message)
-            }
-            TinybirdError::Compression(e) => write!(f, "Compression error: {}", e),
-            TinybirdError::Serialization(e) => write!(f, "Serialization error: {}", e),
-        }
-    }
+    #[error("Compression error: {0}")]
+    Compression(#[from] std::io::Error),
+    #[error("Serialization error: {0}")]
+    Serialization(#[from] serde_json::Error),
 }
 
 impl TinybirdError {

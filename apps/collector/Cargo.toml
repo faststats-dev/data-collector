@@ -21,7 +21,7 @@ hex = "0.4.3"
 sourcemap = "9.3.2"
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "sqlite", "macros", "uuid", "json"] }
 tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "signal"] }
-zstd = "0.13.3"
+zstd = "0.14.0"
 tower-http = { version = "0.7.0", features = ["cors", "decompression-gzip", "decompression-zstd", "decompression-deflate", "decompression-br"] }
 url = "2.5.8"
 moka = { version = "0.12.16", features = ["sync", "future"] }

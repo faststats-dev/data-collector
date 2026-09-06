@@ -8,7 +8,6 @@ use crate::error_tracking::ErrorLanguage;
 use crate::error_tracking::v3::{OccurrenceInput, build_occurrence, web_context};
 use crate::identity::resolve_person_for_distinct_id;
 use crate::models::{AppState, ErrorTracking};
-use crate::utils::debounce::should_debounce;
 use axum::body::Bytes;
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -153,10 +152,7 @@ pub async fn web(
     }
     known.insert("device".into(), Value::String(ua_info.device.to_string()));
 
-    let url = known.get("url").and_then(|v| v.as_str()).unwrap_or("");
-    let event = known.get("event").and_then(|v| v.as_str());
     let has_errors = errors.as_ref().is_some_and(|items| !items.is_empty());
-    let is_debounced = !has_errors && should_debounce(resolved_user_id, url, event);
 
     let tracking_ctx = ctx.tracking_context(&token);
     let fallback_identity = resolved_user_id.to_string();
@@ -171,12 +167,10 @@ pub async fn web(
     let error_v3_context = should_process_errors
         .then(|| context.unwrap_or_else(|| web_context(&event_row, &properties)));
 
-    if !is_debounced
-        && let Err(error) = state.batch_queue.queue_event(QueuedEvent::WebEvent {
-            row: Box::new(event_row),
-            tracking: Some(tracking_ctx.clone()),
-        })
-    {
+    if let Err(error) = state.batch_queue.queue_event(QueuedEvent::WebEvent {
+        row: Box::new(event_row),
+        tracking: Some(tracking_ctx.clone()),
+    }) {
         return queue_error_response(error, "web event");
     }
 

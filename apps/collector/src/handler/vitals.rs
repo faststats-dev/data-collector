@@ -1,9 +1,9 @@
 use super::{
-    EncodingQuery, check_ip_allowed, decompress_body, error_response, get_authorization,
-    get_client_ip, get_country, get_request_origin, load_project_context, queue_error_response,
-    success_response, validate_hostname,
+    EncodingQuery, authenticate_project, check_ip_allowed, decompress_body, error_response,
+    get_client_ip, get_country, get_request_origin, queue_error_response, success_response,
+    validate_hostname,
 };
-use crate::batch_queue::{FailedRequest, QueuedEvent, RequestType};
+use crate::batch_queue::QueuedEvent;
 use crate::models::AppState;
 use crate::tinybird::WebVitalRow;
 use axum::body::Bytes;
@@ -13,7 +13,7 @@ use axum::response::IntoResponse;
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
-use tracing::{error, warn};
+use tracing::warn;
 use user_agent::UserAgentInfo;
 use uuid::Uuid;
 
@@ -158,47 +158,11 @@ pub async fn vitals(
         Err(_) => return error_response(StatusCode::BAD_REQUEST, "Invalid JSON"),
     };
 
-    let token = match request.token.take().or_else(|| get_authorization(&headers)) {
-        Some(t) => t,
-        None => return error_response(StatusCode::UNAUTHORIZED, "Unauthorized"),
-    };
-
     let request_origin = get_request_origin(&headers);
-
-    let ctx = match load_project_context(&state.pool, &token).await {
-        Ok(ctx) => ctx,
-        Err(err) => {
-            if err.0 == StatusCode::INTERNAL_SERVER_ERROR {
-                let client_ip = get_client_ip(&headers);
-                let user_agent = headers.get("User-Agent").and_then(|v| v.to_str().ok());
-                let failed = FailedRequest {
-                    request_type: RequestType::Vitals,
-                    token,
-                    body: body.to_vec(),
-                    country: headers
-                        .get("CF-IPCountry")
-                        .and_then(|v| v.to_str().ok())
-                        .map(String::from),
-                    client_ip: if client_ip.is_empty() {
-                        None
-                    } else {
-                        Some(client_ip.to_owned())
-                    },
-                    user_agent: user_agent.map(str::to_owned),
-                    origin: request_origin,
-                };
-
-                if let Err(e) = state.batch_queue.backup_store.backup_request(&failed).await {
-                    error!("Failed to store failed request: {}", e);
-                    return error_response(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "Service temporarily unavailable",
-                    );
-                }
-                return success_response(HashMap::new());
-            }
-            return err;
-        }
+    let (token, ctx) = match authenticate_project(&state.pool, &headers, request.token.take()).await
+    {
+        Ok(authenticated) => authenticated,
+        Err(error) => return error,
     };
 
     if !validate_hostname(&ctx.allowed_hostnames, request_origin.as_deref()) {
@@ -245,18 +209,17 @@ pub async fn vitals(
         }
 
         if let Some(session_id) = request.session_id.as_deref()
-            && let Some(replay_storage) = state.replay_storage.as_deref()
             && is_poor
-            && let Err(error) = replay_storage
-                .mark_session_poor_vital(
-                    &state.pool,
+            && let Err(error) = state
+                .replay_publisher
+                .mark_poor_vital(
                     ctx.project_id,
                     session_id,
                     request.window_id.as_deref().unwrap_or(session_id),
                 )
                 .await
         {
-            warn!("Failed to persist replay poor-vital flag: {}", error);
+            warn!("Failed to publish replay poor-vital flag: {}", error);
         }
     }
 

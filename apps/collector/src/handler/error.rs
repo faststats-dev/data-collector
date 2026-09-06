@@ -1,7 +1,8 @@
 use super::{
-    check_ip_allowed, error_response, get_authorization, get_client_ip, insert_error_occurrence_v3,
-    load_project_context, success_response,
+    check_ip_allowed, error_response, get_authorization, get_client_ip, load_project_context,
+    queue_error_response, success_response,
 };
+use crate::batch_queue::QueuedEvent;
 use crate::error_tracking::parse_optional_language;
 use crate::error_tracking::v3::{OccurrenceInput, build_occurrence, empty_context};
 use crate::models::{AppState, ErrorTracking};
@@ -95,28 +96,29 @@ pub async fn error(
             },
             error,
         );
-        if let Err(e) = insert_error_occurrence_v3(
-            &state.batch_queue,
-            occurrence,
-            language,
-            &ctx.error_grouping,
-            Some(tracking_ctx.clone()),
-        ) {
-            return e;
+        if let Err(error) = state
+            .batch_queue
+            .queue_event(QueuedEvent::ErrorOccurrenceV3 {
+                row: Box::new(occurrence),
+                language,
+                grouping: ctx.error_grouping.clone(),
+                tracking: Some(tracking_ctx.clone()),
+            })
+        {
+            return queue_error_response(error, "error occurrence");
         }
 
         if let Some(session_id) = replay_session_id.as_deref()
-            && let Some(replay_storage) = state.replay_storage.as_deref()
-            && let Err(err) = replay_storage
-                .mark_session_error(
-                    &state.pool,
+            && let Err(err) = state
+                .replay_publisher
+                .mark_error(
                     ctx.project_id,
                     session_id,
                     payload.window_id.as_deref().unwrap_or(session_id),
                 )
                 .await
         {
-            warn!("Failed to persist replay error flag: {}", err);
+            warn!("Failed to publish replay error flag: {}", err);
         }
     }
 

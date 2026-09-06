@@ -1,32 +1,12 @@
 use crate::models::DataSource;
-use moka::sync::Cache;
 use regex::Regex;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::{Arc, LazyLock};
 use tracing::debug;
-
-static REGEX_CACHE: LazyLock<Cache<Arc<str>, Arc<Regex>>> =
-    LazyLock::new(|| Cache::builder().max_capacity(100).build());
 
 pub const MAX_JSON_METRIC_DEPTH: usize = 8;
 pub const MAX_JSON_METRIC_BYTES: usize = 32 * 1024;
 pub const MAX_JSON_METRIC_ITEMS: usize = 256;
-
-fn get_cached_regex(pattern: &str) -> Option<Arc<Regex>> {
-    if let Some(re) = REGEX_CACHE.get(pattern) {
-        return Some(re);
-    }
-    let key: Arc<str> = pattern.into();
-    match Regex::new(pattern) {
-        Ok(re) => {
-            let arc_re = Arc::new(re);
-            REGEX_CACHE.insert(key, Arc::clone(&arc_re));
-            Some(arc_re)
-        }
-        Err(_) => None,
-    }
-}
 
 pub fn validate_and_filter_payload(
     mut data: HashMap<String, Value>,
@@ -44,7 +24,7 @@ pub fn validate_and_filter_payload(
             return false;
         };
 
-        let re = ds.regex.as_deref().and_then(get_cached_regex);
+        let re = ds.regex.as_ref();
         let shape = metric_shape(ds);
 
         if ds.data_type == "json" {
@@ -66,7 +46,7 @@ pub fn validate_and_filter_payload(
                 let mut first_invalid: Option<(usize, &'static str)> = None;
                 let mut idx = 0;
 
-                arr.retain(|elem| match validate_scalar(elem, ds, re.as_deref()) {
+                arr.retain(|elem| match validate_scalar(elem, ds, re) {
                     Ok(_) => {
                         idx += 1;
                         true
@@ -105,7 +85,7 @@ pub fn validate_and_filter_payload(
         } else if shape == "map" {
             if let Some(obj) = value.as_object_mut() {
                 let mut first_invalid: Option<(String, &'static str)> = None;
-                obj.retain(|key, elem| match validate_scalar(elem, ds, re.as_deref()) {
+                obj.retain(|key, elem| match validate_scalar(elem, ds, re) {
                     Ok(_) => true,
                     Err(reason) => {
                         if first_invalid.is_none() {
@@ -150,7 +130,7 @@ pub fn validate_and_filter_payload(
                 return false;
             }
 
-            match validate_scalar(value, ds, re.as_deref()) {
+            match validate_scalar(value, ds, re) {
                 Ok(_) => {
                     debug!("key='{}' VALID=true", ref_id);
                     true
@@ -274,7 +254,7 @@ mod tests {
 
     fn make_data_source(data_type: &str) -> DataSource {
         DataSource {
-            data_type: data_type.to_string(),
+            data_type: data_type.to_owned(),
             regex: None,
             allow_negative: None,
             allow_float: None,
@@ -796,15 +776,9 @@ mod tests {
         use super::*;
 
         fn make_array_data_source(data_type: &str) -> DataSource {
-            DataSource {
-                data_type: data_type.to_string(),
-                regex: None,
-                allow_negative: None,
-                allow_float: None,
-                min_value: None,
-                max_value: None,
-                metric_shape: Some("array".to_string()),
-            }
+            let mut data_source = make_data_source(data_type);
+            data_source.metric_shape = Some("array".to_owned());
+            data_source
         }
 
         #[test]
@@ -921,7 +895,7 @@ mod tests {
         #[test]
         fn validates_array_with_regex() {
             let mut ds = make_array_data_source("string");
-            ds.regex = Some(r"^[a-z]+$".to_string());
+            ds.regex = Some(Regex::new(r"^[a-z]+$").unwrap());
             let mut ds_map = HashMap::new();
             ds_map.insert("lowercase_words".to_string(), ds);
 
@@ -1033,7 +1007,7 @@ mod tests {
             let mut ds_map = HashMap::new();
             let scalar_ds = make_data_source("string");
             let mut array_ds = make_data_source("number");
-            array_ds.metric_shape = Some("array".to_string());
+            array_ds.metric_shape = Some("array".to_owned());
             ds_map.insert("title".to_string(), scalar_ds);
             ds_map.insert("scores".to_string(), array_ds);
 
@@ -1050,7 +1024,8 @@ mod tests {
         #[test]
         fn handles_regex_compilation_failure_gracefully() {
             let mut ds = make_data_source("string");
-            ds.regex = Some("[invalid(regex".to_string()); // Invalid regex pattern
+            let invalid_pattern = ["[invalid", "(regex"].concat();
+            ds.regex = Regex::new(&invalid_pattern).ok();
             let mut ds_map = HashMap::new();
             ds_map.insert("field".to_string(), ds);
 
@@ -1226,7 +1201,7 @@ mod tests {
         #[test]
         fn handles_null_in_array() {
             let mut ds = make_data_source("string");
-            ds.metric_shape = Some("array".to_string());
+            ds.metric_shape = Some("array".to_owned());
             let mut ds_map = HashMap::new();
             ds_map.insert("items".to_string(), ds);
 
@@ -1243,7 +1218,7 @@ mod tests {
         #[test]
         fn handles_object_in_array() {
             let mut ds = make_data_source("string");
-            ds.metric_shape = Some("array".to_string());
+            ds.metric_shape = Some("array".to_owned());
             let mut ds_map = HashMap::new();
             ds_map.insert("items".to_string(), ds);
 
@@ -1297,7 +1272,7 @@ mod tests {
 
         fn make_map_data_source(data_type: &str) -> DataSource {
             let mut ds = make_data_source(data_type);
-            ds.metric_shape = Some("map".to_string());
+            ds.metric_shape = Some("map".to_owned());
             ds
         }
 

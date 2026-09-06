@@ -8,16 +8,15 @@ mod web;
 pub use collect::collect;
 pub use error::error;
 pub use identify::identify;
+pub(crate) use replay::ReplayPublisher;
 pub use replay::replay;
 pub use vitals::vitals;
 pub use web::web;
 
-use crate::batch_queue::{
-    BatchQueue, FailedRequest, QueueError, QueuedEvent, RequestType, TrackingContext,
-};
+use crate::batch_queue::{QueueError, TrackingContext};
 use crate::error_tracking::ProjectGrouping;
 use crate::models::DataSource;
-use crate::tinybird::{ErrorOccurrenceV3Row, ModsEventRow, WebEventRow};
+use crate::tinybird::{ModsEventRow, WebEventRow};
 use axum::Json;
 use axum::http::{HeaderMap, StatusCode};
 use moka::future::Cache;
@@ -98,6 +97,18 @@ pub fn get_authorization(headers: &HeaderMap) -> Option<String> {
         .map(|auth| auth.strip_prefix("Bearer ").unwrap_or(auth).to_owned())
 }
 
+pub async fn authenticate_project(
+    pool: &sqlx::PgPool,
+    headers: &HeaderMap,
+    body_token: Option<String>,
+) -> Result<(String, Arc<ProjectContext>), HandlerResponse> {
+    let token = body_token
+        .or_else(|| get_authorization(headers))
+        .ok_or_else(|| error_response(StatusCode::UNAUTHORIZED, "Unauthorized"))?;
+    let context = load_project_context(pool, &token).await?;
+    Ok((token, context))
+}
+
 pub fn error_response(status: StatusCode, message: &str) -> HandlerResponse {
     (status, Json(serde_json::json!({ "error": message })))
 }
@@ -129,7 +140,6 @@ pub fn success_response(warnings: HashMap<String, String>) -> HandlerResponse {
     }
 }
 
-#[derive(sqlx::FromRow)]
 pub struct IpRule {
     pub ip_address: String,
     pub allowed: bool,
@@ -205,7 +215,10 @@ pub async fn load_project_context(
                 ref_id,
                 DataSource {
                     data_type: row.try_get::<String, _>("data_type").unwrap_or_default(),
-                    regex: row.try_get("regex").ok(),
+                    regex: row
+                        .try_get::<String, _>("regex")
+                        .ok()
+                        .and_then(|pattern| regex::Regex::new(&pattern).ok()),
                     allow_negative: row.try_get("allow_negative").ok(),
                     allow_float: row.try_get("allow_float").ok(),
                     min_value: row.try_get("min_value").ok(),
@@ -216,13 +229,18 @@ pub async fn load_project_context(
         }
     }
 
-    let ip_rules = sqlx::query_as::<_, IpRule>(
-        "SELECT ip_address, allowed FROM ip_addresses WHERE project_id = $1",
-    )
-    .bind(first.get::<Uuid, _>("id"))
-    .fetch_all(pool)
-    .await
-    .unwrap_or_default();
+    let ip_rules =
+        sqlx::query("SELECT ip_address, allowed FROM ip_addresses WHERE project_id = $1")
+            .bind(first.get::<Uuid, _>("id"))
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|row| IpRule {
+                ip_address: row.get("ip_address"),
+                allowed: row.get("allowed"),
+            })
+            .collect();
 
     let project_id = first.get::<Uuid, _>("id");
     let error_grouping = load_error_grouping(pool, project_id)
@@ -686,20 +704,6 @@ pub fn build_web_event_row(
     }
 }
 
-pub fn insert_web_event(
-    batch_queue: &BatchQueue,
-    row: WebEventRow,
-    tracking: Option<TrackingContext>,
-) -> Result<(), HandlerResponse> {
-    batch_queue
-        .queue_event(QueuedEvent::WebEvent {
-            row: Box::new(row),
-            tracking,
-        })
-        .map_err(|e| queue_error_response(e, "web event"))?;
-    Ok(())
-}
-
 pub fn build_mods_event_row(
     project_id: Uuid,
     server_id: Uuid,
@@ -729,381 +733,6 @@ pub fn build_mods_event_row(
         custom: to_custom_json(custom),
         created_at: chrono::Utc::now(),
     }
-}
-
-pub fn insert_mods_event(
-    batch_queue: &BatchQueue,
-    row: ModsEventRow,
-    tracking: Option<TrackingContext>,
-) -> Result<(), HandlerResponse> {
-    batch_queue
-        .queue_event(QueuedEvent::ModsEvent { row, tracking })
-        .map_err(|e| queue_error_response(e, "mods event"))?;
-    Ok(())
-}
-
-pub fn insert_error_occurrence_v3(
-    batch_queue: &BatchQueue,
-    row: ErrorOccurrenceV3Row,
-    language: crate::error_tracking::ErrorLanguage,
-    grouping: &crate::error_tracking::ProjectGrouping,
-    tracking: Option<TrackingContext>,
-) -> Result<(), HandlerResponse> {
-    batch_queue
-        .queue_event(QueuedEvent::ErrorOccurrenceV3 {
-            row: Box::new(row),
-            language,
-            grouping: grouping.clone(),
-            tracking,
-        })
-        .map_err(|e| queue_error_response(e, "error occurrence"))?;
-    Ok(())
-}
-
-pub async fn process_failed_request(
-    batch_queue: &BatchQueue,
-    pool: &sqlx::PgPool,
-    replay_storage: Option<&crate::replay_storage::ReplayStorage>,
-    request: &FailedRequest,
-) -> Result<(), String> {
-    match request.request_type {
-        RequestType::Collect => process_collect_request(batch_queue, pool, request).await,
-        RequestType::Web => process_web_request(batch_queue, pool, replay_storage, request).await,
-        RequestType::Vitals => {
-            process_vitals_request(batch_queue, pool, replay_storage, request).await
-        }
-        RequestType::Replay => {
-            process_replay_request(batch_queue, pool, replay_storage, request).await
-        }
-    }
-}
-
-async fn process_collect_request(
-    batch_queue: &BatchQueue,
-    pool: &sqlx::PgPool,
-    request: &FailedRequest,
-) -> Result<(), String> {
-    let ctx = load_project_context(pool, &request.token)
-        .await
-        .map_err(|_| "Unauthorized or database error")?;
-
-    let request_body: crate::models::Request =
-        serde_json::from_slice(&request.body).map_err(|_| "Invalid JSON")?;
-    let built = collect::build_collect_events(
-        &ctx,
-        &request.token,
-        request_body,
-        request.country.as_deref(),
-    )
-    .map_err(str::to_owned)?;
-
-    insert_mods_event(batch_queue, built.event, Some(built.tracking.clone()))
-        .map_err(|_| "Failed to queue event".to_string())?;
-
-    for occurrence in built.errors {
-        insert_error_occurrence_v3(
-            batch_queue,
-            occurrence,
-            crate::error_tracking::ErrorLanguage::Java,
-            &ctx.error_grouping,
-            Some(built.tracking.clone()),
-        )
-        .map_err(|_| "Failed to queue error".to_string())?;
-    }
-
-    Ok(())
-}
-
-async fn process_web_request(
-    batch_queue: &BatchQueue,
-    pool: &sqlx::PgPool,
-    replay_storage: Option<&crate::replay_storage::ReplayStorage>,
-    request: &FailedRequest,
-) -> Result<(), String> {
-    use crate::handler::web::WebRequest;
-
-    let parsed: WebRequest =
-        serde_json::from_slice(&request.body).map_err(|_| "Invalid JSON".to_string())?;
-
-    let token = parsed.token.as_ref().unwrap_or(&request.token).to_string();
-
-    let ctx = load_project_context(pool, &token)
-        .await
-        .map_err(|_| "Unauthorized or database error")?;
-
-    if !validate_hostname(&ctx.allowed_hostnames, request.origin.as_deref()) {
-        return Err("Origin not allowed".to_string());
-    }
-
-    let (resolved_user_id, cookieless) = match ctx.cookieless_mode {
-        Some(true) => {
-            let ip = request.client_ip.as_deref().unwrap_or("");
-            let ua = request.user_agent.as_deref().unwrap_or("");
-            (
-                crate::utils::cookieless_server_id(ip, ua, ctx.project_id),
-                true,
-            )
-        }
-        Some(false) => {
-            let user_id = parsed
-                .user_id
-                .ok_or_else(|| "userId is required".to_string())?;
-            (crate::utils::hash_server_id(user_id, ctx.project_id), false)
-        }
-        None => match parsed.user_id {
-            Some(user_id) => (crate::utils::hash_server_id(user_id, ctx.project_id), false),
-            None => {
-                let ip = request.client_ip.as_deref().unwrap_or("");
-                let ua = request.user_agent.as_deref().unwrap_or("");
-                (
-                    crate::utils::cookieless_server_id(ip, ua, ctx.project_id),
-                    true,
-                )
-            }
-        },
-    };
-
-    let mut data = parsed.data;
-    let mut properties = parsed.properties;
-    let mut known = extract_known_fields(&mut data, WEB_EVENT_FIELDS);
-    properties.extend(data);
-    known.insert(
-        "user_id".into(),
-        Value::String(resolved_user_id.to_string()),
-    );
-    known.insert("cookieless".into(), Value::Bool(cookieless));
-    crate::handler::web::stamp_person_identity(pool, ctx.project_id, resolved_user_id, &mut known)
-        .await;
-
-    use crate::utils::debounce::should_debounce;
-
-    let url = known.get("url").and_then(|v| v.as_str()).unwrap_or("");
-    let event = known.get("event").and_then(|v| v.as_str());
-    let has_errors = parsed
-        .errors
-        .as_ref()
-        .is_some_and(|items| !items.is_empty());
-    if !has_errors && should_debounce(resolved_user_id, url, event) {
-        return Ok(());
-    }
-
-    let ua_info = match request.user_agent.as_deref().and_then(user_agent::parse) {
-        Some(info) => info,
-        None => return Ok(()), // Bot detected or no UA
-    };
-
-    if !ua_info.browser.is_empty() {
-        known.insert("browser".into(), Value::String(ua_info.browser));
-    }
-    if !ua_info.browser_version.is_empty() {
-        known.insert(
-            "browser_version".into(),
-            Value::String(ua_info.browser_version),
-        );
-    }
-    if !ua_info.os.is_empty() {
-        known.insert("os".into(), Value::String(ua_info.os));
-    }
-    if !ua_info.os_version.is_empty() {
-        known.insert("os_version".into(), Value::String(ua_info.os_version));
-    }
-    known.insert("device".into(), Value::String(ua_info.device.to_string()));
-
-    let tracking_ctx = ctx.tracking_context(&token);
-    let fallback_identity = resolved_user_id.to_string();
-    let event_row = build_web_event_row(
-        ctx.project_id,
-        &mut known,
-        parsed.session_id.clone(),
-        request.country.clone(),
-        &properties,
-    );
-    let should_process_errors = ctx.error_tracking_enabled && has_errors;
-    let error_v3_context = should_process_errors.then(|| {
-        parsed
-            .context
-            .unwrap_or_else(|| crate::error_tracking::v3::web_context(&event_row, &properties))
-    });
-
-    if ctx.replay_storage_active
-        && let Some(session_id) = parsed.session_id.as_deref()
-        && let Some(replay_storage) = replay_storage
-        && let Err(error) = replay_storage
-            .record_filter_event(
-                pool,
-                crate::replay_storage::ReplayFilterEventInput {
-                    project_id: ctx.project_id,
-                    storage_generation: ctx.replay_storage_generation,
-                    session_id,
-                    window_id: parsed.window_id.as_deref().unwrap_or(session_id),
-                    identifier: Some(fallback_identity.as_str()),
-                    browser: event_row.browser.as_deref(),
-                    os: event_row.os.as_deref(),
-                    country: request.country.as_deref(),
-                    url: event_row.url.as_deref(),
-                    custom: &properties,
-                },
-            )
-            .await
-    {
-        warn!("Failed to persist replay filter metadata: {}", error);
-    }
-
-    insert_web_event(batch_queue, event_row, Some(tracking_ctx.clone()))
-        .map_err(|_| "Failed to queue event".to_string())?;
-
-    if let (true, Some(errors), Some(error_v3_context)) = (
-        should_process_errors,
-        parsed.errors,
-        error_v3_context.as_ref(),
-    ) {
-        for error in errors {
-            let occurrence = crate::error_tracking::v3::build_occurrence(
-                crate::error_tracking::v3::OccurrenceInput {
-                    project_id: ctx.project_id,
-                    language: crate::error_tracking::ErrorLanguage::JavaScript,
-                    // The browser SDK sends this as `buildId`; Tinybird stores it as `release`.
-                    release: parsed.build_id.as_deref(),
-                    identifier: Some(&fallback_identity),
-                    session_id: parsed.session_id.as_deref(),
-                    window_id: parsed.window_id.as_deref(),
-                    sdk_name: parsed.sdk_name.as_deref(),
-                    sdk_version: parsed.sdk_version.as_deref(),
-                    context: error_v3_context,
-                    grouping: &ctx.error_grouping,
-                },
-                error,
-            );
-            insert_error_occurrence_v3(
-                batch_queue,
-                occurrence,
-                crate::error_tracking::ErrorLanguage::JavaScript,
-                &ctx.error_grouping,
-                Some(tracking_ctx.clone()),
-            )
-            .map_err(|_| "Failed to queue error occurrence".to_string())?;
-        }
-
-        if let Some(session_id) = parsed.session_id.as_deref()
-            && let Some(replay_storage) = replay_storage
-            && let Err(error) = replay_storage
-                .mark_session_error(
-                    pool,
-                    ctx.project_id,
-                    session_id,
-                    parsed.window_id.as_deref().unwrap_or(session_id),
-                )
-                .await
-        {
-            warn!("Failed to persist replay error flag: {}", error);
-        }
-    }
-
-    Ok(())
-}
-
-async fn process_vitals_request(
-    batch_queue: &BatchQueue,
-    pool: &sqlx::PgPool,
-    replay_storage: Option<&crate::replay_storage::ReplayStorage>,
-    request: &FailedRequest,
-) -> Result<(), String> {
-    use crate::handler::vitals::WebVitalRequest;
-
-    let ctx = load_project_context(pool, &request.token)
-        .await
-        .map_err(|_| "Unauthorized or database error")?;
-
-    let req: WebVitalRequest =
-        serde_json::from_slice(&request.body).map_err(|_| "Invalid JSON".to_string())?;
-
-    let tracking_ctx = ctx.tracking_context(&request.token);
-
-    let ua_info = user_agent::parse(request.user_agent.as_deref().unwrap_or(""));
-    let rows = vitals::build_web_vital_rows(
-        ctx.project_id,
-        &req,
-        request.country.as_deref(),
-        ua_info.as_ref(),
-    )
-    .map_err(str::to_owned)?;
-
-    for row in rows {
-        let is_poor = vitals::is_poor_web_vital(&row.metric, row.value);
-
-        batch_queue
-            .queue_event(QueuedEvent::WebVital {
-                row,
-                tracking: Some(tracking_ctx.clone()),
-            })
-            .map_err(|_| "Failed to queue web vital".to_string())?;
-
-        if let Some(session_id) = req.session_id.as_deref()
-            && let Some(replay_storage) = replay_storage
-            && is_poor
-            && let Err(error) = replay_storage
-                .mark_session_poor_vital(
-                    pool,
-                    ctx.project_id,
-                    session_id,
-                    req.window_id.as_deref().unwrap_or(session_id),
-                )
-                .await
-        {
-            warn!("Failed to persist replay poor-vital flag: {}", error);
-        }
-    }
-
-    Ok(())
-}
-
-async fn process_replay_request(
-    batch_queue: &BatchQueue,
-    pool: &sqlx::PgPool,
-    replay_storage: Option<&crate::replay_storage::ReplayStorage>,
-    request: &FailedRequest,
-) -> Result<(), String> {
-    use crate::handler::replay::ReplayRequest;
-
-    let parsed: ReplayRequest =
-        serde_json::from_slice(&request.body).map_err(|_| "Invalid JSON".to_string())?;
-    let token = parsed.token.clone();
-
-    let ctx = load_project_context(pool, &token)
-        .await
-        .map_err(|_| "Unauthorized or database error")?;
-
-    let replay_storage =
-        replay_storage.ok_or_else(|| "Replay storage is not configured".to_string())?;
-    if !ctx.replay_storage_active {
-        return Err("Replay storage is resetting".to_string());
-    }
-
-    let built = crate::handler::replay::build_replay_chunk_input(
-        &ctx,
-        &token,
-        parsed,
-        request.client_ip.as_deref().unwrap_or(""),
-        request.user_agent.as_deref().unwrap_or(""),
-        request.country.as_deref(),
-    )?;
-
-    let input = built.input;
-    let stored = if input.events.is_empty() {
-        replay_storage
-            .finalize_replay_session(pool, input.project_id, &input.session_id, &input.window_id)
-            .await
-            .map(|()| Default::default())
-    } else {
-        replay_storage.store_replay_chunk(pool, input).await
-    }
-    .map_err(|error| error.to_string())?;
-
-    if stored.first_for_billing {
-        batch_queue.track_replay_usage(&built.session_id, &built.tracking);
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]

@@ -1,9 +1,9 @@
 use super::{
-    MODS_EVENT_FIELDS, ProjectContext, build_mods_event_row, check_ip_allowed, error_response,
-    extract_known_fields, get_authorization, get_client_ip, get_country,
-    insert_error_occurrence_v3, insert_mods_event, load_project_context, success_response,
+    MODS_EVENT_FIELDS, ProjectContext, authenticate_project, build_mods_event_row,
+    check_ip_allowed, error_response, extract_known_fields, get_client_ip, get_country,
+    queue_error_response, success_response,
 };
-use crate::batch_queue::{FailedRequest, RequestType, TrackingContext};
+use crate::batch_queue::{QueuedEvent, TrackingContext};
 use crate::error_tracking::ErrorLanguage;
 use crate::error_tracking::v3::{OccurrenceInput, build_occurrence, mods_context};
 use crate::models::{AppState, Request};
@@ -15,50 +15,15 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use sqlx::types::Uuid;
 use std::collections::HashMap;
-use tracing::error;
 
 pub async fn collect(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    let token = match get_authorization(&headers) {
-        Some(t) => t,
-        None => return error_response(StatusCode::UNAUTHORIZED, "Unauthorized"),
-    };
-
-    let ctx = match load_project_context(&state.pool, &token).await {
-        Ok(ctx) => ctx,
-        Err(e) => {
-            if e.0 == StatusCode::UNAUTHORIZED {
-                return e;
-            }
-
-            let country = headers
-                .get("CF-IPCountry")
-                .and_then(|v| v.to_str().ok())
-                .map(String::from);
-
-            let failed = FailedRequest {
-                request_type: RequestType::Collect,
-                token,
-                body: body.to_vec(),
-                country,
-                client_ip: None,
-                user_agent: None,
-                origin: None,
-            };
-
-            if let Err(e) = state.batch_queue.backup_store.backup_request(&failed).await {
-                error!("Failed to store failed request: {}", e);
-                return error_response(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "Service temporarily unavailable",
-                );
-            }
-
-            return success_response(HashMap::new());
-        }
+    let (token, ctx) = match authenticate_project(&state.pool, &headers, None).await {
+        Ok(authenticated) => authenticated,
+        Err(error) => return error,
     };
 
     let client_ip = get_client_ip(&headers);
@@ -75,23 +40,24 @@ pub async fn collect(
         Err(message) => return error_response(StatusCode::BAD_REQUEST, message),
     };
 
-    if let Err(e) = insert_mods_event(
-        &state.batch_queue,
-        built.event,
-        Some(built.tracking.clone()),
-    ) {
-        return e;
+    if let Err(error) = state.batch_queue.queue_event(QueuedEvent::ModsEvent {
+        row: built.event,
+        tracking: Some(built.tracking.clone()),
+    }) {
+        return queue_error_response(error, "mods event");
     }
 
     for occurrence in built.errors {
-        if let Err(e) = insert_error_occurrence_v3(
-            &state.batch_queue,
-            occurrence,
-            ErrorLanguage::Java,
-            &ctx.error_grouping,
-            Some(built.tracking.clone()),
-        ) {
-            return e;
+        if let Err(error) = state
+            .batch_queue
+            .queue_event(QueuedEvent::ErrorOccurrenceV3 {
+                row: Box::new(occurrence),
+                language: ErrorLanguage::Java,
+                grouping: ctx.error_grouping.clone(),
+                tracking: Some(built.tracking.clone()),
+            })
+        {
+            return queue_error_response(error, "error occurrence");
         }
     }
 

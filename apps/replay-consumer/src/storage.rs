@@ -1,11 +1,10 @@
-use aws_sdk_s3::Client;
-use aws_sdk_s3::config::{Builder as S3ConfigBuilder, Credentials, Region};
-use aws_sdk_s3::error::DisplayErrorContext;
-use aws_sdk_s3::primitives::ByteStream;
+use crate::object_store::ObjectStore;
+use replay_message::ReplayChunk as ReplayChunkInput;
 use serde::Serialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::io::Write;
 use std::time::Duration;
 use uuid::Uuid;
@@ -16,109 +15,29 @@ const REPLAY_COMPRESSION_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone)]
 pub struct ReplayStorage {
-    client: Client,
-    bucket_prefix: String,
+    objects: ObjectStore,
 }
 
-#[derive(Clone)]
-pub struct ReplayChunkInput {
-    pub project_id: Uuid,
-    pub storage_generation: i32,
-    pub session_id: String,
-    pub window_id: String,
-    pub view_id: Option<String>,
-    pub session_start_ms: Option<i64>,
-    pub is_final: bool,
-    pub flush_reason: Option<String>,
-    pub batch_id: Option<String>,
-    pub sequence: i64,
-    pub first_sequence: Option<i64>,
-    pub last_sequence: Option<i64>,
-    pub client_batch_count: i32,
-    pub identifier: Option<String>,
-    pub browser: Option<String>,
-    pub country: Option<String>,
-    pub os: Option<String>,
-    pub url: Option<String>,
-    pub events: Vec<Value>,
+enum PersistOutcome {
+    Stored { first_for_billing: bool },
+    Duplicate,
+    Inactive,
 }
 
-#[derive(Debug, Default)]
-pub struct ReplayStoreOutcome {
-    pub first_for_billing: bool,
-}
-
-pub struct ReplayFilterEventInput<'a> {
-    pub project_id: Uuid,
-    pub storage_generation: i32,
-    pub session_id: &'a str,
-    pub window_id: &'a str,
-    pub identifier: Option<&'a str>,
-    pub browser: Option<&'a str>,
-    pub os: Option<&'a str>,
-    pub country: Option<&'a str>,
-    pub url: Option<&'a str>,
-    pub custom: &'a HashMap<String, Value>,
-}
-
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ReplayStorageError {
-    Serialization(serde_json::Error),
-    Compression(std::io::Error),
+    #[error("Failed to serialize replay chunk: {0}")]
+    Serialization(#[from] serde_json::Error),
+    #[error("Failed to compress replay chunk: {0}")]
+    Compression(#[from] std::io::Error),
+    #[error("Timed out while compressing replay chunk")]
     CompressionTimeout,
+    #[error("Replay compression task failed: {0}")]
     CompressionTask(String),
+    #[error("Object-store operation failed: {0}")]
     Upload(String),
-    Database(sqlx::Error),
-}
-
-impl std::fmt::Display for ReplayStorageError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ReplayStorageError::Serialization(error) => {
-                write!(f, "Failed to serialize replay chunk: {}", error)
-            }
-            ReplayStorageError::Compression(error) => {
-                write!(f, "Failed to compress replay chunk: {}", error)
-            }
-            ReplayStorageError::CompressionTimeout => {
-                write!(f, "Timed out while compressing replay chunk")
-            }
-            ReplayStorageError::CompressionTask(error) => {
-                write!(f, "Replay compression task failed: {}", error)
-            }
-            ReplayStorageError::Upload(error) => {
-                write!(f, "Failed to upload replay chunk: {}", error)
-            }
-            ReplayStorageError::Database(error) => {
-                write!(f, "Failed to persist replay metadata: {}", error)
-            }
-        }
-    }
-}
-
-impl From<serde_json::Error> for ReplayStorageError {
-    fn from(error: serde_json::Error) -> Self {
-        ReplayStorageError::Serialization(error)
-    }
-}
-
-impl From<std::io::Error> for ReplayStorageError {
-    fn from(error: std::io::Error) -> Self {
-        ReplayStorageError::Compression(error)
-    }
-}
-
-impl From<sqlx::Error> for ReplayStorageError {
-    fn from(error: sqlx::Error) -> Self {
-        ReplayStorageError::Database(error)
-    }
-}
-
-#[derive(sqlx::FromRow)]
-struct ReplayFilterMetadata {
-    browser: Option<String>,
-    country: Option<String>,
-    os: Option<String>,
+    #[error("Failed to persist replay metadata: {0}")]
+    Database(#[from] sqlx::Error),
 }
 
 #[derive(Debug, Serialize)]
@@ -139,55 +58,14 @@ struct ReplayRouteMetadata {
 
 impl ReplayStorage {
     pub fn from_env() -> Result<Option<Self>, String> {
-        let bucket_prefix = std::env::var("REPLAY_S3_BUCKET_PREFIX")
-            .ok()
-            .or_else(|| std::env::var("REPLAY_S3_BUCKET").ok());
-        let endpoint = std::env::var("REPLAY_S3_ENDPOINT").ok();
-        let access_key = std::env::var("REPLAY_S3_ACCESS_KEY_ID").ok();
-        let secret_key = std::env::var("REPLAY_S3_SECRET_ACCESS_KEY").ok();
-
-        if bucket_prefix.is_none()
-            && endpoint.is_none()
-            && access_key.is_none()
-            && secret_key.is_none()
-        {
-            return Ok(None);
-        }
-
-        let bucket_prefix =
-            bucket_prefix.ok_or_else(|| "REPLAY_S3_BUCKET_PREFIX must be set".to_string())?;
-        let access_key =
-            access_key.ok_or_else(|| "REPLAY_S3_ACCESS_KEY_ID must be set".to_string())?;
-        let secret_key =
-            secret_key.ok_or_else(|| "REPLAY_S3_SECRET_ACCESS_KEY must be set".to_string())?;
-        let region = std::env::var("REPLAY_S3_REGION").unwrap_or_else(|_| "us-east-1".to_string());
-
-        let mut config = S3ConfigBuilder::new()
-            .region(Region::new(region))
-            .credentials_provider(Credentials::new(
-                access_key,
-                secret_key,
-                None,
-                None,
-                "faststats-replay-storage",
-            ))
-            .force_path_style(true);
-
-        if let Some(endpoint) = endpoint {
-            config = config.endpoint_url(endpoint);
-        }
-
-        Ok(Some(Self {
-            client: Client::from_conf(config.build()),
-            bucket_prefix: normalize_bucket_prefix(&bucket_prefix)?,
-        }))
+        Ok(ObjectStore::from_env()?.map(|objects| Self { objects }))
     }
 
     pub async fn store_replay_chunk(
         &self,
         pool: &sqlx::PgPool,
         mut input: ReplayChunkInput,
-    ) -> Result<ReplayStoreOutcome, ReplayStorageError> {
+    ) -> Result<bool, ReplayStorageError> {
         if !replay_events_are_ordered(&input.events) {
             input.events.sort_by(replay_event_order_cmp);
         }
@@ -203,7 +81,7 @@ impl ReplayStorage {
         if !replay_storage_generation_is_active(pool, input.project_id, input.storage_generation)
             .await?
         {
-            return Ok(ReplayStoreOutcome::default());
+            return Ok(false);
         }
 
         // Avoid object-store work for retries and for sequences already covered by a
@@ -233,7 +111,7 @@ impl ReplayStorage {
         .fetch_one(pool)
         .await?;
         if already_stored {
-            return Ok(ReplayStoreOutcome::default());
+            return Ok(false);
         }
         let route_metadata = replay_route_metadata(&input.events, input.url.as_deref());
         let object_key = replay_object_key(
@@ -247,8 +125,11 @@ impl ReplayStorage {
         let (compressed, uncompressed_bytes) = compress_replay_events(input.events).await?;
         let compressed_bytes = i64::try_from(compressed.len()).unwrap_or(i64::MAX);
 
-        let bucket = self.bucket_for_project(input.project_id);
-        self.put_object(&bucket, &object_key, compressed).await?;
+        let bucket = self.objects.bucket(input.project_id);
+        self.objects
+            .put(&bucket, &object_key, compressed)
+            .await
+            .map_err(ReplayStorageError::Upload)?;
 
         let result = async {
             let mut tx = pool.begin().await?;
@@ -261,7 +142,7 @@ impl ReplayStorage {
             .await?
             {
                 tx.commit().await?;
-                return Ok::<(bool, bool, bool), sqlx::Error>((false, false, false));
+                return Ok::<PersistOutcome, sqlx::Error>(PersistOutcome::Inactive);
             }
 
             let stream_key = format!(
@@ -302,7 +183,7 @@ impl ReplayStorage {
             .await?;
             if overlap_exists {
                 tx.commit().await?;
-                return Ok::<(bool, bool, bool), sqlx::Error>((false, true, false));
+                return Ok::<PersistOutcome, sqlx::Error>(PersistOutcome::Duplicate);
             }
 
             let insert_result = sqlx::query(
@@ -375,48 +256,9 @@ impl ReplayStorage {
             .await?;
 
             if insert_result.rows_affected() == 0 {
-                let already_exists: bool = sqlx::query_scalar(
-                    r#"
-                    SELECT EXISTS (
-                        SELECT 1 FROM replay_snapshots
-                        WHERE project_id = $1
-                          AND session_id = $2
-                          AND window_id = $3
-                          AND storage_generation = $6
-                          AND (
-                              ($4::text IS NOT NULL AND batch_id = $4)
-                              OR ($4::text IS NULL AND sequence = $5)
-                              OR ($5 BETWEEN first_sequence AND last_sequence)
-                          )
-                    )
-                    "#,
-                )
-                .bind(input.project_id)
-                .bind(&input.session_id)
-                .bind(&input.window_id)
-                .bind(&input.batch_id)
-                .bind(input.sequence)
-                .bind(input.storage_generation)
-                .fetch_one(&mut *tx)
-                .await?;
                 tx.commit().await?;
-                return Ok::<(bool, bool, bool), sqlx::Error>((false, already_exists, false));
+                return Ok::<PersistOutcome, sqlx::Error>(PersistOutcome::Duplicate);
             }
-
-            let latest_filter_metadata = sqlx::query_as::<_, ReplayFilterMetadata>(
-                r#"
-                SELECT browser, country, os
-                FROM replay_filter_events
-                WHERE project_id = $1 AND session_id = $2 AND window_id = $3
-                ORDER BY created_at DESC
-                LIMIT 1
-                "#,
-            )
-            .bind(input.project_id)
-            .bind(&input.session_id)
-            .bind(&input.window_id)
-            .fetch_optional(&mut *tx)
-            .await?;
 
             let initial_actual_duration_ms = match (first_event_timestamp_ms, last_event_timestamp_ms)
             {
@@ -472,67 +314,28 @@ impl ReplayStorage {
                         replay_sessions.session_start_ms,
                         EXCLUDED.session_start_ms
                     ),
-                    actual_started_at_ms = COALESCE(
-                        LEAST(
-                            replay_sessions.actual_started_at_ms,
-                            EXCLUDED.actual_started_at_ms
-                        ),
-                        replay_sessions.actual_started_at_ms,
-                        EXCLUDED.actual_started_at_ms
+                    (actual_started_at_ms, actual_ended_at_ms, actual_duration_ms) = (
+                        SELECT first_ms, last_ms,
+                            CASE WHEN last_ms >= first_ms THEN last_ms - first_ms END
+                        FROM (
+                            SELECT
+                                COALESCE(LEAST(replay_sessions.actual_started_at_ms, EXCLUDED.actual_started_at_ms), replay_sessions.actual_started_at_ms, EXCLUDED.actual_started_at_ms) AS first_ms,
+                                COALESCE(GREATEST(replay_sessions.actual_ended_at_ms, EXCLUDED.actual_ended_at_ms), replay_sessions.actual_ended_at_ms, EXCLUDED.actual_ended_at_ms) AS last_ms
+                        ) AS bounds
                     ),
-                    actual_ended_at_ms = COALESCE(
-                        GREATEST(
-                            replay_sessions.actual_ended_at_ms,
-                            EXCLUDED.actual_ended_at_ms
-                        ),
-                        replay_sessions.actual_ended_at_ms,
-                        EXCLUDED.actual_ended_at_ms
-                    ),
-                    actual_duration_ms = CASE
-                        WHEN COALESCE(
-                            GREATEST(
-                                replay_sessions.actual_ended_at_ms,
-                                EXCLUDED.actual_ended_at_ms
-                            ),
-                            replay_sessions.actual_ended_at_ms,
-                            EXCLUDED.actual_ended_at_ms
-                        ) >= COALESCE(
-                            LEAST(
-                                replay_sessions.actual_started_at_ms,
-                                EXCLUDED.actual_started_at_ms
-                            ),
-                            replay_sessions.actual_started_at_ms,
-                            EXCLUDED.actual_started_at_ms
-                        )
-                        THEN COALESCE(
-                            GREATEST(
-                                replay_sessions.actual_ended_at_ms,
-                                EXCLUDED.actual_ended_at_ms
-                            ),
-                            replay_sessions.actual_ended_at_ms,
-                            EXCLUDED.actual_ended_at_ms
-                        ) - COALESCE(
-                            LEAST(
-                                replay_sessions.actual_started_at_ms,
-                                EXCLUDED.actual_started_at_ms
-                            ),
-                            replay_sessions.actual_started_at_ms,
-                            EXCLUDED.actual_started_at_ms
-                        )
-                        ELSE NULL
-                    END,
                     event_count = replay_sessions.event_count + EXCLUDED.event_count,
                     chunk_count = replay_sessions.chunk_count + EXCLUDED.chunk_count,
                     total_bytes = replay_sessions.total_bytes + EXCLUDED.total_bytes,
                     has_full_snapshot = replay_sessions.has_full_snapshot OR EXCLUDED.has_full_snapshot,
-                    routes = ARRAY(
-                        SELECT DISTINCT replay_route.route
-                        FROM unnest(replay_sessions.routes || EXCLUDED.routes) AS replay_route(route)
+                    (routes, route_count) = (
+                        SELECT merged_routes, cardinality(merged_routes)
+                        FROM (
+                            SELECT ARRAY(
+                                SELECT DISTINCT replay_route.route
+                                FROM unnest(replay_sessions.routes || EXCLUDED.routes) AS replay_route(route)
+                            ) AS merged_routes
+                        ) AS route_merge
                     ),
-                    route_count = cardinality(ARRAY(
-                        SELECT DISTINCT replay_route.route
-                        FROM unnest(replay_sessions.routes || EXCLUDED.routes) AS replay_route(route)
-                    )),
                     entry_route = COALESCE(replay_sessions.entry_route, EXCLUDED.entry_route),
                     exit_route = COALESCE(EXCLUDED.exit_route, replay_sessions.exit_route),
                     browser = COALESCE(EXCLUDED.browser, replay_sessions.browser),
@@ -562,24 +365,9 @@ impl ReplayStorage {
             .bind(i32::try_from(route_metadata.routes.len()).unwrap_or(i32::MAX))
             .bind(route_metadata.entry_route.as_deref())
             .bind(route_metadata.exit_route.as_deref())
-            .bind(
-                input
-                    .browser
-                    .as_deref()
-                    .or_else(|| latest_filter_metadata.as_ref()?.browser.as_deref()),
-            )
-            .bind(
-                input
-                    .country
-                    .as_deref()
-                    .or_else(|| latest_filter_metadata.as_ref()?.country.as_deref()),
-            )
-            .bind(
-                input
-                    .os
-                    .as_deref()
-                    .or_else(|| latest_filter_metadata.as_ref()?.os.as_deref()),
-            )
+            .bind(input.browser.as_deref())
+            .bind(input.country.as_deref())
+            .bind(input.os.as_deref())
             .bind(input.is_final)
             .execute(&mut *tx)
             .await?;
@@ -600,12 +388,12 @@ impl ReplayStorage {
             .is_some();
 
             tx.commit().await?;
-            Ok::<(bool, bool, bool), sqlx::Error>((true, false, first_for_billing))
+            Ok::<PersistOutcome, sqlx::Error>(PersistOutcome::Stored { first_for_billing })
         }
         .await;
 
         match result {
-            Ok((true, _, first_for_billing)) => {
+            Ok(PersistOutcome::Stored { first_for_billing }) => {
                 record_replay_chunk_metrics(
                     input.flush_reason.as_deref(),
                     input.is_final,
@@ -613,16 +401,19 @@ impl ReplayStorage {
                     compressed_bytes,
                     uncompressed_bytes,
                 );
-                Ok(ReplayStoreOutcome { first_for_billing })
+                Ok(first_for_billing)
             }
-            Ok((false, true, _)) => {
+            Ok(PersistOutcome::Duplicate) => {
                 // Idempotent retries use the same deterministic object key. Deleting it here
                 // would remove the object referenced by the transaction that won the race.
-                Ok(ReplayStoreOutcome::default())
+                Ok(false)
             }
-            Ok((false, false, _)) => {
-                self.delete_object(&bucket, &object_key).await?;
-                Ok(ReplayStoreOutcome::default())
+            Ok(PersistOutcome::Inactive) => {
+                self.objects
+                    .delete(&bucket, &object_key)
+                    .await
+                    .map_err(ReplayStorageError::Upload)?;
+                Ok(false)
             }
             Err(error) => {
                 // Keep deterministic objects on database failure. A concurrent transaction may
@@ -656,167 +447,29 @@ impl ReplayStorage {
         Ok(())
     }
 
-    pub async fn record_filter_event(
+    pub async fn apply_session_patch(
         &self,
         pool: &sqlx::PgPool,
-        input: ReplayFilterEventInput<'_>,
-    ) -> Result<(), ReplayStorageError> {
-        let mut tx = pool.begin().await?;
-
-        if !replay_storage_generation_is_active(
-            &mut *tx,
-            input.project_id,
-            input.storage_generation,
-        )
-        .await?
-        {
-            tx.commit().await?;
-            return Ok(());
-        }
-
-        sqlx::query(
-            r#"
-            INSERT INTO replay_filter_events (
-                id,
-                project_id,
-                session_id,
-                window_id,
-                browser,
-                country,
-                os,
-                normalized_route,
-                custom
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-            "#,
-        )
-        .bind(Uuid::new_v4())
-        .bind(input.project_id)
-        .bind(input.session_id)
-        .bind(input.window_id)
-        .bind(input.browser)
-        .bind(input.country)
-        .bind(input.os)
-        .bind(normalize_route(input.url))
-        .bind(sqlx::types::Json(input.custom))
-        .execute(&mut *tx)
-        .await?;
-
-        sqlx::query(
+        patch: &replay_message::ReplaySessionPatch,
+    ) -> Result<bool, ReplayStorageError> {
+        let result = sqlx::query(
             r#"
             UPDATE replay_sessions
             SET
-                identifier = COALESCE($4, identifier),
-                browser = COALESCE($5, browser),
-                country = COALESCE($6, country),
-                os = COALESCE($7, os),
+                has_errors = has_errors OR $4,
+                has_poor_vitals = has_poor_vitals OR $5,
                 updated_at = NOW()
             WHERE project_id = $1 AND session_id = $2 AND window_id = $3 AND deleted_at IS NULL
             "#,
         )
-        .bind(input.project_id)
-        .bind(input.session_id)
-        .bind(input.window_id)
-        .bind(input.identifier)
-        .bind(input.browser)
-        .bind(input.country)
-        .bind(input.os)
-        .execute(&mut *tx)
-        .await?;
-
-        tx.commit().await?;
-        Ok(())
-    }
-
-    pub async fn mark_session_error(
-        &self,
-        pool: &sqlx::PgPool,
-        project_id: Uuid,
-        session_id: &str,
-        window_id: &str,
-    ) -> Result<(), ReplayStorageError> {
-        sqlx::query(
-            r#"
-            UPDATE replay_sessions
-            SET has_errors = true, updated_at = NOW()
-            WHERE project_id = $1 AND session_id = $2 AND window_id = $3 AND deleted_at IS NULL
-            "#,
-        )
-        .bind(project_id)
-        .bind(session_id)
-        .bind(window_id)
+        .bind(patch.project_id)
+        .bind(&patch.session_id)
+        .bind(&patch.window_id)
+        .bind(patch.has_errors)
+        .bind(patch.has_poor_vitals)
         .execute(pool)
         .await?;
-
-        Ok(())
-    }
-
-    pub async fn mark_session_poor_vital(
-        &self,
-        pool: &sqlx::PgPool,
-        project_id: Uuid,
-        session_id: &str,
-        window_id: &str,
-    ) -> Result<(), ReplayStorageError> {
-        sqlx::query(
-            r#"
-            UPDATE replay_sessions
-            SET has_poor_vitals = true, updated_at = NOW()
-            WHERE project_id = $1 AND session_id = $2 AND window_id = $3 AND deleted_at IS NULL
-            "#,
-        )
-        .bind(project_id)
-        .bind(session_id)
-        .bind(window_id)
-        .execute(pool)
-        .await?;
-
-        Ok(())
-    }
-
-    fn bucket_for_project(&self, project_id: Uuid) -> String {
-        format!("{}-{}", self.bucket_prefix, project_id)
-    }
-
-    async fn put_object(
-        &self,
-        bucket: &str,
-        key: &str,
-        body: Vec<u8>,
-    ) -> Result<(), ReplayStorageError> {
-        self.client
-            .put_object()
-            .bucket(bucket)
-            .key(key)
-            .content_type("application/json")
-            .content_encoding(REPLAY_CONTENT_ENCODING)
-            .body(ByteStream::from(body))
-            .send()
-            .await
-            .map_err(|error| {
-                ReplayStorageError::Upload(format!(
-                    "PutObject to bucket {bucket} failed: {}",
-                    DisplayErrorContext(error)
-                ))
-            })?;
-
-        Ok(())
-    }
-
-    async fn delete_object(&self, bucket: &str, key: &str) -> Result<(), ReplayStorageError> {
-        self.client
-            .delete_object()
-            .bucket(bucket)
-            .key(key)
-            .send()
-            .await
-            .map_err(|error| {
-                ReplayStorageError::Upload(format!(
-                    "DeleteObject from bucket {bucket} failed: {}",
-                    DisplayErrorContext(error)
-                ))
-            })?;
-        Ok(())
+        Ok(result.rows_affected() > 0)
     }
 }
 
@@ -857,14 +510,20 @@ fn replay_object_key(
     first_event_timestamp_ms: i64,
 ) -> String {
     let identity = batch_id
-        .map(|value| crate::utils::sha256_hex(&[value.as_bytes()]))
-        .unwrap_or_else(|| {
-            crate::utils::sha256_hex(&[window_id.as_bytes(), &sequence.to_be_bytes()])
-        });
+        .map(|value| sha256_hex(&[value.as_bytes()]))
+        .unwrap_or_else(|| sha256_hex(&[window_id.as_bytes(), &sequence.to_be_bytes()]));
     format!(
         "{}/{}/{}/{}-{}.json.zst",
         storage_generation, session_id, window_id, first_event_timestamp_ms, identity
     )
+}
+
+fn sha256_hex(parts: &[&[u8]]) -> String {
+    let mut hasher = Sha256::new();
+    for part in parts {
+        hasher.update(part);
+    }
+    hex::encode(hasher.finalize())
 }
 
 /// Allowed `flush_reason` metric labels. Anything else is bucketed into
@@ -915,29 +574,6 @@ fn record_replay_chunk_metrics(
     metrics::histogram!("replay_chunk_compressed_bytes", &labels).record(compressed_bytes as f64);
     metrics::histogram!("replay_chunk_uncompressed_bytes", &labels)
         .record(uncompressed_bytes as f64);
-}
-
-fn normalize_bucket_prefix(value: &str) -> Result<String, String> {
-    let normalized = value
-        .trim()
-        .to_ascii_lowercase()
-        .chars()
-        .map(|character| {
-            if character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-' {
-                character
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>()
-        .trim_matches('-')
-        .chars()
-        .take(26)
-        .collect::<String>();
-    if normalized.len() < 3 {
-        return Err("REPLAY_S3_BUCKET_PREFIX must contain at least 3 valid characters".to_string());
-    }
-    Ok(normalized)
 }
 
 struct CountingWriter<W> {
@@ -1170,19 +806,6 @@ fn normalize_path(path: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
-
-    #[test]
-    fn normalizes_bucket_prefix_for_project_bucket_names() {
-        assert_eq!(
-            normalize_bucket_prefix(" FastStats_Replays ").unwrap(),
-            "faststats-replays"
-        );
-        assert_eq!(
-            normalize_bucket_prefix("abcdefghijklmnopqrstuvwxyz-more").unwrap(),
-            "abcdefghijklmnopqrstuvwxyz"
-        );
-        assert!(normalize_bucket_prefix("__").is_err());
-    }
 
     #[test]
     fn replay_object_keys_are_generation_scoped() {

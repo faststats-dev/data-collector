@@ -1,31 +1,101 @@
 use super::{
-    EncodingQuery, ProjectContext, check_ip_allowed, decompress_body, error_response,
-    get_client_ip, get_country, get_request_origin, load_project_context, success_response,
+    EncodingQuery, ProjectContext, authenticate_project, check_ip_allowed, decompress_body,
+    error_response, get_client_ip, get_country, get_request_origin, success_response,
     validate_hostname,
 };
-use crate::batch_queue::{FailedRequest, RequestType, TrackingContext};
+use crate::batch_queue::TrackingContext;
 use crate::models::AppState;
-use crate::replay_storage::ReplayChunkInput;
 use axum::body::Bytes;
 use axum::extract::{Query, State};
 use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
+use replay_message::{ReplayChunk, ReplayCommand, ReplaySessionPatch};
 use serde::Deserialize;
 use serde_json::Value;
 use sqlx::types::Uuid as SqlxUuid;
 use std::collections::HashMap;
 use tracing::{error, warn};
+use uuid::Uuid;
+
+#[derive(Clone)]
+pub(crate) struct ReplayPublisher {
+    publisher: crate::kafka::Publisher,
+    topic: String,
+}
+
+impl ReplayPublisher {
+    pub(crate) fn from_env(publisher: crate::kafka::Publisher) -> Self {
+        let topic = std::env::var(replay_message::TOPIC_ENV)
+            .unwrap_or_else(|_| replay_message::DEFAULT_TOPIC.into());
+        Self { publisher, topic }
+    }
+
+    pub(crate) async fn publish(&self, command: ReplayCommand) -> Result<(), String> {
+        let key = command_key(&command);
+        let payload = serde_json::to_vec(&command).map_err(|error| error.to_string())?;
+        self.publisher.publish(&self.topic, &key, &payload).await
+    }
+
+    pub(crate) async fn mark_error(
+        &self,
+        project_id: Uuid,
+        session_id: &str,
+        window_id: &str,
+    ) -> Result<(), String> {
+        self.publish(ReplayCommand::SessionPatch(session_patch(
+            project_id, session_id, window_id, true, false,
+        )))
+        .await
+    }
+
+    pub(crate) async fn mark_poor_vital(
+        &self,
+        project_id: Uuid,
+        session_id: &str,
+        window_id: &str,
+    ) -> Result<(), String> {
+        self.publish(ReplayCommand::SessionPatch(session_patch(
+            project_id, session_id, window_id, false, true,
+        )))
+        .await
+    }
+}
+
+fn session_patch(
+    project_id: Uuid,
+    session_id: &str,
+    window_id: &str,
+    has_errors: bool,
+    has_poor_vitals: bool,
+) -> ReplaySessionPatch {
+    ReplaySessionPatch {
+        project_id,
+        session_id: session_id.into(),
+        window_id: window_id.into(),
+        has_errors,
+        has_poor_vitals,
+    }
+}
+
+fn command_key(command: &ReplayCommand) -> String {
+    match command {
+        ReplayCommand::Snapshot(value) => format!(
+            "{}:{}:{}",
+            value.project_id, value.session_id, value.window_id
+        ),
+        ReplayCommand::SessionPatch(value) => format!(
+            "{}:{}:{}",
+            value.project_id, value.session_id, value.window_id
+        ),
+    }
+}
 
 pub(crate) fn normalize_window_id(window_id: Option<String>, session_id: &str) -> String {
     window_id
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| session_id.to_owned())
-}
-
-fn is_replay_origin_allowed(allowed_hostnames: &[String], request_origin: Option<&str>) -> bool {
-    validate_hostname(allowed_hostnames, request_origin)
 }
 
 #[derive(Debug, Deserialize)]
@@ -55,7 +125,7 @@ pub(crate) struct ReplayRequest {
 pub(crate) struct BuiltReplayChunk {
     pub(crate) session_id: String,
     pub(crate) tracking: TrackingContext,
-    pub(crate) input: ReplayChunkInput,
+    pub(crate) input: ReplayChunk,
     pub(crate) dropped_event_count: usize,
 }
 
@@ -113,7 +183,7 @@ pub(crate) fn build_replay_chunk_input(
         session_id: session_id.clone(),
         tracking,
         dropped_event_count,
-        input: ReplayChunkInput {
+        input: ReplayChunk {
             project_id: context.project_id,
             storage_generation: context.replay_storage_generation,
             session_id,
@@ -169,48 +239,17 @@ pub async fn replay(
             return error_response(StatusCode::BAD_REQUEST, &format!("Invalid JSON: {}", e));
         }
     };
-    let token = parsed.token.clone();
+    let body_token = parsed.token.clone();
     let request_origin = get_request_origin(&headers);
     let country = get_country(&headers);
 
-    let context = match load_project_context(&state.pool, &token).await {
-        Ok(ctx) => ctx,
-        Err(e) => {
-            if e.0 == StatusCode::UNAUTHORIZED {
-                return e;
-            }
-
-            let client_ip = get_client_ip(&headers);
-            let failed = FailedRequest {
-                request_type: RequestType::Replay,
-                token: token.clone(),
-                body: body.to_vec(),
-                country: country.clone(),
-                client_ip: if client_ip.is_empty() {
-                    None
-                } else {
-                    Some(client_ip.to_string())
-                },
-                user_agent: headers
-                    .get("User-Agent")
-                    .and_then(|value| value.to_str().ok())
-                    .map(str::to_string),
-                origin: request_origin.clone(),
-            };
-
-            if let Err(e) = state.batch_queue.backup_store.backup_request(&failed).await {
-                error!("Failed to store failed request: {}", e);
-                return error_response(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "Service temporarily unavailable",
-                );
-            }
-
-            return success_response(HashMap::new());
-        }
+    let (token, context) = match authenticate_project(&state.pool, &headers, Some(body_token)).await
+    {
+        Ok(authenticated) => authenticated,
+        Err(error) => return error,
     };
 
-    if !is_replay_origin_allowed(&context.allowed_hostnames, request_origin.as_deref()) {
+    if !validate_hostname(&context.allowed_hostnames, request_origin.as_deref()) {
         return error_response(StatusCode::FORBIDDEN, "Origin not allowed");
     }
 
@@ -237,13 +276,6 @@ pub async fn replay(
         );
     }
 
-    let Some(replay_storage) = state.replay_storage.as_deref() else {
-        return error_response(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Replay storage is not configured",
-        );
-    };
-
     let built = match build_replay_chunk_input(
         &context,
         &token,
@@ -256,63 +288,23 @@ pub async fn replay(
         Err(message) => return error_response(StatusCode::BAD_REQUEST, &message),
     };
 
-    let input = built.input;
-    let stored = if input.events.is_empty() {
-        replay_storage
-            .finalize_replay_session(
-                &state.pool,
-                input.project_id,
-                &input.session_id,
-                &input.window_id,
-            )
-            .await
-            .map(|()| Default::default())
-    } else {
-        replay_storage.store_replay_chunk(&state.pool, input).await
-    };
-    match stored {
-        Ok(stored) => {
-            if stored.first_for_billing {
-                state
-                    .batch_queue
-                    .track_replay_usage(&built.session_id, &built.tracking);
-            }
+    match state
+        .replay_publisher
+        .publish(ReplayCommand::Snapshot(Box::new(built.input)))
+        .await
+    {
+        Ok(()) => {
+            // Usage tracking is idempotent by replay session in the billing pipeline.
+            state
+                .batch_queue
+                .track_replay_usage(&built.session_id, &built.tracking);
         }
         Err(error) => {
-            error!("Failed to store replay: {}", error);
-            let client_ip = if client_ip.is_empty() {
-                None
-            } else {
-                Some(client_ip.to_string())
-            };
-            let user_agent = headers
-                .get("User-Agent")
-                .and_then(|value| value.to_str().ok())
-                .map(str::to_string);
-            let failed_request = FailedRequest {
-                request_type: RequestType::Replay,
-                token: token.clone(),
-                body: body.into_owned(),
-                country,
-                client_ip,
-                user_agent,
-                origin: request_origin,
-            };
-            if let Err(backup_error) = state
-                .batch_queue
-                .backup_store
-                .backup_request(&failed_request)
-                .await
-            {
-                error!(
-                    "Failed to store replay request after storage failure: {}",
-                    backup_error
-                );
-                return error_response(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "Service temporarily unavailable",
-                );
-            }
+            error!("Failed to publish replay: {}", error);
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Service temporarily unavailable",
+            );
         }
     }
 
@@ -331,7 +323,7 @@ pub async fn replay(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_replay_origin_allowed, normalize_window_id};
+    use super::normalize_window_id;
 
     #[test]
     fn normalize_window_id_trims_and_falls_back_to_session_id() {
@@ -344,19 +336,5 @@ mod tests {
             "session-1"
         );
         assert_eq!(normalize_window_id(None, "session-1"), "session-1");
-    }
-
-    #[test]
-    fn replay_origin_must_match_configured_hostname() {
-        let allowed = vec!["example.com".to_string()];
-
-        assert!(is_replay_origin_allowed(&allowed, Some("example.com")));
-        assert!(!is_replay_origin_allowed(&allowed, Some("attacker.test")));
-        assert!(!is_replay_origin_allowed(&allowed, None));
-    }
-
-    #[test]
-    fn replay_origin_is_unrestricted_without_configured_hostnames() {
-        assert!(is_replay_origin_allowed(&[], None));
     }
 }

@@ -89,7 +89,7 @@ pub async fn error(
                 identifier: payload.identifier.as_deref(),
                 session_id: payload.session_id.as_deref(),
                 window_id: payload.window_id.as_deref(),
-                sdk_name: payload.sdk_name.as_deref(),
+                sdk_name: Some(payload.sdk_name.as_deref().unwrap_or("unknown")),
                 sdk_version: payload.sdk_version.as_deref(),
                 context: &context,
                 grouping: &ctx.error_grouping,

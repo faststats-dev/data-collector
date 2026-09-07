@@ -81,6 +81,7 @@ pub(crate) fn build_collect_events(
         server_id,
         mut data,
         errors,
+        sdk_version,
         context,
         _project_name: _,
     } = request;
@@ -108,8 +109,7 @@ pub(crate) fn build_collect_events(
     {
         let error_context = context.unwrap_or_else(|| mods_context(&event_row, &valid_custom));
         let fallback_identity = server_id.to_string();
-        for mut error in errors {
-            let sdk_version = error.sdk_version.take();
+        for error in errors {
             occurrences.push(build_occurrence(
                 OccurrenceInput {
                     project_id: ctx.project_id,

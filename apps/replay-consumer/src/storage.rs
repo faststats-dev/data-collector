@@ -113,6 +113,7 @@ impl ReplayStorage {
         if already_stored {
             return Ok(false);
         }
+        let click_analysis = crate::clicks::extract(&input.events);
         let route_metadata = replay_route_metadata(&input.events, input.url.as_deref());
         let object_key = replay_object_key(
             input.storage_generation,
@@ -215,12 +216,13 @@ impl ReplayStorage {
                     normalized_route,
                     routes,
                     route_count,
-                    route_spans
+                    route_spans,
+                    click_analysis
                 )
                 VALUES (
                     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
                     $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24,
-                    $25, $26, $27
+                    $25, $26, $27, $28
                 )
                 ON CONFLICT DO NOTHING
                 "#,
@@ -252,6 +254,7 @@ impl ReplayStorage {
             .bind(&route_metadata.routes)
             .bind(i32::try_from(route_metadata.routes.len()).unwrap_or(i32::MAX))
             .bind(sqlx::types::Json(&route_metadata.route_spans))
+            .bind(sqlx::types::Json(&click_analysis))
             .execute(&mut *tx)
             .await?;
 
@@ -371,6 +374,8 @@ impl ReplayStorage {
             .bind(input.is_final)
             .execute(&mut *tx)
             .await?;
+
+            crate::clicks::refresh(&mut tx, input.project_id, &input.session_id, &input.window_id, input.storage_generation).await?;
 
             let first_for_billing = sqlx::query_scalar::<_, Uuid>(
                 r#"

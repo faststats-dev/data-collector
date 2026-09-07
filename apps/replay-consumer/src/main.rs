@@ -1,3 +1,4 @@
+mod clicks;
 mod config;
 mod consumer;
 mod object_store;

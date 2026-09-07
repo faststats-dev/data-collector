@@ -70,3 +70,20 @@ is configured accordingly.
 Session patches received before their replay snapshot are held without advancing that Kafka
 partition's committed offset. Once the snapshot creates the session, the patch is applied and
 the offset advances. A restart therefore replays, rather than loses, unresolved patches.
+
+## Click analysis
+
+Deploy the monorepo migration `20260907063318_free_venus` before this consumer.
+The consumer stores click/boundary signals per chunk and computes session click
+and rage-burst counts under the existing transaction and stream lock. Sorting
+and event-ID deduplication handle late chunks and retries. Unanalyzed recordings
+have NULL counts, which the UI hides.
+
+Detector v1: three clicks on the same target within 1 second and 30 CSS pixels
+start one burst. Nearby clicks less than 1 second apart continue that burst.
+Navigation, scrolling, resizing and full snapshots reset detection. Keep the
+player's `rage-clicks.ts` in sync. This is a heuristic; intentional repeated
+clicks can qualify and unrecorded interactions cannot be recovered.
+
+Totals are recomputed from the compact session index on each accepted chunk;
+profile this path before scaling to very long, interaction-heavy recordings.

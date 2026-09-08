@@ -1,5 +1,4 @@
 use error_grouping::{Grouper, GroupingInput, GroupingPolicy};
-use std::sync::{Arc, OnceLock};
 
 pub use error_grouping::Language as ErrorLanguage;
 
@@ -11,12 +10,10 @@ pub enum GroupingMode {
     Modern,
 }
 
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug)]
 pub struct ProjectGrouping {
     pub mode: GroupingMode,
-    policy: Arc<GroupingPolicy>,
-    #[serde(skip)]
-    compiled: OnceLock<Grouper>,
+    grouper: Grouper,
 }
 
 impl Default for ProjectGrouping {
@@ -31,31 +28,19 @@ impl ProjectGrouping {
         mode: GroupingMode,
         policy: GroupingPolicy,
     ) -> Result<Self, error_grouping::InvalidPolicy> {
-        let policy = Arc::new(policy);
-        let compiled = Grouper::new(Arc::clone(&policy))?.into();
         Ok(Self {
             mode,
-            policy,
-            compiled,
+            grouper: Grouper::new(policy)?,
         })
     }
 
     fn grouper(&self) -> &Grouper {
-        self.compiled
-            .get_or_init(|| match Grouper::new(Arc::clone(&self.policy)) {
-                Ok(grouper) => grouper,
-                Err(error) => {
-                    tracing::warn!(%error, "Invalid persisted grouping policy; using defaults");
-                    Grouper::new(GroupingPolicy::default())
-                        .expect("default grouping policy is valid")
-                }
-            })
+        &self.grouper
     }
 
     #[cfg(test)]
     fn with_policy(mut self, policy: GroupingPolicy) -> Self {
-        self.policy = Arc::new(policy);
-        self.compiled = OnceLock::new();
+        self.grouper = Grouper::new(policy).expect("test grouping policy is valid");
         self
     }
 }
@@ -131,7 +116,9 @@ mod tests {
     fn modern_policy_changes_are_part_of_the_fingerprint() {
         let default = ProjectGrouping::default();
         let kind_only = default.clone().with_policy(
-            (*default.policy)
+            default
+                .grouper
+                .policy()
                 .clone()
                 .with_segments(error_grouping::SegmentSelection::ErrorKindOnly),
         );
@@ -146,7 +133,9 @@ mod tests {
     fn terminal_cause_frames_setting_uses_the_terminal_call_site() {
         let default = ProjectGrouping::default();
         let grouping = default.clone().with_policy(
-            (*default.policy)
+            default
+                .grouper
+                .policy()
                 .clone()
                 .with_segments(error_grouping::SegmentSelection::TerminalCauseFrames),
         );

@@ -1,0 +1,10 @@
+[package]
+name = "collector-message"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+chrono = { version = "0.4.45", features = ["serde"] }
+serde.workspace = true
+serde_json.workspace = true
+uuid = { version = "1.26.0", features = ["serde", "v4", "v5"] }

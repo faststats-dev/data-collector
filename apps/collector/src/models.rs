@@ -1,5 +1,5 @@
 use crate::batch_queue::BatchQueue;
-use crate::replay_storage::ReplayStorage;
+use crate::handler::ReplayPublisher;
 use serde::Deserialize;
 use serde_json::Value;
 use sqlx::PgPool;
@@ -10,12 +10,12 @@ use std::sync::Arc;
 pub struct AppState {
     pub pool: PgPool,
     pub batch_queue: Arc<BatchQueue>,
-    pub replay_storage: Option<Arc<ReplayStorage>>,
+    pub replay_publisher: Arc<ReplayPublisher>,
 }
 
 pub struct DataSource {
     pub data_type: String,
-    pub regex: Option<String>,
+    pub regex: Option<regex::Regex>,
     pub allow_negative: Option<bool>,
     pub allow_float: Option<bool>,
     pub min_value: Option<f64>,
@@ -40,7 +40,7 @@ pub struct ErrorTracking {
     pub build_id: Option<String>,
     #[serde(default)]
     pub context: Option<Value>,
-    #[serde(default, rename = "sdkVersion")]
+    #[serde(default, rename = "sdkVersion", alias = "sdk_version")]
     pub sdk_version: Option<String>,
     #[serde(default, skip_deserializing)]
     pub session_id: Option<String>,
@@ -54,6 +54,8 @@ pub struct Request {
     pub server_id: String,
     pub data: HashMap<String, Value>,
     pub errors: Option<Vec<ErrorTracking>>,
+    #[serde(default, rename = "sdkVersion", alias = "sdk_version")]
+    pub sdk_version: Option<String>,
     #[serde(default)]
     pub context: Option<Value>,
     #[serde(default, rename = "project_name")]

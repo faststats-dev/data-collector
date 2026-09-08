@@ -47,27 +47,12 @@ pub struct EventsIngestResponse {
     pub duplicates: i64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum PolarError {
-    Request(reqwest::Error),
+    #[error("Request error: {0}")]
+    Request(#[from] reqwest::Error),
+    #[error("Polar API error ({status}): {message}")]
     Api { status: u16, message: String },
-}
-
-impl From<reqwest::Error> for PolarError {
-    fn from(err: reqwest::Error) -> Self {
-        PolarError::Request(err)
-    }
-}
-
-impl std::fmt::Display for PolarError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            PolarError::Request(e) => write!(f, "Request error: {}", e),
-            PolarError::Api { status, message } => {
-                write!(f, "Polar API error ({}): {}", status, message)
-            }
-        }
-    }
 }
 
 #[derive(Debug, Default, Clone)]

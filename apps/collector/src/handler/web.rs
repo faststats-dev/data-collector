@@ -1,15 +1,13 @@
 use super::{
-    EncodingQuery, WEB_EVENT_FIELDS, check_ip_allowed, decompress_body, error_response,
-    extract_known_fields, get_authorization, get_client_ip, get_country, get_request_origin,
-    insert_error_occurrence_v3, insert_web_event, load_project_context, success_response,
-    validate_hostname,
+    EncodingQuery, WEB_EVENT_FIELDS, authenticate_project, check_ip_allowed, decompress_body,
+    error_response, extract_known_fields, get_client_ip, get_country, get_request_origin,
+    queue_error_response, success_response, validate_hostname,
 };
-use crate::batch_queue::{FailedRequest, RequestType};
+use crate::batch_queue::QueuedEvent;
 use crate::error_tracking::ErrorLanguage;
 use crate::error_tracking::v3::{OccurrenceInput, build_occurrence, web_context};
 use crate::identity::resolve_person_for_distinct_id;
 use crate::models::{AppState, ErrorTracking};
-use crate::utils::debounce::should_debounce;
 use axum::body::Bytes;
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -17,7 +15,7 @@ use axum::response::IntoResponse;
 use serde_json::Value;
 use sqlx::types::Uuid;
 use std::collections::HashMap;
-use tracing::{error, warn};
+use tracing::warn;
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -55,8 +53,6 @@ pub async fn web(
         Err(e) => return error_response(StatusCode::BAD_REQUEST, &e),
     };
 
-    let header_token = get_authorization(&headers);
-
     let WebRequest {
         token: body_token,
         user_id,
@@ -74,52 +70,10 @@ pub async fn web(
         Err(_) => return error_response(StatusCode::BAD_REQUEST, "Invalid JSON"),
     };
 
-    let token = match body_token.or(header_token) {
-        Some(t) => t,
-        None => return error_response(StatusCode::UNAUTHORIZED, "Unauthorized"),
-    };
-
     let request_origin = get_request_origin(&headers);
-
-    let ctx = match load_project_context(&state.pool, &token).await {
-        Ok(ctx) => ctx,
-        Err(e) => {
-            if e.0 == StatusCode::UNAUTHORIZED {
-                return e;
-            }
-
-            let country = headers
-                .get("CF-IPCountry")
-                .and_then(|v| v.to_str().ok())
-                .map(String::from);
-
-            let client_ip = get_client_ip(&headers);
-            let user_agent = headers.get("User-Agent").and_then(|v| v.to_str().ok());
-
-            let failed = FailedRequest {
-                request_type: RequestType::Web,
-                token,
-                body: body.to_vec(),
-                country,
-                client_ip: if client_ip.is_empty() {
-                    None
-                } else {
-                    Some(client_ip.to_owned())
-                },
-                user_agent: user_agent.map(str::to_owned),
-                origin: request_origin,
-            };
-
-            if let Err(e) = state.batch_queue.backup_store.backup_request(&failed).await {
-                error!("Failed to store failed request: {}", e);
-                return error_response(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "Service temporarily unavailable",
-                );
-            }
-
-            return success_response(HashMap::new());
-        }
+    let (token, ctx) = match authenticate_project(&state.pool, &headers, body_token).await {
+        Ok(authenticated) => authenticated,
+        Err(error) => return error,
     };
 
     if !validate_hostname(&ctx.allowed_hostnames, request_origin.as_deref()) {
@@ -198,10 +152,7 @@ pub async fn web(
     }
     known.insert("device".into(), Value::String(ua_info.device.to_string()));
 
-    let url = known.get("url").and_then(|v| v.as_str()).unwrap_or("");
-    let event = known.get("event").and_then(|v| v.as_str());
     let has_errors = errors.as_ref().is_some_and(|items| !items.is_empty());
-    let is_debounced = !has_errors && should_debounce(resolved_user_id, url, event);
 
     let tracking_ctx = ctx.tracking_context(&token);
     let fallback_identity = resolved_user_id.to_string();
@@ -216,35 +167,11 @@ pub async fn web(
     let error_v3_context = should_process_errors
         .then(|| context.unwrap_or_else(|| web_context(&event_row, &properties)));
 
-    if ctx.replay_storage_active
-        && let Some(session_id) = session_id.as_deref()
-        && let Some(replay_storage) = state.replay_storage.as_deref()
-        && let Err(error) = replay_storage
-            .record_filter_event(
-                &state.pool,
-                crate::replay_storage::ReplayFilterEventInput {
-                    project_id: ctx.project_id,
-                    storage_generation: ctx.replay_storage_generation,
-                    session_id,
-                    window_id: window_id.as_deref().unwrap_or(session_id),
-                    identifier: Some(fallback_identity.as_str()),
-                    browser: event_row.browser.as_deref(),
-                    os: event_row.os.as_deref(),
-                    country: country.as_deref(),
-                    url: event_row.url.as_deref(),
-                    custom: &properties,
-                },
-            )
-            .await
-    {
-        warn!("Failed to persist replay filter metadata: {}", error);
-    }
-
-    if !is_debounced {
-        match insert_web_event(&state.batch_queue, event_row, Some(tracking_ctx.clone())) {
-            Ok(_) => {}
-            Err(e) => return e,
-        }
+    if let Err(error) = state.batch_queue.queue_event(QueuedEvent::WebEvent {
+        row: Box::new(event_row),
+        tracking: Some(tracking_ctx.clone()),
+    }) {
+        return queue_error_response(error, "web event");
     }
 
     if let (true, Some(error_list), Some(error_v3_context)) =
@@ -267,29 +194,30 @@ pub async fn web(
                 },
                 error,
             );
-            if let Err(e) = insert_error_occurrence_v3(
-                &state.batch_queue,
-                occurrence,
-                ErrorLanguage::JavaScript,
-                &ctx.error_grouping,
-                Some(tracking_ctx.clone()),
-            ) {
-                return e;
+            if let Err(error) = state
+                .batch_queue
+                .queue_event(QueuedEvent::ErrorOccurrenceV3 {
+                    row: Box::new(occurrence),
+                    language: ErrorLanguage::JavaScript,
+                    grouping: ctx.error_grouping.clone(),
+                    tracking: Some(tracking_ctx.clone()),
+                })
+            {
+                return queue_error_response(error, "error occurrence");
             }
         }
 
         if let Some(session_id) = session_id.as_deref()
-            && let Some(replay_storage) = state.replay_storage.as_deref()
-            && let Err(error) = replay_storage
-                .mark_session_error(
-                    &state.pool,
+            && let Err(error) = state
+                .replay_publisher
+                .mark_error(
                     ctx.project_id,
                     session_id,
                     window_id.as_deref().unwrap_or(session_id),
                 )
                 .await
         {
-            warn!("Failed to persist replay error flag: {}", error);
+            warn!("Failed to publish replay error flag: {}", error);
         }
     }
 

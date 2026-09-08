@@ -14,21 +14,20 @@ use axum::{
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
 use sqlx::postgres::PgPoolOptions;
 use std::{
-    path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
 };
 use tokio::signal;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::decompression::RequestDecompressionLayer;
-use tracing::{info, warn};
+use tracing::info;
 mod batch_queue;
 mod error_tracking;
 mod handler;
 mod identity;
+mod kafka;
 mod models;
 mod polar;
-mod replay_storage;
 mod tinybird;
 mod utils;
 mod validation;
@@ -89,48 +88,27 @@ async fn main() {
         .await
         .expect("Failed to connect to database");
 
-    let tinybird_client = Arc::new(tinybird::TinybirdClient::new(
+    let tinybird_client = tinybird::TinybirdClient::new(
         std::env::var("TINYBIRD_URL")
             .expect("TINYBIRD_URL must be set in .env file or environment variables"),
         std::env::var("TINYBIRD_TOKEN")
             .expect("TINYBIRD_TOKEN must be set in .env file or environment variables"),
-    ));
+    );
 
     let polar_client = std::env::var("POLAR_TOKEN").ok().map(|token| {
         info!("Polar integration enabled for usage tracking");
         Arc::new(polar::PolarClient::new(token))
     });
 
-    let backup_path = std::env::var("BACKUP_DB_PATH")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/data/backup.db"));
-    let backup_store_enabled = std::env::var("DISABLE_BACKUP_STORE").unwrap_or_default() != "1";
-    if backup_store_enabled {
-        info!("Backup store enabled at {}", backup_path.display());
-    } else {
-        warn!("Backup store disabled by DISABLE_BACKUP_STORE");
-    }
-
+    let kafka_publisher = kafka::Publisher::from_env().expect("Invalid Kafka configuration");
+    let event_publisher = kafka::EventPublisher::from_env(kafka_publisher.clone());
     let batch_queue = batch_queue::BatchQueue::new(
-        Arc::clone(&tinybird_client),
+        tinybird_client,
         polar_client,
-        &backup_path,
-        backup_store_enabled,
-        error_tracking::mapping::MappingResolver::from_env(pool.clone()).map(Arc::new),
+        error_tracking::mapping::MappingResolver::from_env(pool.clone()),
+        event_publisher,
     );
-    let replay_storage = match replay_storage::ReplayStorage::from_env() {
-        Ok(Some(storage)) => {
-            info!("Replay object storage enabled");
-            Some(Arc::new(storage))
-        }
-        Ok(None) => {
-            warn!("Replay object storage is not configured; replay ingestion is disabled");
-            None
-        }
-        Err(error) => {
-            panic!("Invalid replay storage configuration: {}", error);
-        }
-    };
+    let replay_publisher = Arc::new(handler::ReplayPublisher::from_env(kafka_publisher));
     let recorder_handle = setup_metrics_recorder();
 
     let batch_queue_for_metrics = Arc::clone(&batch_queue);
@@ -150,10 +128,8 @@ async fn main() {
     let state = models::AppState {
         pool: pool.clone(),
         batch_queue: Arc::clone(&batch_queue),
-        replay_storage: replay_storage.clone(),
+        replay_publisher: Arc::clone(&replay_publisher),
     };
-
-    start_failed_request_replayer(pool.clone(), Arc::clone(&batch_queue), replay_storage);
 
     let cors = CorsLayer::new()
         .allow_origin(AllowOrigin::mirror_request())
@@ -215,26 +191,9 @@ async fn main() {
         .await
         .expect("Server error");
 
-    info!("Shutting down, flushing in-memory batch...");
-    batch_queue.flush_in_memory_batch().await;
+    info!("Shutting down, draining Kafka and flushing Tinybird batch...");
+    batch_queue.drain().await;
     info!("Shutdown complete");
-}
-
-fn start_failed_request_replayer(
-    pool: sqlx::PgPool,
-    batch_queue: Arc<batch_queue::BatchQueue>,
-    replay_storage: Option<Arc<replay_storage::ReplayStorage>>,
-) {
-    tokio::spawn(async move {
-        let replay_interval = std::time::Duration::from_secs(60);
-
-        loop {
-            tokio::time::sleep(replay_interval).await;
-            batch_queue
-                .replay_failed_requests(&pool, replay_storage.as_deref())
-                .await;
-        }
-    });
 }
 
 fn setup_metrics_recorder() -> PrometheusHandle {

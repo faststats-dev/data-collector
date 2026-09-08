@@ -35,7 +35,7 @@ pub fn build_occurrence(input: OccurrenceInput<'_>, error: ErrorTracking) -> Err
         count,
         build_id,
         context,
-        sdk_version: _,
+        sdk_version,
         session_id,
         handled,
     } = error;
@@ -68,8 +68,12 @@ pub fn build_occurrence(input: OccurrenceInput<'_>, error: ErrorTracking) -> Err
         session_id: session_id.unwrap_or_else(|| input.session_id.unwrap_or_default().to_owned()),
         window_id: input.window_id.unwrap_or_default().to_owned(),
         sdk_name: input.sdk_name.unwrap_or_default().to_owned(),
-        // Callers provide the endpoint-specific value to preserve the pre-refactor behavior.
-        sdk_version: input.sdk_version.unwrap_or_default().to_owned(),
+        // Request metadata takes precedence; older clients send the version per error.
+        sdk_version: input
+            .sdk_version
+            .or(sdk_version.as_deref())
+            .unwrap_or_default()
+            .to_owned(),
         count: count.and_then(|count| count.try_into().ok()).unwrap_or(1),
         context: occurrence_context(input.context, context),
     }

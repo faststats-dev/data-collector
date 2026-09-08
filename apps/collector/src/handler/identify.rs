@@ -1,6 +1,6 @@
 use super::{
-    check_ip_allowed, error_response, get_authorization, get_client_ip, get_request_origin,
-    load_project_context, success_response, validate_hostname,
+    authenticate_project, check_ip_allowed, error_response, get_client_ip, get_request_origin,
+    success_response, validate_hostname,
 };
 use crate::identity::{PersonPatch, upsert_person_and_alias};
 use crate::models::AppState;
@@ -74,14 +74,9 @@ pub async fn identify(
         Err(_) => return error_response(StatusCode::BAD_REQUEST, "Invalid JSON"),
     };
 
-    let token = match body_token.or_else(|| get_authorization(&headers)) {
-        Some(t) => t,
-        None => return error_response(StatusCode::UNAUTHORIZED, "Unauthorized"),
-    };
-
     let request_origin = get_request_origin(&headers);
-    let ctx = match load_project_context(&state.pool, &token).await {
-        Ok(ctx) => ctx,
+    let ctx = match authenticate_project(&state.pool, &headers, body_token).await {
+        Ok((_, context)) => context,
         Err(e) => return e,
     };
 

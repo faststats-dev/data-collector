@@ -1,0 +1,24 @@
+[package]
+name = "error-embedder"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+ort = { version = "=2.0.0-rc.10", default-features = false, features = ["std", "load-dynamic"] }
+redis = { version = "0.32", default-features = false, features = ["tokio-rustls-comp"] }
+hex = "0.4"
+rdkafka = { version = "0.38", features = ["cmake-build", "ssl", "tokio"] }
+regex = "1"
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "query"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11.0"
+percent-encoding = "2"
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls-aws-lc-rs", "postgres"] }
+tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["serde"] }

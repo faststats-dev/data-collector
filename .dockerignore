@@ -5,3 +5,7 @@ target/
 .idea/
 backup.db
 *.md
+
+**/__pycache__/
+**/.venv/
+apps/error-embedder/model/model/

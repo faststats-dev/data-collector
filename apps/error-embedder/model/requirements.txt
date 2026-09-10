@@ -1,0 +1,6 @@
+# Export/validation only. Rust loads the standalone ORT library at runtime.
+torch==2.8.0
+transformers==4.44.2
+onnx==1.19.0
+onnxruntime==1.23.2
+safetensors==0.8.0

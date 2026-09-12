@@ -1,25 +1,14 @@
 use regex::Regex;
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use serde::Deserialize;
 use std::sync::LazyLock;
-use uuid::Uuid;
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Deserialize)]
 pub struct Input {
-    pub project_id: Uuid,
     pub language: String,
     pub error_type: String,
     pub error_message: String,
     pub stacktrace: String,
-}
-
-pub struct Prepared {
-    pub text: String,
-    pub root_type: String,
-    pub signature: String,
-    pub origin: String,
-    pub generic: bool,
-    pub isolated: bool,
+    pub mapped_stacktrace: Option<String>,
 }
 
 static FRAME: LazyLock<Regex> =
@@ -30,21 +19,7 @@ static VERSION: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\.v\d+(?:[_\.]\d+)+(?:_R\d+)?\.").unwrap());
 
 impl Input {
-    pub fn hash(&self) -> String {
-        let mut digest = Sha256::new();
-        for part in [
-            &self.language,
-            &self.error_type,
-            &self.error_message,
-            &self.stacktrace,
-        ] {
-            digest.update(format!("{}:", part.len()).as_bytes());
-            digest.update(part.as_bytes());
-        }
-        hex::encode(digest.finalize())
-    }
-
-    pub fn prepare(&self) -> Prepared {
+    pub fn text(&self) -> String {
         let mut header = format!("{}: {}", self.error_type, self.error_message);
         let mut frames = Vec::<String>::new();
         let mut parent = Vec::<String>::new();
@@ -52,8 +27,12 @@ impl Input {
             self.language.to_ascii_lowercase().as_str(),
             "java" | "kotlin" | "jvm" | "scala"
         );
+        let stacktrace = self
+            .mapped_stacktrace
+            .as_deref()
+            .unwrap_or(&self.stacktrace);
         if java {
-            for (i, line) in self.stacktrace.lines().enumerate() {
+            for (i, line) in stacktrace.lines().enumerate() {
                 let line = line.trim();
                 if let Some(cause) = line.strip_prefix("Caused by: ") {
                     parent = std::mem::take(&mut frames);
@@ -80,22 +59,13 @@ impl Input {
         } else {
             // Other languages retain their original frames; Java-specific cleanup
             // must not erase Python/Rust/JS throw sites.
-            frames = self
-                .stacktrace
-                .lines()
-                .take(16)
-                .map(str::to_owned)
-                .collect();
+            frames = stacktrace.lines().take(16).map(str::to_owned).collect();
         }
         if let Some((message, _)) = header.split_once(", context=[") {
             header = message.to_owned();
         }
-        let root_type = header.split(':').next().unwrap_or("").to_owned();
         let message = header.split_once(':').map_or("", |(_, m)| m.trim());
         let generic = message.is_empty() || message.contains("Could not pass event ");
-        let isolated = self.stacktrace.is_empty()
-            || root_type.ends_with("InvocationTargetException")
-            || message.contains("Could not pass event ");
         let mut app: Vec<_> = frames
             .iter()
             .filter(|f| {
@@ -118,7 +88,6 @@ impl Input {
             app.extend(frames.iter().take(3));
         }
         let normalize = |f: &str| VERSION.replace_all(f, ".version.").into_owned();
-        let origin = app.first().map(|f| normalize(f)).unwrap_or_default();
         let selected = if java && !generic {
             frames.first().cloned().unwrap_or_default()
         } else {
@@ -128,26 +97,7 @@ impl Input {
                 .collect::<Vec<_>>()
                 .join("\n")
         };
-        let signature = if [
-            "NoSuchMethodError",
-            "NoSuchFieldError",
-            "ClassNotFoundException",
-        ]
-        .iter()
-        .any(|s| root_type.ends_with(s))
-        {
-            header.clone()
-        } else {
-            String::new()
-        };
-        Prepared {
-            text: format!("{header}\n{selected}"),
-            root_type,
-            signature,
-            origin,
-            generic,
-            isolated,
-        }
+        format!("{header}\n{selected}")
     }
 }
 
@@ -156,36 +106,31 @@ mod tests {
     use super::*;
     fn input(stack: &str) -> Input {
         Input {
-            project_id: Uuid::nil(),
             language: "java".into(),
             error_type: "java.lang.RuntimeException".into(),
             error_message: "wrapper".into(),
             stacktrace: stack.into(),
+            mapped_stacktrace: None,
         }
     }
     #[test]
     fn causes_preserve_api_signatures_and_remove_frame_noise() {
-        let p=input("java.lang.RuntimeException: wrapper\nCaused by: java.lang.NoSuchMethodError: api.run(int)\n at app-1.jar//app.Main.call(Main.java:12)").prepare();
+        let p=input("java.lang.RuntimeException: wrapper\nCaused by: java.lang.NoSuchMethodError: api.run(int)\n at app-1.jar//app.Main.call(Main.java:12)").text();
         assert_eq!(
-            p.text,
+            p,
             "java.lang.NoSuchMethodError: api.run(int)\napp.Main.call"
         );
-        assert_eq!(p.signature, "java.lang.NoSuchMethodError: api.run(int)");
-    }
-    #[test]
-    fn hash_includes_message_and_unambiguous_utf8_lengths() {
-        let mut a = input("same");
-        let h = a.hash();
-        a.error_message = "different".into();
-        assert_ne!(h, a.hash());
-        a.error_message = "é:日".into();
-        assert_eq!(a.hash().len(), 64);
     }
     #[test]
     fn generic_helpers_retain_application_origin() {
-        let p=input("java.lang.NullPointerException\n at java.util.Objects.requireNonNull(Objects.java:1)\n at app.Main.load(Main.java:2)").prepare();
-        assert!(p.generic);
-        assert_eq!(p.origin, "app.Main.load");
-        assert!(p.text.contains("app.Main.load"));
+        let p=input("java.lang.NullPointerException\n at java.util.Objects.requireNonNull(Objects.java:1)\n at app.Main.load(Main.java:2)").text();
+        assert!(p.contains("app.Main.load"));
+    }
+    #[test]
+    fn embedding_uses_the_mapped_throw_site() {
+        let mut error = input("at a.b(a.java:1)");
+        error.mapped_stacktrace = Some("at app.Main.load(Main.java:42)".into());
+        assert!(error.text().contains("app.Main.load"));
+        assert!(!error.text().contains("a.b"));
     }
 }

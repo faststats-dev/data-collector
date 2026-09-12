@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use std::{io::Read, path::Path, sync::Mutex};
 use tokenizers::Tokenizer;
 
-pub const VERSION: &str = "jina-code-516f4baf-adaptive-v1";
+pub const VERSION: &str = "jina-code-516f4baf-v1";
 pub const REVISION: &str = "516f4baf13dec4ddddda8631e019b5737c8bc250";
 const WIDTH: usize = 768;
 const MAX_TOKENS: usize = 512;
@@ -71,7 +71,7 @@ impl Model {
         }
         let mut tokenizer =
             Tokenizer::from_file(path.join("tokenizer.json")).map_err(anyhow::Error::msg)?;
-        // Detect truncation ourselves; hidden tokenizer truncation would bypass isolation.
+        // Detect truncation ourselves; report truncation in diagnostic output.
         tokenizer
             .with_truncation(None)
             .map_err(anyhow::Error::msg)?;

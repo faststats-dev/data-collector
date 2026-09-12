@@ -132,7 +132,7 @@ fn bounded_ids(tokens: &[u32]) -> Result<(Vec<i64>, bool)> {
     Ok((ids, truncated))
 }
 
-fn validate_vector(vector: &[f32]) -> Result<()> {
+pub(crate) fn validate_vector(vector: &[f32]) -> Result<()> {
     ensure!(
         vector.len() == WIDTH && vector.iter().all(|v| v.is_finite()),
         "Invalid embedding"

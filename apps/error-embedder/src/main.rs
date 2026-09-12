@@ -1,3 +1,4 @@
+mod cache;
 mod input;
 mod model;
 
@@ -74,20 +75,35 @@ async fn publish(
     model: Arc<model::Model>,
     producer: &FutureProducer,
     topic: &str,
+    cache: &mut Option<cache::Cache>,
 ) -> Result<()> {
     ensure!(!input.exact_hash.is_empty(), "Missing exact error hash");
     let key = format!("{}:{}", input.project_id, input.exact_hash);
-    let row = tokio::task::spawn_blocking(move || -> Result<_> {
-        let (embedding, _) = model.embed(&input.input.text())?;
-        Ok(Embedding {
-            project_id: input.project_id,
-            exact_hash: input.exact_hash,
-            timestamp: input.timestamp,
-            model_version: model::VERSION,
-            embedding,
-        })
-    })
-    .await??;
+    let text = input.input.text();
+    let cache_key = cache::key(model::VERSION, &text);
+    let cached = match cache {
+        Some(cache) => cache.get(&cache_key).await,
+        None => None,
+    };
+    let embedding = match cached {
+        Some(vector) => vector,
+        None => {
+            let vector = tokio::task::spawn_blocking(move || model.embed(&text))
+                .await??
+                .0;
+            if let Some(cache) = cache {
+                cache.set(&cache_key, &vector).await;
+            }
+            vector
+        }
+    };
+    let row = Embedding {
+        project_id: input.project_id,
+        exact_hash: input.exact_hash,
+        timestamp: input.timestamp,
+        model_version: model::VERSION,
+        embedding,
+    };
     let bytes = serde_json::to_vec(&row)?;
     producer
         .send(
@@ -140,6 +156,7 @@ async fn main() -> Result<()> {
         }
         return Ok(());
     }
+    let mut cache = cache::Cache::from_env()?;
     let output = std::env::var("ERROR_EMBEDDINGS_KAFKA_TOPIC")
         .unwrap_or_else(|_| "error-embeddings-v1".into());
     let producer: FutureProducer = kafka_config()?
@@ -155,6 +172,7 @@ async fn main() -> Result<()> {
                 model.clone(),
                 &producer,
                 &output,
+                &mut cache,
             )
             .await?;
         }
@@ -184,7 +202,7 @@ async fn main() -> Result<()> {
             event.schema_version == 1 && event.r#type == "error_occurrence",
             "Unsupported error envelope"
         );
-        publish(event.data, model.clone(), &producer, &output).await?;
+        publish(event.data, model.clone(), &producer, &output, &mut cache).await?;
         // Background commits may only advance past durably published outputs.
         // A crash can replay an output; ReplacingMergeTree deduplicates by exact error.
         consumer.store_offset_from_message(&message)?;

@@ -429,12 +429,18 @@ impl ReplayStorage {
     }
 
     pub async fn finalize_replay_session(
-        &self,
         pool: &sqlx::PgPool,
         project_id: Uuid,
         session_id: &str,
         window_id: &str,
+        storage_generation: i32,
     ) -> Result<(), ReplayStorageError> {
+        let mut tx = pool.begin().await?;
+        // Use the same generation guard as data chunks so a delayed terminal
+        // request cannot finalize recordings after storage was cleared/recreated.
+        if !replay_storage_generation_is_active(&mut *tx, project_id, storage_generation).await? {
+            return Ok(());
+        }
         sqlx::query(
             r#"
             UPDATE replay_sessions
@@ -447,8 +453,9 @@ impl ReplayStorage {
         .bind(project_id)
         .bind(session_id)
         .bind(window_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
+        tx.commit().await?;
         Ok(())
     }
 

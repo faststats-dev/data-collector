@@ -111,15 +111,18 @@ async fn handle_message(
     match command {
         ReplayCommand::Snapshot(chunk) if chunk.events.is_empty() => {
             let key = command_key(chunk.project_id, &chunk.session_id, &chunk.window_id);
-            storage
-                .finalize_replay_session(
-                    pool,
-                    chunk.project_id,
-                    &chunk.session_id,
-                    &chunk.window_id,
-                )
-                .await
-                .map_err(|error| error.to_string())?;
+            if !chunk.is_final {
+                return Ok(());
+            }
+            ReplayStorage::finalize_replay_session(
+                pool,
+                chunk.project_id,
+                &chunk.session_id,
+                &chunk.window_id,
+                chunk.storage_generation,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
             apply_pending(storage, pool, &key, pending).await
         }
         ReplayCommand::Snapshot(chunk) => {

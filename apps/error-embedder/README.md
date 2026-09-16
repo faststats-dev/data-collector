@@ -5,8 +5,8 @@ embedding on CPU, and publishes `error-embeddings-v1`. ClickHouse's Kafka engine
 handles persistence. The worker needs Kafka and its model artifacts.
 
 The worker publishes vectors by `(project_id, exact_hash, model_version)`.
-The frontend identifies a group by its reference exact hash and versioned vector
-query parameters; distance determines membership when queried. There is no stored
+The admin-only, read-only preview uses stable exact hashes and looks up similar
+errors on selection. Regular error tracking retains its existing grouping and IDs. There is no stored
 automatic group assignment, database lookup, or project lock. Redis can optionally
 cache computed vectors; it is not required for processing.
 
@@ -33,24 +33,32 @@ cargo run --release -p error-embedder -- consume
 Kafka also accepts `KAFKA_SECURITY_PROTOCOL`, `KAFKA_SASL_MECHANISM`,
 `KAFKA_SASL_USERNAME`, `KAFKA_SASL_PASSWORD`, and `KAFKA_SSL_CA_LOCATION`.
 `ERROR_OCCURRENCES_KAFKA_TOPIC` / `ERROR_EMBEDDINGS_KAFKA_TOPIC` override topics;
-update the ClickHouse Kafka settings to match. `RUST_LOG` defaults to `info`.
+update the ClickHouse Kafka settings to match. `RUST_LOG` defaults to `info`. `EMBED_KAFKA_GROUP_ID` overrides the default
+`error-embedder-v1` consumer group (use a distinct group in isolated tests).
 `CLICKHOUSE_URL` is used only by the monorepo's offline backfill reader and API,
 not by this service. Apply `00002_error_embeddings.sql` before consuming outputs.
 
 ## Delivery and backfill
 
-Each occurrence produces one vector for its exact error. The table retains the
+Each valid occurrence publishes one vector for its exact error; repeated prepared
+text reuses the cache rather than recomputing inference. The table retains the
 latest source timestamp, so older replays cannot replace newer vectors. Mapped
-stack traces are preferred when supplied. `vec1:986472:<exact_hash>` identifies the
-current model/preparation policy with minimum cosine similarity 0.986472. Counts,
-occurrences and timelines use that same neighborhood. Query IDs stay reproducible;
-neighborhoods can grow and overlap as embeddings arrive.
+stack traces are preferred when supplied. The admin preview uses
+minimum cosine similarity 0.97, with checks against conflicting explicit React/H2
+error codes. Identical stored vectors share one reference row. Admins can open
+`vec1` IDs in the normal detail UI; older IDs retain their encoded threshold. It
+has no resolution, merge, assignment or deletion actions. Normal issue identity
+and metadata remain independent. The local calibration and reproduction script
+live in the monorepo under `backfill-embed/similarity-calibration.md`.
+
 
 Kafka outputs are acknowledged before offsets are stored for periodic commits.
-Delivery is at least once: a crash may replay an output, which ClickHouse's
-ReplacingMergeTree deduplicates by exact error. Invalid inputs or failed publications
-stop the process without storing that offset. SIGINT/SIGTERM finish the current
-record and commit completed work. Monitor consumer lag and configure restarts.
+Delivery is at least once: a crash may replay an output, which ClickHouse deduplicates
+by exact error and source timestamp. Permanently invalid inputs are logged with
+source topic, partition, offset and failure reason, then skipped. There is no
+extra topic or metrics endpoint. Inference and publication failures stop the process
+without storing the affected offset. SIGINT/SIGTERM finish the current record and
+commit completed work. Inspect Kafka lag and ordinary worker logs; configure restarts.
 Consumers can scale across input partitions without per-project coordination.
 
 When `EMBED_REDIS_URL` is set, `consume` and `publish` reuse vectors for identical
@@ -68,14 +76,24 @@ Connection and command attempts each have a 100 ms timeout. Redis failures bypas
 the cache for 30 seconds before retrying, so outages do not stop processing.
 Malformed cache configuration fails startup. Debug logs report hits/misses; warnings
 report invalid vectors and cache outages without exposing connection credentials.
-Without Redis configured, occurrences run inference as before. Diagnostic `embed`
+Without Redis configured, a bounded 1,024-entry local FIFO cache still reuses vectors. Diagnostic `embed`
 always runs inference directly.
 
 `embed` reads error fields as JSONL on stdin and prints prepared text, truncation
 status and vectors for diagnostics. `publish` additionally requires `project_id`,
 `exact_hash` and numeric `timestamp` (Unix milliseconds), and publishes vectors to
-Kafka. The monorepo's `backfill-embed/backfill.sh` streams the latest missing exact-error
-rows into `publish`; it can resume after interruption without project locks.
+Kafka. `publish` deduplicates prepared text within each inference batch and checks
+local/Redis caches before inference. `EMBED_BATCH_SIZE` defaults to 1 (1–32) and
+`EMBED_PUBLISH_IN_FLIGHT` to 32 (1–256); output acknowledgements are pipelined with
+inference, and every acknowledgement is awaited before successful exit. Batched
+vectors are tested against single-input inference with padding and truncation.
+`consume` still processes one record at a time so offsets cannot overtake failures.
+
+The monorepo's `backfill-embed/backfill.sh` selects only missing/stale exact-error
+keys before fetching stacks. Chunks, snapshot cutoffs and checkpoints bound memory
+and resume work safely. Its `parallel-backfill.py` runs disjoint shards with shared
+Redis reuse; each shard needs its own checkpoint. Use batching/shards conservatively
+on small machines: padding and concurrent models increase CPU and memory use.
 
 ## Model preparation
 
@@ -101,7 +119,8 @@ exports both precisions; `--validate-only`, `--texts /path/to/texts.json` and
 FP16 stores exactly representable matrix weights with FP32 computation. Gather
 selects embedding rows before casting; graph optimization stays disabled to avoid
 expanding every weight at startup. Model/preprocessing changes need a new vector
-version, query version and backfill. Existing query IDs retain their policy.
+model/preparation version and backfill. Update the admin preview model constant
+in the monorepo in the same release.
 
 ## Checks
 

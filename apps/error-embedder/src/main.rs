@@ -1,12 +1,15 @@
 mod cache;
+mod encoder;
 mod input;
 mod model;
 
 use anyhow::{Context, Result, ensure};
+use encoder::Encoder;
 use input::Input;
 use rdkafka::{
     ClientConfig, Message,
     consumer::{CommitMode, Consumer, StreamConsumer},
+    error::{KafkaError, RDKafkaErrorCode},
     producer::{FutureProducer, FutureRecord},
 };
 use serde::{Deserialize, Serialize};
@@ -16,7 +19,8 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use tracing::info;
+use tokio::task::JoinSet;
+use tracing::{info, warn};
 
 fn kafka_config() -> Result<ClientConfig> {
     let mut config = ClientConfig::new();
@@ -70,48 +74,45 @@ struct Embedding {
     embedding: Vec<f32>,
 }
 
-async fn publish(
-    input: Occurrence,
-    model: Arc<model::Model>,
-    producer: &FutureProducer,
-    topic: &str,
-    cache: &mut Option<cache::Cache>,
-) -> Result<()> {
-    ensure!(!input.exact_hash.is_empty(), "Missing exact error hash");
-    let key = format!("{}:{}", input.project_id, input.exact_hash);
-    let text = input.input.text();
-    let cache_key = cache::key(model::VERSION, &text);
-    let cached = match cache {
-        Some(cache) => cache.get(&cache_key).await,
-        None => None,
-    };
-    let embedding = match cached {
-        Some(vector) => vector,
-        None => {
-            let vector = tokio::task::spawn_blocking(move || model.embed(&text))
-                .await??
-                .0;
-            if let Some(cache) = cache {
-                cache.set(&cache_key, &vector).await;
-            }
-            vector
-        }
-    };
-    let row = Embedding {
-        project_id: input.project_id,
-        exact_hash: input.exact_hash,
-        timestamp: input.timestamp,
-        model_version: model::VERSION,
-        embedding,
-    };
+impl Occurrence {
+    fn validate(&self) -> Result<()> {
+        ensure!(!self.project_id.is_nil(), "Missing project ID");
+        ensure!(
+            self.exact_hash.len() == 64
+                && self
+                    .exact_hash
+                    .bytes()
+                    .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)),
+            "Invalid exact hash"
+        );
+        ensure!(
+            self.timestamp > 0 && self.timestamp <= i64::MAX as u64,
+            "Invalid source timestamp"
+        );
+        Ok(())
+    }
+}
+
+fn decode(payload: &[u8]) -> Result<Occurrence> {
+    let event: Envelope = serde_json::from_slice(payload).context("Invalid error envelope")?;
+    ensure!(
+        event.schema_version == 1 && event.r#type == "error_occurrence",
+        "Unsupported error envelope"
+    );
+    event.data.validate()?;
+    Ok(event.data)
+}
+
+async fn send(producer: &FutureProducer, topic: &str, row: Embedding) -> Result<()> {
+    let key = format!("{}:{}", row.project_id, row.exact_hash);
     let bytes = serde_json::to_vec(&row)?;
-    producer
+    let result = producer
         .send(
             FutureRecord::to(topic).key(&key).payload(&bytes),
             Duration::from_secs(5),
         )
-        .await
-        .map_err(|(e, _)| anyhow::anyhow!("Embedding publish failed: {e}"))?;
+        .await;
+    result.map_err(|(e, _)| anyhow::anyhow!("Embedding publish failed: {e}"))?;
     Ok(())
 }
 
@@ -145,18 +146,42 @@ async fn main() -> Result<()> {
     let model =
         Arc::new(tokio::task::spawn_blocking(move || model::Model::load(&model_dir)).await??);
     if action == "embed" {
-        for line in io::stdin().lock().lines() {
-            let input: Input = serde_json::from_str(&line?)?;
-            let text = input.text();
-            let (embedding, truncated) = model.embed(&text)?;
-            println!(
-                "{}",
-                serde_json::json!({"text":text,"embedding":embedding,"truncated":truncated})
-            );
+        let batch_size: usize = std::env::var("EMBED_BATCH_SIZE")
+            .unwrap_or_else(|_| "1".into())
+            .parse()?;
+        ensure!(
+            (1..=32).contains(&batch_size),
+            "EMBED_BATCH_SIZE must be 1..32"
+        );
+        let stdin = io::stdin();
+        let mut lines = stdin.lock().lines();
+        loop {
+            let texts = lines
+                .by_ref()
+                .take(batch_size)
+                .map(|line| {
+                    let input: Input = serde_json::from_str(&line?)?;
+                    Ok(input.text())
+                })
+                .collect::<Result<Vec<String>>>()?;
+            if texts.is_empty() {
+                break;
+            }
+            let vectors = if texts.len() == 1 {
+                vec![model.embed(&texts[0])?]
+            } else {
+                model.embed_batch(&texts)?
+            };
+            for (text, (embedding, truncated)) in texts.iter().zip(vectors) {
+                println!(
+                    "{}",
+                    serde_json::json!({"text":text,"embedding":embedding,"truncated":truncated})
+                );
+            }
         }
         return Ok(());
     }
-    let mut cache = cache::Cache::from_env()?;
+    let mut encoder = Encoder::new(model.clone())?;
     let output = std::env::var("ERROR_EMBEDDINGS_KAFKA_TOPIC")
         .unwrap_or_else(|_| "error-embeddings-v1".into());
     let producer: FutureProducer = kafka_config()?
@@ -165,23 +190,59 @@ async fn main() -> Result<()> {
         .set("message.timeout.ms", "60000")
         .create()?;
     if action == "publish" {
-        // Offline backfill streams rows from ClickHouse into this Kafka publisher.
-        for line in io::stdin().lock().lines() {
-            publish(
-                serde_json::from_str(&line?)?,
-                model.clone(),
-                &producer,
-                &output,
-                &mut cache,
-            )
-            .await?;
+        let in_flight: usize = std::env::var("EMBED_PUBLISH_IN_FLIGHT")
+            .unwrap_or_else(|_| "32".into())
+            .parse()?;
+        ensure!(
+            (1..=256).contains(&in_flight),
+            "EMBED_PUBLISH_IN_FLIGHT must be 1..256"
+        );
+        let batch_size: usize = std::env::var("EMBED_BATCH_SIZE")
+            .unwrap_or_else(|_| "1".into())
+            .parse()?;
+        ensure!(
+            (1..=32).contains(&batch_size),
+            "EMBED_BATCH_SIZE must be 1..32"
+        );
+        let mut pending = JoinSet::new();
+        let mut published = 0u64;
+        let stdin = io::stdin();
+        let mut lines = stdin.lock().lines();
+        loop {
+            let inputs = lines
+                .by_ref()
+                .take(batch_size)
+                .map(|line| Ok(serde_json::from_str(&line?)?))
+                .collect::<Result<Vec<Occurrence>>>()?;
+            if inputs.is_empty() {
+                break;
+            }
+            for row in encoder.encode_batch(inputs).await? {
+                let producer = producer.clone();
+                let output = output.clone();
+                pending.spawn(async move { send(&producer, &output, row).await });
+                if pending.len() >= in_flight {
+                    pending
+                        .join_next()
+                        .await
+                        .context("Missing publication")???;
+                }
+                published += 1;
+            }
         }
+        while let Some(result) = pending.join_next().await {
+            result??;
+        }
+        info!(published, "Backfill chunk acknowledged");
         return Ok(());
     }
     let topic = std::env::var("ERROR_OCCURRENCES_KAFKA_TOPIC")
         .unwrap_or_else(|_| "error-occurrences-v1".into());
     let consumer: StreamConsumer = kafka_config()?
-        .set("group.id", "error-embedder-v1")
+        .set(
+            "group.id",
+            std::env::var("EMBED_KAFKA_GROUP_ID").unwrap_or_else(|_| "error-embedder-v1".into()),
+        )
         .set("enable.auto.commit", "true")
         .set("auto.commit.interval.ms", "1000")
         .set("enable.auto.offset.store", "false")
@@ -196,18 +257,26 @@ async fn main() -> Result<()> {
     loop {
         let message =
             tokio::select! { m=consumer.recv()=>m?, result=&mut shutdown=> {result?; break} };
-        let payload = message.payload().context("Empty Kafka payload")?;
-        let event: Envelope = serde_json::from_slice(payload).context("Invalid error envelope")?;
-        ensure!(
-            event.schema_version == 1 && event.r#type == "error_occurrence",
-            "Unsupported error envelope"
-        );
-        publish(event.data, model.clone(), &producer, &output, &mut cache).await?;
-        // Background commits may only advance past durably published outputs.
+        match decode(message.payload().unwrap_or_default()) {
+            Ok(input) => {
+                let row = encoder.encode(input).await?;
+                send(&producer, &output, row).await?;
+            }
+            Err(error) => warn!(
+                source_topic = message.topic(), partition = message.partition(), offset = message.offset(),
+                reason = %error, "Skipping invalid embedding input"
+            ),
+        }
+        // Valid records advance only after durable publication. Permanently invalid
+        // inputs are deliberately skipped after logging their source coordinates.
         // A crash can replay an output; ReplacingMergeTree deduplicates by exact error.
         consumer.store_offset_from_message(&message)?;
     }
-    consumer.commit_consumer_state(CommitMode::Sync)?;
+    match consumer.commit_consumer_state(CommitMode::Sync) {
+        // The periodic commit may already have persisted all completed work.
+        Ok(()) | Err(KafkaError::ConsumerCommit(RDKafkaErrorCode::NoOffset)) => {}
+        Err(error) => return Err(error.into()),
+    }
     Ok(())
 }
 
@@ -218,7 +287,7 @@ mod tests {
     #[test]
     fn occurrence_requires_the_exact_hash_and_source_timestamp() {
         let row = serde_json::json!({
-            "project_id": uuid::Uuid::nil(), "exact_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "project_id": uuid::Uuid::from_u128(1), "exact_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "timestamp": 1750000000123u64, "language": "java", "error_type": "Error",
             "error_message": "failed", "stacktrace": "at app.Main.run(Main.java:1)"
         });
@@ -232,6 +301,32 @@ mod tests {
             let mut incomplete = row.clone();
             incomplete.as_object_mut().unwrap().remove(field);
             assert!(serde_json::from_value::<Occurrence>(incomplete).is_err());
+        }
+    }
+    #[test]
+    fn poison_records_are_rejected_before_inference() {
+        for payload in [b"".as_slice(), b"not json", br#"{"schema_version":2}"#] {
+            assert!(decode(payload).is_err());
+        }
+        let row = serde_json::json!({"project_id": uuid::Uuid::from_u128(1), "exact_hash": "a".repeat(64),
+            "timestamp": 123, "language":"java", "error_type":"Error", "error_message":"failed", "stacktrace":""});
+        assert!(
+            decode(
+                &serde_json::to_vec(
+                    &serde_json::json!({"schema_version":1,"type":"error_occurrence","data":row})
+                )
+                .unwrap()
+            )
+            .is_ok()
+        );
+        for (field, value) in [
+            ("project_id", serde_json::json!(uuid::Uuid::nil())),
+            ("exact_hash", serde_json::json!("bad")),
+            ("timestamp", serde_json::json!(0)),
+        ] {
+            let mut invalid = row.clone();
+            invalid[field] = value;
+            assert!(decode(&serde_json::to_vec(&serde_json::json!({"schema_version":1,"type":"error_occurrence","data":invalid})).unwrap()).is_err());
         }
     }
 }

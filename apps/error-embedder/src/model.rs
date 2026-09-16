@@ -94,27 +94,61 @@ impl Model {
     }
 
     pub fn embed(&self, text: &str) -> Result<(Vec<f32>, bool)> {
-        let tokens = self
-            .tokenizer
-            .encode(text, true)
-            .map_err(anyhow::Error::msg)?;
-        let (ids, truncated) = bounded_ids(tokens.get_ids())?;
-        let n = ids.len();
+        self.embed_batch(&[text.to_owned()])?
+            .pop()
+            .context("Missing embedding")
+    }
+
+    pub fn embed_batch(&self, texts: &[String]) -> Result<Vec<(Vec<f32>, bool)>> {
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
+        ensure!(texts.len() <= 32, "Inference batch exceeds 32 inputs");
+        let encoded = texts
+            .iter()
+            .map(|text| {
+                let tokens = self
+                    .tokenizer
+                    .encode(text.as_str(), true)
+                    .map_err(anyhow::Error::msg)?;
+                bounded_ids(tokens.get_ids())
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let width = encoded
+            .iter()
+            .map(|(ids, _)| ids.len())
+            .max()
+            .context("Empty batch")?;
+        let mut ids = vec![0i64; texts.len() * width];
+        let mut mask = vec![0i64; ids.len()];
+        for (row, (tokens, _)) in encoded.iter().enumerate() {
+            let start = row * width;
+            ids[start..start + tokens.len()].copy_from_slice(tokens);
+            mask[start..start + tokens.len()].fill(1);
+        }
         let mut session = self
             .session
             .lock()
             .map_err(|_| anyhow::anyhow!("Inference mutex poisoned"))?;
         let output = session.run(ort::inputs![
-            "input_ids" => Tensor::from_array(([1, n], ids))?,
-            "attention_mask" => Tensor::from_array(([1, n], vec![1i64; n]))?,
+            "input_ids" => Tensor::from_array(([texts.len(), width], ids))?,
+            "attention_mask" => Tensor::from_array(([texts.len(), width], mask))?,
         ])?;
-        let (shape, vector) = output["embedding"].try_extract_tensor::<f32>()?;
+        let (shape, vectors) = output["embedding"].try_extract_tensor::<f32>()?;
         ensure!(
-            shape.as_ref() == [1, WIDTH as i64],
+            shape.as_ref() == [texts.len() as i64, WIDTH as i64],
             "Unexpected embedding shape"
         );
-        validate_vector(vector)?;
-        Ok((vector.to_vec(), truncated))
+        vectors
+            .as_chunks::<WIDTH>()
+            .0
+            .iter()
+            .zip(encoded)
+            .map(|(vector, (_, truncated))| {
+                validate_vector(vector)?;
+                Ok((vector.to_vec(), truncated))
+            })
+            .collect()
     }
 }
 
@@ -196,6 +230,26 @@ mod tests {
         ];
         for (actual, expected) in vector.iter().zip(expected) {
             assert!((actual - expected).abs() < 1e-5, "{actual} != {expected}");
+        }
+        Ok(())
+    }
+    #[test]
+    #[ignore = "requires exported checkpoint and ORT_DYLIB_PATH"]
+    fn batches_match_single_inference_with_padding() -> Result<()> {
+        let model = Model::load(Path::new(&std::env::var("EMBED_MODEL_DIR")?))?;
+        let texts = vec![
+            "Error: failed\napp.run".to_owned(),
+            "a long frame ".repeat(190),
+            "Unicode: café λ".to_owned(),
+        ];
+        let batch = model.embed_batch(&texts)?;
+        for (text, (vector, truncated)) in texts.iter().zip(batch) {
+            let (single, single_truncated) = model.embed(text)?;
+            ensure!(truncated == single_truncated, "Batch truncation mismatch");
+            ensure!(
+                vector.iter().zip(single).all(|(a, b)| (a - b).abs() < 1e-5),
+                "Batch changed vector components"
+            );
         }
         Ok(())
     }

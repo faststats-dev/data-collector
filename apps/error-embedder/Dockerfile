@@ -28,7 +28,7 @@ FROM scratch AS model-artifacts
 COPY --from=model /model/model-fp16.onnx /model/fp16.json /model/tokenizer.json /models/
 
 FROM rust:1.98-bookworm AS build
-RUN apt-get update && apt-get install -y --no-install-recommends cmake pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends cmake pkg-config libssl-dev libclang-dev && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY apps ./apps

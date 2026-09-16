@@ -7,7 +7,7 @@ edition = "2024"
 anyhow = "1"
 ort = { version = "=2.0.0-rc.10", default-features = false, features = ["std", "load-dynamic"] }
 hex = "0.4"
-rdkafka = { version = "0.38", features = ["cmake-build", "ssl", "tokio"] }
+rdkafka = { version = "0.38", features = ["cmake-build", "ssl", "tokio", "zstd"] }
 regex = "1"
 redis = { version = "0.32.7", default-features = false, features = ["tokio-rustls-comp"] }
 serde = { version = "1", features = ["derive"] }

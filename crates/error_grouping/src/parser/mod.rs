@@ -6,15 +6,15 @@ mod python;
 mod rust;
 mod swift;
 
-use crate::ast::{FrameList, ParseWarnings, ParserLimits, SegmentList, StackTrace};
-use crate::{Language, ParseError};
+use crate::ast::{ParseWarnings, ParserLimits, StackTrace};
+use crate::{Language, ParseError, StackFrame, TraceSegment};
 
 pub(super) const MAX_RETAINED_FRAMES: usize = 256;
 const MAX_RETAINED_SEGMENTS: usize = 64;
 
 pub(super) fn push_frame<'a>(
-    frames: &mut FrameList<'a>,
-    frame: crate::ast::StackFrame<'a>,
+    frames: &mut Vec<StackFrame<'a>>,
+    frame: StackFrame<'a>,
     warnings: &mut ParseWarnings,
 ) {
     if frames.len() < MAX_RETAINED_FRAMES {
@@ -25,8 +25,8 @@ pub(super) fn push_frame<'a>(
 }
 
 pub(super) fn push_recent_frame<'a>(
-    frames: &mut FrameList<'a>,
-    frame: crate::ast::StackFrame<'a>,
+    frames: &mut Vec<StackFrame<'a>>,
+    frame: StackFrame<'a>,
     warnings: &mut ParseWarnings,
 ) {
     if frames.len() == MAX_RETAINED_FRAMES {
@@ -37,8 +37,8 @@ pub(super) fn push_recent_frame<'a>(
 }
 
 pub(super) fn push_segment<'a>(
-    segments: &mut SegmentList<'a>,
-    segment: crate::ast::TraceSegment<'a>,
+    segments: &mut Vec<TraceSegment<'a>>,
+    segment: TraceSegment<'a>,
     warnings: &mut ParseWarnings,
 ) {
     if segments.len() == MAX_RETAINED_SEGMENTS {
@@ -63,68 +63,31 @@ pub(super) fn parse<'a>(
         return Err(ParseError::Empty);
     }
 
-    let mut lines = ValidatingLines::new(input, limits);
-    let trace = match language {
-        Language::Java => java::parse_lines(&mut lines),
-        Language::Rust => rust::parse_lines(&mut lines),
-        Language::JavaScript => javascript::parse_lines(&mut lines),
-        Language::Python => python::parse_lines(&mut lines),
-        Language::Php => php::parse_lines(&mut lines),
-        Language::Go => go::parse_lines(&mut lines),
-        Language::Swift => swift::parse_lines(&mut lines),
-    };
-    lines.finish(trace)
-}
-
-struct ValidatingLines<'input, 'limits> {
-    lines: std::iter::Enumerate<std::str::Lines<'input>>,
-    limits: &'limits ParserLimits,
-    error: Option<ParseError>,
-}
-
-impl<'input, 'limits> ValidatingLines<'input, 'limits> {
-    fn new(input: &'input str, limits: &'limits ParserLimits) -> Self {
-        Self {
-            lines: input.lines().enumerate(),
-            limits,
-            error: None,
-        }
-    }
-
-    fn finish<T>(self, value: Option<T>) -> Result<T, ParseError> {
-        match self.error {
-            Some(error) => Err(error),
-            None => value.ok_or(ParseError::Unrecognized),
-        }
-    }
-}
-
-impl<'input> Iterator for ValidatingLines<'input, '_> {
-    type Item = &'input str;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.error.is_some() {
-            return None;
-        }
-
-        let (index, line) = self.lines.next()?;
-        let line_number = index + 1;
-        if line_number > self.limits.max_lines {
-            self.error = Some(ParseError::TooManyLines {
-                limit: self.limits.max_lines,
+    for (index, line) in input.lines().enumerate() {
+        if index >= limits.max_lines {
+            return Err(ParseError::TooManyLines {
+                limit: limits.max_lines,
             });
-            return None;
         }
-        if line.len() > self.limits.max_line_bytes {
-            self.error = Some(ParseError::LineTooLong {
-                line: line_number,
+        if line.len() > limits.max_line_bytes {
+            return Err(ParseError::LineTooLong {
+                line: index + 1,
                 actual: line.len(),
-                limit: self.limits.max_line_bytes,
+                limit: limits.max_line_bytes,
             });
-            return None;
         }
-        Some(line)
     }
+    let lines = input.lines();
+    match language {
+        Language::Java => java::parse_lines(lines),
+        Language::Rust => rust::parse_lines(lines),
+        Language::JavaScript => javascript::parse_lines(lines),
+        Language::Python => python::parse_lines(lines),
+        Language::Php => php::parse_lines(lines),
+        Language::Go => go::parse_lines(lines),
+        Language::Swift => swift::parse_lines(lines),
+    }
+    .ok_or(ParseError::Unrecognized)
 }
 
 pub(super) fn trim_line(line: &str) -> (&str, usize) {
@@ -142,7 +105,6 @@ pub(super) fn looks_like_exception(line: &str, extra_kind_chars: &[char]) -> boo
         })
 }
 
-/// Parse a required prefix and return the remaining non-empty payload.
 pub(super) fn payload<'a>(line: &'a str, prefix: &'static str) -> Option<&'a str> {
     line.strip_prefix(prefix)
         .filter(|payload| !payload.is_empty())

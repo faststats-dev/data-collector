@@ -12,12 +12,14 @@ pub(super) fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Option<St
             continue;
         }
         if goroutines == 2 {
-            continue;
+            break;
         }
-        if payload(line, "panic: ").is_some() {
+        if let Some(message) = payload(line, "panic: ") {
             segment.error_kind = Some("panic");
-        } else if payload(line, "fatal error: ").is_some() {
+            segment.error_message = Some(message);
+        } else if let Some(message) = payload(line, "fatal error: ") {
             segment.error_kind = Some("fatal error");
+            segment.error_message = Some(message);
         } else if is_goroutine(line) {
             goroutines += 1;
         } else if let Some(function) = line.strip_prefix("created by ") {
@@ -31,9 +33,14 @@ pub(super) fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Option<St
             }
         } else if is_function_line(line) {
             push_frame(&mut segment.frames, go_frame(line), &mut warnings);
+        } else if line.contains('(') || line.starts_with('/') || line.contains(":\\") {
+            warnings.malformed_frame = true;
         }
     }
-    (!segment.is_empty()).then(|| StackTrace::single_with_warnings(segment, warnings))
+    (!segment.is_empty()).then(|| StackTrace {
+        segments: vec![segment],
+        warnings,
+    })
 }
 
 fn is_goroutine(line: &str) -> bool {
@@ -76,22 +83,22 @@ mod tests {
     #[test]
     fn parses_panic_goroutine_and_created_by_frames() {
         let trace = Language::Go.parse_stack("panic: send on closed channel\n\ngoroutine 18 [running]:\nmain.worker(0x1)\n\t/work/main.go:14 +0x4f\ncreated by main.main in goroutine 1\n\t/work/main.go:8 +0x20").unwrap();
-        assert_eq!(trace.segments()[0].error_kind, Some("panic"));
-        assert_eq!(trace.segments()[0].frames[0].file, Some("/work/main.go"));
-        assert_eq!(trace.segments()[0].frames[1].function, Some("main.main"));
+        assert_eq!(trace.segments[0].error_kind, Some("panic"));
+        assert_eq!(trace.segments[0].frames[0].file, Some("/work/main.go"));
+        assert_eq!(trace.segments[0].frames[1].function, Some("main.main"));
     }
 
     #[test]
     fn does_not_merge_additional_goroutines() {
         let trace = Language::Go.parse_stack("panic: bad\n\ngoroutine 1 [running]:\nmain.main()\n\t/app.go:3 +0x1\n\ngoroutine 2 [sleep]:\nother.work()\n\t/other.go:9 +0x2").unwrap();
-        assert_eq!(trace.segments()[0].frames.len(), 1);
+        assert_eq!(trace.segments[0].frames.len(), 1);
     }
 
     #[test]
     fn parses_runtime_fatal_errors() {
         let trace = Language::Go.parse_stack("fatal error: concurrent map writes\n\ngoroutine 7 [running]:\nmain.write()\n\t/app.go:4 +0x2").unwrap();
-        assert_eq!(trace.segments()[0].error_kind, Some("fatal error"));
-        assert_eq!(trace.segments()[0].frames[0].function, Some("main.write"));
+        assert_eq!(trace.segments[0].error_kind, Some("fatal error"));
+        assert_eq!(trace.segments[0].frames[0].function, Some("main.write"));
     }
 
     #[test]
@@ -100,7 +107,7 @@ mod tests {
             .parse_stack("goroutine 1 [running]:\nexample/pkg.(*Server).Serve()\n\t/app.go:9 +0x2")
             .unwrap();
         assert_eq!(
-            trace.segments()[0].frames[0].function,
+            trace.segments[0].frames[0].function,
             Some("example/pkg.(*Server).Serve")
         );
     }
@@ -110,8 +117,8 @@ mod tests {
         let trace = Language::Go
             .parse_stack("panic: bad\n\ngoroutine 1 [running]:\nmain.f(0x1, 0x2)\n\t/app.go:3 +0x1")
             .unwrap();
-        assert_eq!(trace.segments()[0].frames[0].function, Some("main.f"));
-        assert_eq!(trace.segments()[0].frames[0].file.unwrap(), "/app.go");
+        assert_eq!(trace.segments[0].frames[0].function, Some("main.f"));
+        assert_eq!(trace.segments[0].frames[0].file.unwrap(), "/app.go");
     }
 
     #[test]
@@ -123,7 +130,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            trace.segments()[0].frames[0],
+            trace.segments[0].frames[0],
             StackFrame {
                 function: Some("main.work"),
                 module: None,

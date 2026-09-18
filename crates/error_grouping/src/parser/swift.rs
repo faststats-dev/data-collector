@@ -1,11 +1,9 @@
-use crate::ast::{FrameList, ParseWarnings, StackFrame, StackTrace, TraceSegment};
+use crate::ast::{ParseWarnings, StackFrame, StackTrace, TraceSegment};
 use crate::parser::{nonempty, push_frame, source_file};
 
 pub(super) fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Option<StackTrace<'a>> {
     let mut segment = TraceSegment::default();
-    let mut preamble_frames = FrameList::new();
-    let mut saw_thread_header = false;
-    let mut include_thread = false;
+    let mut thread = None;
     let mut warnings = ParseWarnings::default();
 
     for original in lines {
@@ -15,27 +13,37 @@ pub(super) fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Option<St
         }
         if let Some(kind) = runtime_failure_kind(line) {
             segment.error_kind = Some(kind);
+            segment.error_message = line
+                .find(kind)
+                .and_then(|start| line[start + kind.len()..].strip_prefix(':'))
+                .map(str::trim);
         } else if let Some(kind) = crash_kind(line) {
             if segment.error_kind.is_none() {
                 segment.error_kind = Some(kind);
             }
         } else if let Some(crashed) = crashed_thread(line) {
-            saw_thread_header = true;
-            include_thread = crashed;
-        } else if let Some(frame) = parse_frame(line) {
-            if !saw_thread_header {
-                push_frame(&mut preamble_frames, frame, &mut warnings);
-            } else if include_thread {
+            if thread.is_none() {
+                segment.frames.clear();
+                warnings = ParseWarnings::default();
+            }
+            thread = Some(crashed);
+        } else if thread != Some(false) {
+            if let Some(frame) = parse_frame(line) {
                 push_frame(&mut segment.frames, frame, &mut warnings);
+            } else if line
+                .split_whitespace()
+                .next()
+                .is_some_and(|n| n.bytes().all(|b| b.is_ascii_digit()))
+            {
+                warnings.malformed_frame = true;
             }
         }
     }
 
-    if !saw_thread_header {
-        segment.frames = preamble_frames;
-    }
-
-    (!segment.is_empty()).then(|| StackTrace::single_with_warnings(segment, warnings))
+    (!segment.is_empty()).then(|| StackTrace {
+        segments: vec![segment],
+        warnings,
+    })
 }
 
 fn runtime_failure_kind(line: &str) -> Option<&str> {
@@ -67,98 +75,57 @@ fn crashed_thread(line: &str) -> Option<bool> {
 }
 
 fn parse_frame(line: &str) -> Option<StackFrame<'_>> {
-    let (index, body) = line.split_once(char::is_whitespace)?;
+    let (index, mut body) = line.split_once(char::is_whitespace)?;
     index.parse::<u32>().ok()?;
-    let body = strip_annotations(body.trim_start())?;
-    let (body, leading_module) = strip_address(body)?;
-    let (symbol, file) = split_source_location(body);
-    let (function, module) = split_symbol(symbol, leading_module);
-
-    if function.is_none() && module.is_none() && file.is_none() {
-        return None;
+    body = body.trim_start();
+    while body.starts_with('[') {
+        body = body.split_once("] ")?.1;
     }
-    Some(StackFrame {
+    let mut module = None;
+    if let Some(address) = body.find("0x")
+        && (address == 0 || body[..address].ends_with(char::is_whitespace))
+    {
+        module = nonempty(body[..address].trim());
+        body = body[address..]
+            .split_once(char::is_whitespace)?
+            .1
+            .trim_start();
+    }
+    let (symbol, file) = source_location(body);
+    let (mut function, module) = symbol
+        .rsplit_once(" in ")
+        .map_or((symbol, module), |(function, module)| {
+            (function, nonempty(module))
+        });
+    if let Some((name, offset)) = function.rsplit_once(" + ")
+        && offset.parse::<u64>().is_ok()
+    {
+        function = name;
+    }
+    let function = function.trim();
+    let function = (!function.is_empty() && function != "<unknown>" && !function.starts_with("0x"))
+        .then_some(function);
+    (function.is_some() || module.is_some() || file.is_some()).then_some(StackFrame {
         function,
         module,
         file,
     })
 }
 
-fn strip_annotations(mut body: &str) -> Option<&str> {
-    while body.starts_with('[') {
-        let (_, rest) = body.split_once("] ")?;
-        body = rest;
+fn source_location(body: &str) -> (&str, Option<&str>) {
+    for candidate in [
+        body.rsplit_once(" at "),
+        body.strip_suffix(')').and_then(|s| s.rsplit_once(" (")),
+    ] {
+        if let Some((symbol, location)) = candidate
+            && location
+                .rsplit_once(':')
+                .is_some_and(|(_, n)| n.parse::<u32>().is_ok())
+        {
+            return (symbol, Some(source_file(location)));
+        }
     }
-    Some(body)
-}
-
-fn strip_address(mut body: &str) -> Option<(&str, Option<&str>)> {
-    let mut module = None;
-    if !body.starts_with("0x")
-        && let Some(address) = body.find("0x")
-        && body[..address]
-            .chars()
-            .next_back()
-            .is_some_and(char::is_whitespace)
-    {
-        module = nonempty(body[..address].trim());
-        body = &body[address..];
-    }
-    if body.starts_with("0x") {
-        let (_, rest) = body.split_once(char::is_whitespace)?;
-        body = rest.trim_start();
-    }
-    Some((body, module))
-}
-
-fn split_source_location(body: &str) -> (&str, Option<&str>) {
-    let (symbol, file) = body
-        .rsplit_once(" at ")
-        .map_or((body, None), |(symbol, location)| {
-            if has_source_position(location) {
-                (symbol, Some(source_file(location)))
-            } else {
-                (body, None)
-            }
-        });
-    let (symbol, file) = if file.is_none()
-        && let Some((symbol, location)) = symbol
-            .strip_suffix(')')
-            .and_then(|text| text.rsplit_once(" ("))
-        && has_source_position(location)
-    {
-        (symbol, Some(source_file(location)))
-    } else {
-        (symbol, file)
-    };
-    (symbol, file)
-}
-
-fn split_symbol<'a>(
-    symbol: &'a str,
-    leading_module: Option<&'a str>,
-) -> (Option<&'a str>, Option<&'a str>) {
-    let (function, module) = symbol
-        .rsplit_once(" in ")
-        .map_or((symbol, leading_module), |(function, swift_module)| {
-            (function, nonempty(swift_module))
-        });
-    let function = strip_offset(function).trim();
-    let function = (function != "<unknown>" && !function.starts_with("0x")).then_some(function);
-    (function, module)
-}
-
-fn strip_offset(function: &str) -> &str {
-    let Some((name, offset)) = function.rsplit_once(" + ") else {
-        return function;
-    };
-    offset.parse::<u64>().map_or(function, |_| name)
-}
-
-fn has_source_position(location: &str) -> bool {
-    location
-        .rsplit_once(':')
-        .is_some_and(|(_, position)| position.parse::<u32>().is_ok())
+    (body, None)
 }
 
 #[cfg(test)]
@@ -173,11 +140,11 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(trace.segments()[0].error_kind, Some("Fatal error"));
-        assert_eq!(trace.segments()[0].frames.len(), 2);
-        assert_eq!(trace.segments()[0].frames[1].function, Some("run()"));
+        assert_eq!(trace.segments[0].error_kind, Some("Fatal error"));
+        assert_eq!(trace.segments[0].frames.len(), 2);
+        assert_eq!(trace.segments[0].frames[1].function, Some("run()"));
         assert_eq!(
-            trace.segments()[0].frames[1].file,
+            trace.segments[0].frames[1].file,
             Some("/work/Sources/demo/main.swift")
         );
     }
@@ -186,12 +153,12 @@ mod tests {
     fn parses_legacy_markers_and_closure_names() {
         let trace = Language::Swift.parse_stack("*** Signal 4: Backtracing from 0x1... done ***\n*** Program crashed: Illegal instruction at 0x1 ***\nThread 0 \"demo\" crashed:\n0 0x1 closure #1 in load() + 21 in demo").unwrap();
 
-        assert_eq!(trace.segments()[0].error_kind, Some("Illegal instruction"));
+        assert_eq!(trace.segments[0].error_kind, Some("Illegal instruction"));
         assert_eq!(
-            trace.segments()[0].frames[0].function,
+            trace.segments[0].frames[0].function,
             Some("closure #1 in load()")
         );
-        assert_eq!(trace.segments()[0].frames[0].module, Some("demo"));
+        assert_eq!(trace.segments[0].frames[0].module, Some("demo"));
     }
 
     #[test]
@@ -202,9 +169,9 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(trace.segments()[0].frames[0].function, Some("App.main()"));
+        assert_eq!(trace.segments[0].frames[0].function, Some("App.main()"));
         assert_eq!(
-            trace.segments()[0].frames[0].file,
+            trace.segments[0].frames[0].file,
             Some("C:\\work\\main.swift")
         );
     }
@@ -216,9 +183,9 @@ mod tests {
                 "Thread 0 Crashed:\n0   TouchCanvas  0x0000000102afb3d0 CanvasView.update() + 62416 (CanvasView.swift:231)\nThread 1:\n0   libsystem 0x00000001 worker + 8",
             )
             .unwrap();
-        let frame = &trace.segments()[0].frames[0];
+        let frame = &trace.segments[0].frames[0];
 
-        assert_eq!(trace.segments()[0].frames.len(), 1);
+        assert_eq!(trace.segments[0].frames.len(), 1);
         assert_eq!(frame.module, Some("TouchCanvas"));
         assert_eq!(frame.function, Some("CanvasView.update()"));
         assert_eq!(frame.file, Some("CanvasView.swift"));
@@ -233,7 +200,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            trace.segments()[0].frames[0],
+            trace.segments[0].frames[0],
             StackFrame {
                 function: Some("App.run()"),
                 module: Some("Demo"),
@@ -251,7 +218,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            trace.segments()[0].frames.as_slice(),
+            trace.segments[0].frames.as_slice(),
             vec![StackFrame {
                 function: Some("App.crash()"),
                 module: Some("Demo"),

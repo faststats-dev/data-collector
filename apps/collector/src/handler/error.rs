@@ -92,7 +92,6 @@ pub async fn error(
                 sdk_name: Some(payload.sdk_name.as_deref().unwrap_or("unknown")),
                 sdk_version: payload.sdk_version.as_deref(),
                 context: &context,
-                grouping: &ctx.error_grouping,
             },
             error,
         );
@@ -101,7 +100,7 @@ pub async fn error(
             .queue_event(QueuedEvent::ErrorOccurrenceV3 {
                 row: Box::new(occurrence),
                 language,
-                grouping: ctx.error_grouping.clone(),
+
                 tracking: Some(tracking_ctx.clone()),
             })
         {

@@ -1,7 +1,4 @@
-use error_grouping::{
-    Grouper, GroupingInput, GroupingOutcome, GroupingPolicy, Language, ParseError, ParserLimits,
-    RawStackPolicy, group,
-};
+use error_grouping::{Language, ParseError};
 
 const LANGUAGES: [Language; 7] = [
     Language::Java,
@@ -26,7 +23,7 @@ const SEEDS: [&str; 9] = [
 ];
 
 #[test]
-fn generated_inputs_never_panic_and_always_produce_versioned_ids() {
+fn generated_inputs_never_panic() {
     let mut state = 0x9e37_79b9_7f4a_7c15_u64;
     for case in 0..2_000 {
         let mut bytes = SEEDS[case % SEEDS.len()].as_bytes().to_vec();
@@ -42,56 +39,36 @@ fn generated_inputs_never_panic_and_always_produce_versioned_ids() {
         }
         let input = String::from_utf8_lossy(&bytes);
         for language in LANGUAGES {
-            let result = group(GroupingInput {
-                language,
-                error_kind: "Error",
-                stack: &input,
-            });
-            assert!(result.fingerprint.to_string().starts_with("eg1_"));
+            let result = language.parse_stack(&input);
+            if let Ok(trace) = result {
+                assert!(trace.segments.len() <= 64);
+                assert!(
+                    trace
+                        .segments
+                        .iter()
+                        .all(|segment| segment.frames.len() <= 256)
+                );
+            }
         }
     }
 }
 
 #[test]
-fn oversized_inputs_use_observable_raw_stack_fallback() {
+fn oversized_inputs_are_rejected() {
     let stack = "a".repeat(1024 * 1024 + 1);
-    let result = group(GroupingInput {
-        language: Language::Java,
-        error_kind: "Error",
-        stack: &stack,
-    });
-
     assert!(matches!(
-        result.outcome,
-        GroupingOutcome::RawFallback { .. }
-    ));
-    assert!(matches!(
-        result.parse_error(),
-        Some(ParseError::InputTooLarge { .. })
+        Language::Java.parse_stack(&stack),
+        Err(ParseError::InputTooLarge { .. })
     ));
 }
 
 #[test]
-fn oversized_fallback_samples_only_a_bounded_prefix_and_suffix() {
-    let policy = GroupingPolicy::default()
-        .with_parser_limits(ParserLimits {
-            max_input_bytes: 4,
-            ..ParserLimits::default()
-        })
-        .with_raw_stack(RawStackPolicy::Bounded { max_bytes: 4 });
-    let grouper = Grouper::new(policy).unwrap();
-    let fingerprint = |stack| {
-        grouper
-            .group(GroupingInput {
-                language: Language::Java,
-                error_kind: "Error",
-                stack,
-            })
-            .fingerprint
-    };
-
-    assert_eq!(fingerprint("ab1111yz"), fingerprint("ab2222yz"));
-    assert_ne!(fingerprint("ab1111yz"), fingerprint("ab1111zz"));
+fn public_parser_accepts_sdk_java_frames_and_preserves_symbols() {
+    let trace = Language::Java.parse_stack("java.base/sun.nio.fs.UnixException.translateToIOException(UnixException.java:92)\nworlds-3.12.2.jar//net.thenextlvl.worlds.Main.load(Main.java:125)").unwrap();
+    let frames = &trace.segments[0].frames;
+    assert_eq!(frames.len(), 2);
+    assert_eq!(frames[1].function, Some("net.thenextlvl.worlds.Main.load"));
+    assert_eq!(frames[1].file, Some("Main.java"));
 }
 
 fn random_index(state: &mut u64, upper_bound: usize) -> usize {

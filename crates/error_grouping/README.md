@@ -1,70 +1,56 @@
 # error_grouping
 
-`error_grouping` turns an error kind and runtime stack into a stable group identifier. It parses untrusted stack text with fixed resource limits and reports exactly which evidence produced the identifier.
+Parses stack traces into exception segments and frames. It does not create group
+IDs or fingerprints.
+
+## Usage
 
 ```rust
-use error_grouping::{GroupingInput, GroupingOutcome, Language, group};
+use error_grouping::Language;
 
-let result = group(GroupingInput {
-    language: Language::JavaScript,
-    error_kind: "TypeError",
-    stack: "TypeError: bad value\n    at load (/app/main.js:8:2)",
-});
-
-assert!(matches!(result.outcome, GroupingOutcome::Frames { .. }));
-println!("{}", result.fingerprint); // eg1_<sha256>
+let trace = Language::Java
+    .parse_stack("at app.Main.run(Main.java:42)")
+    .expect("valid stack trace");
+let frame = &trace.segments[0].frames[0];
+assert_eq!(frame.function, Some("app.Main.run"));
+assert_eq!(frame.file, Some("Main.java"));
 ```
 
-## Repeated grouping
+Segments contain the exception type, optional message, cause relationship, and
+frames ordered from the crash site toward its callers. Names borrow from the input.
+Source line/column numbers are removed from filenames. `trace.warnings` reports
+malformed frame syntax and truncated output; invalid input returns `ParseError`.
+Python exception groups retain the outer trace and flag omitted children as
+truncated. The embedder uses raw text whenever parsing is incomplete.
 
-Compile an owned policy once. `Grouper::new` validates limits, frame counts, path prefixes, and rule patterns before events enter the hot path.
+## Languages
 
-```rust
-use error_grouping::{
-    FrameField, FrameMatcher, FramePolicy, FrameRule, Grouper, GroupingInput,
-    GroupingPolicy, Language, SegmentSelection,
-};
+- Java/JVM, including Kotlin and Scala; printed and bare SDK frames.
+- JavaScript/TypeScript: V8 and SpiderMonkey stacks.
+- Python: tracebacks, chained exceptions, and outer exception-group traces.
+- Rust: panic backtraces.
+- PHP: exception and fatal-error traces.
+- Go: panic and fatal-error traces.
+- Swift: runtime traces and Apple crash reports.
 
-let policy = GroupingPolicy::default()
-    .with_segments(SegmentSelection::Root)
-    .with_frames(
-        FramePolicy::default().with_exclusions(vec![FrameRule::new(
-            FrameField::Function,
-            FrameMatcher::prefix("vendor."),
-        )]),
-    );
-let grouper = Grouper::new(policy)?;
-let result = grouper.group(GroupingInput {
-    language: Language::Java,
-    error_kind: "java.lang.RuntimeException",
-    stack: "at app.Main.run(Main.java:1)",
-});
-# let _ = result;
-# Ok::<(), error_grouping::InvalidPolicy>(())
+`"java".parse::<Language>()` accepts language names and aliases.
+
+## Where it is used
+
+The error embedder parses mapped or original stacks with this crate, then formats
+and normalizes the parsed values before vectorization. Live ingestion and backfills
+use the same preparation. Regular issue grouping uses the separate `legacy-grouping`
+crate.
+
+## Limits and checks
+
+Default limits: 1 MiB input, 16,384 lines, 64 KiB per line, 64 segments, and 256 frames
+per segment. Use `parse_stack_with_limits` with `ParserLimits` to change input limits.
+
+```sh
+cargo test -p error_grouping
+cargo bench -p error_grouping --bench parsers
 ```
 
-## Behavior
-
-- Frames are normalized to crash-nearest-first order.
-- The default policy uses terminal-cause frames, falling back to root frames.
-- At most eight frames per selected segment contribute by default.
-- Messages, line numbers, instruction addresses, and deployment prefixes do not contribute.
-- Runtime frames are filtered when application frames exist.
-- Java shared-frame elisions are expanded and nested suppressed causes do not become the terminal root cause.
-- A malformed candidate frame does not discard otherwise trustworthy evidence. `ParseWarnings` reports partial and truncated parses.
-- Frames without any selected identity field do not count as stack evidence.
-- Unrecognized stacks can use bounded raw evidence or kind-only grouping.
-
-Parsing is limited to 1 MiB, 16,384 lines, 64 KiB per line, 256 retained frames per segment, and 64 retained exception segments. The retained limits bound memory even when the textual input is within its byte and line limits.
-
-## Configuration
-
-`GroupingPolicy`, `FramePolicy`, frame rules, and their enums are owned and serde-compatible. Important options include:
-
-- `SegmentSelection`: kind-only, root, root plus terminal cause, or terminal-cause frames.
-- `RawStackPolicy`: bounded raw sampling or kind-only grouping.
-- `FrameFields`: function, module, and file identity.
-- `FramePolicy::with_exclusions`: discard matching normalized frames.
-- `include_error_kind`, `include_runtime_frames`, and `deduplicate_adjacent_frames`: named boolean switches.
-
-The stored `eg1_<sha256>` value hashes the canonical evidence that actually contributed. Configuration changes that do not change an event's canonical evidence preserve its group identifier.
+Parser output affects embedding preparation. Run the embedder compatibility tests
+when changing this crate; changed prepared text requires a new embedding version.

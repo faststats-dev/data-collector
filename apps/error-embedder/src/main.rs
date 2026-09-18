@@ -2,6 +2,7 @@ mod cache;
 mod encoder;
 mod input;
 mod model;
+mod normalize;
 
 use anyhow::{Context, Result, ensure};
 use encoder::Encoder;
@@ -138,9 +139,27 @@ async fn main() -> Result<()> {
         .init();
     let action = std::env::args().nth(1).unwrap_or_else(|| "consume".into());
     ensure!(
-        matches!(action.as_str(), "consume" | "publish" | "embed"),
-        "Use consume, publish, or embed"
+        matches!(
+            action.as_str(),
+            "consume" | "publish" | "embed" | "encode" | "prepare" | "version"
+        ),
+        "Use consume, publish, embed, encode, prepare, or version"
     );
+    // Preparation/version diagnostics must not load a model or connect to Kafka.
+    if action == "version" {
+        println!("{}", model::VERSION);
+        return Ok(());
+    }
+    if action == "prepare" {
+        for line in io::stdin().lock().lines() {
+            let input: Input = serde_json::from_str(&line?)?;
+            println!(
+                "{}",
+                serde_json::json!({"model_version": model::VERSION, "text": input.text()})
+            );
+        }
+        return Ok(());
+    }
     let model_dir =
         PathBuf::from(std::env::var("EMBED_MODEL_DIR").context("EMBED_MODEL_DIR is required")?);
     let model =
@@ -184,12 +203,18 @@ async fn main() -> Result<()> {
     let mut encoder = Encoder::new(model.clone())?;
     let output = std::env::var("ERROR_EMBEDDINGS_KAFKA_TOPIC")
         .unwrap_or_else(|_| "error-embeddings-v1".into());
-    let producer: FutureProducer = kafka_config()?
-        .set("enable.idempotence", "true")
-        .set("acks", "all")
-        .set("message.timeout.ms", "60000")
-        .create()?;
-    if action == "publish" {
+    let producer: Option<FutureProducer> = if action == "encode" {
+        None
+    } else {
+        Some(
+            kafka_config()?
+                .set("enable.idempotence", "true")
+                .set("acks", "all")
+                .set("message.timeout.ms", "60000")
+                .create()?,
+        )
+    };
+    if matches!(action.as_str(), "publish" | "encode") {
         let in_flight: usize = std::env::var("EMBED_PUBLISH_IN_FLIGHT")
             .unwrap_or_else(|_| "32".into())
             .parse()?;
@@ -218,7 +243,11 @@ async fn main() -> Result<()> {
                 break;
             }
             for row in encoder.encode_batch(inputs).await? {
-                let producer = producer.clone();
+                let Some(producer) = producer.clone() else {
+                    println!("{}", serde_json::to_string(&row)?);
+                    published += 1;
+                    continue;
+                };
                 let output = output.clone();
                 pending.spawn(async move { send(&producer, &output, row).await });
                 if pending.len() >= in_flight {
@@ -233,9 +262,10 @@ async fn main() -> Result<()> {
         while let Some(result) = pending.join_next().await {
             result??;
         }
-        info!(published, "Backfill chunk acknowledged");
+        info!(published, %action, "Backfill chunk completed");
         return Ok(());
     }
+    let producer = producer.context("Kafka producer required")?;
     let topic = std::env::var("ERROR_OCCURRENCES_KAFKA_TOPIC")
         .unwrap_or_else(|_| "error-occurrences-v1".into());
     let consumer: StreamConsumer = kafka_config()?

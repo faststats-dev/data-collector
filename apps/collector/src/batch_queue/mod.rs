@@ -1,5 +1,5 @@
+use crate::error_tracking::ErrorLanguage;
 use crate::error_tracking::mapping::MappingResolver;
-use crate::error_tracking::{ErrorLanguage, ProjectGrouping};
 use crate::polar::{PolarClient, UsageCounts};
 use crate::tinybird::{
     ErrorOccurrenceV3Row, ModsEventRow, TinybirdClient, WebEventRow, WebVitalRow,
@@ -53,7 +53,7 @@ pub enum QueuedEvent {
     ErrorOccurrenceV3 {
         row: Box<ErrorOccurrenceV3Row>,
         language: ErrorLanguage,
-        grouping: ProjectGrouping,
+
         tracking: Option<TrackingContext>,
     },
     WebVital {
@@ -110,7 +110,7 @@ impl TinybirdBatch {
             QueuedEvent::ErrorOccurrenceV3 {
                 row,
                 language: _,
-                grouping: _,
+
                 tracking,
             } => self.error_occurrences_v3.push((*row, tracking)),
             QueuedEvent::WebVital { row, tracking } => self.web_vitals.push((row, tracking)),
@@ -607,7 +607,7 @@ impl BatchQueue {
         let QueuedEvent::ErrorOccurrenceV3 {
             row,
             language,
-            grouping,
+
             tracking,
         } = event
         else {
@@ -618,18 +618,16 @@ impl BatchQueue {
             return QueuedEvent::ErrorOccurrenceV3 {
                 row,
                 language,
-                grouping,
+
                 tracking,
             };
         };
 
-        let row =
-            crate::error_tracking::v3::enrich_with_mapping(resolver, *row, language, &grouping)
-                .await;
+        let row = crate::error_tracking::v3::enrich_with_mapping(resolver, *row, language).await;
         QueuedEvent::ErrorOccurrenceV3 {
             row: Box::new(row),
             language,
-            grouping,
+
             tracking,
         }
     }

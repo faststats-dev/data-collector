@@ -190,7 +190,6 @@ pub async fn web(
                     sdk_name: sdk_name.as_deref(),
                     sdk_version: sdk_version.as_deref(),
                     context: error_v3_context,
-                    grouping: &ctx.error_grouping,
                 },
                 error,
             );
@@ -199,7 +198,7 @@ pub async fn web(
                 .queue_event(QueuedEvent::ErrorOccurrenceV3 {
                     row: Box::new(occurrence),
                     language: ErrorLanguage::JavaScript,
-                    grouping: ctx.error_grouping.clone(),
+
                     tracking: Some(tracking_ctx.clone()),
                 })
             {

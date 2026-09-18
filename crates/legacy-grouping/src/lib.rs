@@ -93,3 +93,36 @@ where
 
     hex::encode(hash.finalize())
 }
+
+/// Bounded fallback for runtimes that never had a language-specific legacy parser.
+/// Preserve raw evidence, including case, rather than inventing a grouping policy.
+#[must_use]
+pub fn group_unparsed(language: &str, error_type: &str, stacktrace: &str) -> String {
+    let mut hash = Sha256::new();
+    for value in [language, error_type, stacktrace] {
+        let mut end = value.len().min(1024 * 1024);
+        while !value.is_char_boundary(end) {
+            end -= 1;
+        }
+        hash.update((end as u64).to_le_bytes());
+        hash.update(&value.as_bytes()[..end]);
+    }
+    hex::encode(hash.finalize())
+}
+
+#[cfg(test)]
+mod fallback_tests {
+    use super::*;
+    #[test]
+    fn fallback_preserves_language_kind_and_stack() {
+        let value = group_unparsed("python", "Error", "frame");
+        assert_eq!(value.len(), 64);
+        assert_ne!(value, group_unparsed("go", "Error", "frame"));
+        assert_ne!(value, group_unparsed("python", "TypeError", "frame"));
+        assert_ne!(value, group_unparsed("python", "Error", "other"));
+        assert_eq!(
+            group_unparsed("swift", "Error", &"🦀".repeat(300_000)).len(),
+            64
+        );
+    }
+}

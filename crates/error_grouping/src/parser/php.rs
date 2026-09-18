@@ -11,22 +11,41 @@ pub(super) fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Option<St
             continue;
         }
         if segment.error_kind.is_none()
-            && let Some(error) = parse_error_header(line)
+            && let Some((error, message)) = parse_error_header(line)
         {
             segment.error_kind = Some(error);
+            segment.error_message = message;
         } else if let Some(frame) = parse_frame(line) {
             push_frame(&mut segment.frames, frame, &mut warnings);
+        } else if line.starts_with('#') {
+            warnings.malformed_frame = true;
         }
     }
-    (!segment.is_empty()).then(|| StackTrace::single_with_warnings(segment, warnings))
+    (!segment.is_empty()).then(|| StackTrace {
+        segments: vec![segment],
+        warnings,
+    })
 }
 
-fn parse_error_header(line: &str) -> Option<&str> {
+fn parse_error_header(line: &str) -> Option<(&str, Option<&str>)> {
     let line = line.strip_prefix("PHP ").unwrap_or(line);
     let error = line
         .strip_prefix("Fatal error: Uncaught ")
         .or_else(|| line.strip_prefix("Uncaught "))?;
-    error_kind(error)
+    let kind = error_kind(error)?;
+    let message = error.split_once(':').map(|(_, message)| {
+        let message = message.trim();
+        // PHP appends the throw location to the exception message.
+        message
+            .rsplit_once(" in ")
+            .filter(|(_, location)| {
+                location
+                    .rsplit_once(':')
+                    .is_some_and(|(_, line)| line.parse::<u32>().is_ok())
+            })
+            .map_or(message, |(message, _)| message)
+    });
+    Some((kind, message))
 }
 
 fn parse_frame(line: &str) -> Option<StackFrame<'_>> {
@@ -64,13 +83,13 @@ mod tests {
     #[test]
     fn parses_php_fatal_trace() {
         let trace = Language::Php.parse_stack("PHP Fatal error: Uncaught TypeError: bad in /app/index.php:12\nStack trace:\n#0 /app/index.php(8): App\\Worker->run()\n#1 [internal function]: App\\Runner::call()\n#2 {main}\n  thrown in /app/index.php on line 12").unwrap();
-        assert_eq!(trace.segments()[0].error_kind, Some("TypeError"));
-        assert_eq!(trace.segments()[0].frames.len(), 3);
+        assert_eq!(trace.segments[0].error_kind, Some("TypeError"));
+        assert_eq!(trace.segments[0].frames.len(), 3);
         assert_eq!(
-            trace.segments()[0].frames[0].function,
+            trace.segments[0].frames[0].function,
             Some("App\\Worker->run")
         );
-        assert_eq!(trace.segments()[0].frames[0].file, Some("/app/index.php"));
+        assert_eq!(trace.segments[0].frames[0].file, Some("/app/index.php"));
     }
 
     #[test]
@@ -78,6 +97,6 @@ mod tests {
         let trace = Language::Php
             .parse_stack("Fatal error: Uncaught RuntimeException: failure in parser\n#0 {main}")
             .unwrap();
-        assert_eq!(trace.segments()[0].error_kind, Some("RuntimeException"));
+        assert_eq!(trace.segments[0].error_kind, Some("RuntimeException"));
     }
 }

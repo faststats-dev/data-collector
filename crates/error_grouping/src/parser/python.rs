@@ -1,12 +1,10 @@
-use crate::ast::{
-    ParseWarnings, SegmentList, SegmentRelation, StackFrame, StackTrace, TraceSegment,
-};
+use crate::ast::{ParseWarnings, SegmentRelation, StackFrame, StackTrace, TraceSegment};
 use crate::parser::{
     error_kind, looks_like_exception, nonempty, push_recent_frame, push_segment, trim_line,
 };
 
 pub(super) fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Option<StackTrace<'a>> {
-    let mut segments = SegmentList::new();
+    let mut segments = Vec::new();
     let mut current = None;
     let mut expect_context = false;
     let mut exception_group = false;
@@ -30,10 +28,10 @@ pub(super) fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Option<St
             continue;
         }
         content_lines += 1;
-        // Sibling exception trees do not fit the linear AST. Keep the stable
-        // outer group stack and ignore its message-heavy child rendering.
+        // Keep the outer group trace; report the omitted child tree.
         if exception_group && line.starts_with("+-+") {
             skip_group_children = true;
+            warnings.truncated = true;
         } else if let Some(group) = traceback_header(line) {
             saw_traceback = true;
             finish_segment(&mut segments, &mut current, &mut warnings);
@@ -53,11 +51,14 @@ pub(super) fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Option<St
                 &mut warnings,
             );
             expect_context = true;
+        } else if line.starts_with("File \"") {
+            warnings.malformed_frame = true;
         } else if expect_context && indent > 0 {
             expect_context = false;
         } else if indent == 0 && looks_like_exception(line, &[]) {
             let segment = current.get_or_insert_with(TraceSegment::default);
             segment.error_kind = error_kind(line);
+            segment.error_message = line.split_once(':').map(|(_, message)| message.trim());
             standalone_header = line.contains(':');
             expect_context = false;
         }
@@ -75,11 +76,11 @@ pub(super) fn parse_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Option<St
             segment.relation = SegmentRelation::Root;
         }
     }
-    Some(StackTrace::with_warnings(segments, warnings))
+    Some(StackTrace { segments, warnings })
 }
 
 fn finish_segment<'a>(
-    segments: &mut SegmentList<'a>,
+    segments: &mut Vec<TraceSegment<'a>>,
     current: &mut Option<TraceSegment<'a>>,
     warnings: &mut ParseWarnings,
 ) {
@@ -150,10 +151,10 @@ mod tests {
             "Traceback (most recent call last):\n  File \"/app.py\", line 3, in load\n    int('x')\nValueError: invalid\n\nThe above exception was the direct cause of the following exception:\n\nTraceback (most recent call last):\n  File \"/app.py\", line 8, in main\n    load()\nRuntimeError: failed",
         )
         .unwrap();
-        assert_eq!(trace.segments().len(), 2);
-        assert_eq!(trace.segments()[0].error_kind, Some("RuntimeError"));
-        assert_eq!(trace.segments()[1].relation, SegmentRelation::Cause);
-        assert_eq!(trace.segments()[1].frames[0].function, Some("load"));
+        assert_eq!(trace.segments.len(), 2);
+        assert_eq!(trace.segments[0].error_kind, Some("RuntimeError"));
+        assert_eq!(trace.segments[1].relation, SegmentRelation::Cause);
+        assert_eq!(trace.segments[1].frames[0].function, Some("load"));
     }
 
     #[test]
@@ -162,8 +163,8 @@ mod tests {
             "Traceback (most recent call last):\n  File \"a.py\", line 1, in first\nValueError:\n\nDuring handling of the above exception, another exception occurred:\n\nTraceback (most recent call last):\n  File \"a.py\", line 2, in second\nRuntimeError: failed",
         )
         .unwrap();
-        assert_eq!(trace.segments()[1].relation, SegmentRelation::Context);
-        assert_eq!(trace.segments()[1].error_kind, Some("ValueError"));
+        assert_eq!(trace.segments[1].relation, SegmentRelation::Context);
+        assert_eq!(trace.segments[1].error_kind, Some("ValueError"));
     }
 
     #[test]
@@ -174,7 +175,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(trace.segments()[0].frames[0].function, Some("crash"));
+        assert_eq!(trace.segments[0].frames[0].function, Some("crash"));
     }
 
     #[test]
@@ -186,17 +187,17 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            &trace.segments()[0],
+            &trace.segments[0],
             &TraceSegment {
                 relation: SegmentRelation::Root,
                 depth: 0,
                 error_kind: Some("ExceptionGroup"),
+                error_message: Some("failures (2 sub-exceptions)"),
                 frames: vec![StackFrame {
                     function: Some("run"),
                     module: None,
                     file: Some("app.py"),
-                }]
-                .into(),
+                }],
             }
         );
     }
@@ -206,7 +207,7 @@ mod tests {
         let trace = Language::Python
             .parse_stack("ValueError: dynamic message")
             .unwrap();
-        assert_eq!(trace.segments()[0].error_kind, Some("ValueError"));
-        assert!(trace.segments()[0].frames.is_empty());
+        assert_eq!(trace.segments[0].error_kind, Some("ValueError"));
+        assert!(trace.segments[0].frames.is_empty());
     }
 }

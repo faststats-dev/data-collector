@@ -3,24 +3,16 @@ use std::{error::Error, fmt, str::FromStr};
 use crate::ParseError;
 use crate::ast::{ParserLimits, StackTrace};
 
-/// Runtime stack-trace syntax supported by the grouping engine.
+/// Runtime stack-trace syntax supported by the parser.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
-#[non_exhaustive]
 pub enum Language {
-    /// Java and JVM stack traces.
     Java,
-    /// Rust panic backtraces.
     Rust,
-    /// JavaScript stacks in V8 or SpiderMonkey form.
     JavaScript,
-    /// Python tracebacks, including chained exceptions and exception groups.
     Python,
-    /// PHP fatal-error stack traces.
     Php,
-    /// Go panic and fatal-error traces.
     Go,
-    /// Swift runtime and Apple crash-report traces.
     Swift,
 }
 
@@ -39,12 +31,13 @@ impl Language {
         }
     }
 
-    #[cfg(test)]
-    pub(super) fn parse_stack(self, input: &str) -> Result<StackTrace<'_>, ParseError> {
+    /// Parse with default resource limits, borrowing names from the input.
+    pub fn parse_stack(self, input: &str) -> Result<StackTrace<'_>, ParseError> {
         self.parse_stack_with_limits(input, &ParserLimits::default())
     }
 
-    pub(super) fn parse_stack_with_limits<'a>(
+    /// Parse with caller-supplied limits. Malformed frames are reported as warnings.
+    pub fn parse_stack_with_limits<'a>(
         self,
         input: &'a str,
         limits: &ParserLimits,
@@ -57,23 +50,15 @@ impl FromStr for Language {
     type Err = UnsupportedLanguage;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let value = value.trim();
-        if value.eq_ignore_ascii_case("java") {
-            Ok(Self::Java)
-        } else if value.eq_ignore_ascii_case("javascript") || value.eq_ignore_ascii_case("js") {
-            Ok(Self::JavaScript)
-        } else if value.eq_ignore_ascii_case("python") || value.eq_ignore_ascii_case("py") {
-            Ok(Self::Python)
-        } else if value.eq_ignore_ascii_case("php") {
-            Ok(Self::Php)
-        } else if value.eq_ignore_ascii_case("go") || value.eq_ignore_ascii_case("golang") {
-            Ok(Self::Go)
-        } else if value.eq_ignore_ascii_case("rust") || value.eq_ignore_ascii_case("rs") {
-            Ok(Self::Rust)
-        } else if value.eq_ignore_ascii_case("swift") {
-            Ok(Self::Swift)
-        } else {
-            Err(UnsupportedLanguage)
+        match value.trim().to_ascii_lowercase().as_str() {
+            "java" | "jvm" | "kotlin" | "scala" => Ok(Self::Java),
+            "javascript" | "js" | "typescript" | "ts" => Ok(Self::JavaScript),
+            "python" | "py" => Ok(Self::Python),
+            "php" => Ok(Self::Php),
+            "go" | "golang" => Ok(Self::Go),
+            "rust" | "rs" => Ok(Self::Rust),
+            "swift" => Ok(Self::Swift),
+            _ => Err(UnsupportedLanguage),
         }
     }
 }
@@ -83,24 +68,8 @@ impl<'de> serde::Deserialize<'de> for Language {
     where
         D: serde::Deserializer<'de>,
     {
-        struct LanguageVisitor;
-
-        impl serde::de::Visitor<'_> for LanguageVisitor {
-            type Value = Language;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("a supported runtime language name")
-            }
-
-            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
-            where
-                E: serde::de::Error,
-            {
-                value.parse().map_err(E::custom)
-            }
-        }
-
-        deserializer.deserialize_str(LanguageVisitor)
+        let value = <String as serde::Deserialize>::deserialize(deserializer)?;
+        value.parse().map_err(serde::de::Error::custom)
     }
 }
 

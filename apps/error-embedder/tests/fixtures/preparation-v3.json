@@ -1,0 +1,434 @@
+{
+  "model_version": "jina-code-516f4baf-v3",
+  "cases": [
+    {
+      "name": "jvm_bare_module_jar",
+      "input": {
+        "language": "java",
+        "error_type": "java.nio.file.NoSuchFileException",
+        "error_message": "./World/level.dat",
+        "stacktrace": "java.base@21/java.nio.file.Files.read(Files.java:12)\napp-1.jar//app.Main.load(Main.java:42)",
+        "mapped_stacktrace": null
+      },
+      "expected": "java.nio.file.NoSuchFileException: <path>/level.dat\njava.nio.file.Files.read @ Files.java\napp.Main.load @ Main.java"
+    },
+    {
+      "name": "jvm_native_unknown",
+      "input": {
+        "language": "kotlin",
+        "error_type": "Error",
+        "error_message": "failed",
+        "stacktrace": "at app.Main.nativeCall(Native Method)\nat app.Main.call(Unknown Source)",
+        "mapped_stacktrace": null
+      },
+      "expected": "Error: failed\napp.Main.nativeCall\napp.Main.call"
+    },
+    {
+      "name": "jvm_cause_elision",
+      "input": {
+        "language": "java",
+        "error_type": "Error",
+        "error_message": "failed",
+        "stacktrace": "java.lang.Error: wrapper\n at app.Main.run(Main.java:1)\n at app.Start.run(Start.java:2)\nCaused by: java.io.IOException: open failed\n at app.File.read(File.java:3)\n ... 2 more",
+        "mapped_stacktrace": null
+      },
+      "expected": "java.io.IOException: open failed\napp.File.read @ File.java\napp.Main.run @ Main.java\napp.Start.run @ Start.java"
+    },
+    {
+      "name": "jvm_suppressed_cause",
+      "input": {
+        "language": "java",
+        "error_type": "Error",
+        "error_message": "failed",
+        "stacktrace": "java.lang.Error: wrapper\n at app.Main.run(Main.java:1)\n Suppressed: java.io.IOException: closing\n  at app.Close.close(Close.java:2)\n Caused by: java.lang.Error: nested\n  at app.Close.nested(Close.java:3)\nCaused by: java.io.IOException: reading\n at app.File.read(File.java:4)",
+        "mapped_stacktrace": null
+      },
+      "expected": "java.io.IOException: reading\napp.File.read @ File.java"
+    },
+    {
+      "name": "v8",
+      "input": {
+        "language": "typescript",
+        "error_type": "Error",
+        "error_message": "failed",
+        "stacktrace": "TypeError: failed\n at async load (/srv/app/main.ts:12:34)\n at run (https://example.test:8080/app.js:9:2)",
+        "mapped_stacktrace": null
+      },
+      "expected": "Error: failed\nload @ /srv/app/main.ts\nrun @ https://example.test:8080/app.js"
+    },
+    {
+      "name": "spidermonkey",
+      "input": {
+        "language": "javascript",
+        "error_type": "Error",
+        "error_message": "failed",
+        "stacktrace": "load@https://example.test/app.js:12:34\nrun@https://example.test/app.js:9:2",
+        "mapped_stacktrace": null
+      },
+      "expected": "Error: failed\nload @ https://example.test/app.js\nrun @ https://example.test/app.js"
+    },
+    {
+      "name": "windows_source",
+      "input": {
+        "language": "js",
+        "error_type": "Error",
+        "error_message": "failed",
+        "stacktrace": "Error: failed\n at load (C:\\app\\main.js:12:34)",
+        "mapped_stacktrace": null
+      },
+      "expected": "Error: failed\nload @ C:/app/main.js"
+    },
+    {
+      "name": "python_order",
+      "input": {
+        "language": "python",
+        "error_type": "Error",
+        "error_message": "",
+        "stacktrace": "Traceback (most recent call last):\n  File \"outer.py\", line 1, in run\n  File \"inner.py\", line 2, in load\nValueError: invalid",
+        "mapped_stacktrace": null
+      },
+      "expected": "Error: invalid\nload @ inner.py\nrun @ outer.py"
+    },
+    {
+      "name": "python_cause",
+      "input": {
+        "language": "python",
+        "error_type": "RuntimeError",
+        "error_message": "wrapper",
+        "stacktrace": "Traceback (most recent call last):\n  File \"io.py\", line 1, in load\nOSError: cannot read\n\nThe above exception was the direct cause of the following exception:\n\nTraceback (most recent call last):\n  File \"app.py\", line 2, in run\nRuntimeError: wrapper",
+        "mapped_stacktrace": null
+      },
+      "expected": "OSError: cannot read\nload @ io.py"
+    },
+    {
+      "name": "python_context",
+      "input": {
+        "language": "python",
+        "error_type": "RuntimeError",
+        "error_message": "wrapper",
+        "stacktrace": "Traceback (most recent call last):\n  File \"io.py\", line 1, in load\nOSError: cannot read\n\nDuring handling of the above exception, another exception occurred:\n\nTraceback (most recent call last):\n  File \"app.py\", line 2, in run\nRuntimeError: wrapper",
+        "mapped_stacktrace": null
+      },
+      "expected": "RuntimeError: wrapper\nrun @ app.py"
+    },
+    {
+      "name": "rust",
+      "input": {
+        "language": "rust",
+        "error_type": "panic",
+        "error_message": "failed",
+        "stacktrace": "thread 'main' panicked at src/main.rs:12:34:\nfailed\nstack backtrace:\n 0: app::load\n at src/main.rs:12:34\n 1: app::main\n at src/main.rs:9:2",
+        "mapped_stacktrace": null
+      },
+      "expected": "panic: failed\napp::load @ src/main.rs\napp::main @ src/main.rs"
+    },
+    {
+      "name": "php",
+      "input": {
+        "language": "php",
+        "error_type": "Error",
+        "error_message": "failed",
+        "stacktrace": "PHP Fatal error: Uncaught Error: failed in /srv/main.php:12\n#0 /srv/main.php(12): App->load()\n#1 {main}",
+        "mapped_stacktrace": null
+      },
+      "expected": "Error: failed\nApp->load @ /srv/main.php\n{main}"
+    },
+    {
+      "name": "go_receivers_goroutines",
+      "input": {
+        "language": "go",
+        "error_type": "panic",
+        "error_message": "failed",
+        "stacktrace": "panic: failed\ngoroutine 1 [running]:\napp.(*Server).load(0x1, 0x2)\n /app/main.go:12 +0x1\ncreated by app.main in goroutine 2\n /app/main.go:9 +0x2\ngoroutine 2 [waiting]:\napp.other()\n /app/other.go:99 +0x1",
+        "mapped_stacktrace": null
+      },
+      "expected": "panic: failed\napp.(*Server).load @ /app/main.go\napp.main @ /app/main.go"
+    },
+    {
+      "name": "swift",
+      "input": {
+        "language": "swift",
+        "error_type": "Error",
+        "error_message": "failed",
+        "stacktrace": "Thread 0 crashed:\n0 0x1 App.load() + 41 in demo at /app/main.swift:12:34\n1 0x2 App.main() + 12 in demo at /app/main.swift:2:1",
+        "mapped_stacktrace": null
+      },
+      "expected": "Error: failed\nApp.load() @ /app/main.swift\nApp.main() @ /app/main.swift"
+    },
+    {
+      "name": "mapped_preferred",
+      "input": {
+        "language": "java",
+        "error_type": "Error",
+        "error_message": "failed",
+        "stacktrace": "at obfuscated.a(a.java:1)",
+        "mapped_stacktrace": "at app.Main.run(Main.java:42)"
+      },
+      "expected": "Error: failed\napp.Main.run @ Main.java"
+    },
+    {
+      "name": "blank_mapping",
+      "input": {
+        "language": "java",
+        "error_type": "Error",
+        "error_message": "failed",
+        "stacktrace": "at app.Main.run(Main.java:42)",
+        "mapped_stacktrace": " \n"
+      },
+      "expected": "Error: failed\napp.Main.run @ Main.java"
+    },
+    {
+      "name": "unknown_fallback",
+      "input": {
+        "language": "dotnet",
+        "error_type": "Error",
+        "error_message": "failed",
+        "stacktrace": " at App.Run() in main.cs:line 42",
+        "mapped_stacktrace": null
+      },
+      "expected": "Error: failed\nraw:  at App.Run() in main.cs:line 42"
+    },
+    {
+      "name": "malformed_fallback",
+      "input": {
+        "language": "java",
+        "error_type": "Error",
+        "error_message": "failed",
+        "stacktrace": "at ???unknown frame",
+        "mapped_stacktrace": null
+      },
+      "expected": "Error: failed\nraw: at ???unknown frame"
+    },
+    {
+      "name": "empty_stack",
+      "input": {
+        "language": "java",
+        "error_type": "Error",
+        "error_message": "failed",
+        "stacktrace": "",
+        "mapped_stacktrace": null
+      },
+      "expected": "Error: failed"
+    },
+    {
+      "name": "header_only_fallback",
+      "input": {
+        "language": "java",
+        "error_type": "Error",
+        "error_message": "failed",
+        "stacktrace": "java.lang.Error: failed",
+        "mapped_stacktrace": null
+      },
+      "expected": "Error: failed\nraw: java.lang.Error: failed"
+    },
+    {
+      "name": "unicode",
+      "input": {
+        "language": "java",
+        "error_type": "Error",
+        "error_message": "日本語 café 🦀",
+        "stacktrace": "at app.Main.run(Main.java:42)",
+        "mapped_stacktrace": null
+      },
+      "expected": "Error: 日本語 café 🦀\napp.Main.run @ Main.java"
+    },
+    {
+      "name": "quoted_path_uuid",
+      "input": {
+        "language": "java",
+        "error_type": "Error",
+        "error_message": "cannot open './My World/level.dat' for 11111111-1111-4111-8111-111111111111",
+        "stacktrace": "at app.Main.run(Main.java:42)",
+        "mapped_stacktrace": null
+      },
+      "expected": "Error: cannot open '<path>/level.dat' for <uuid>\napp.Main.run @ Main.java"
+    },
+    {
+      "name": "preserve_codes",
+      "input": {
+        "language": "javascript",
+        "error_type": "Error",
+        "error_message": "HTTP 403; Minified React error #418; api.run(int); https://host/api?q=1",
+        "stacktrace": "at load (app.js:12:34)",
+        "mapped_stacktrace": null
+      },
+      "expected": "Error: HTTP 403; Minified React error #418; api.run(int); https://host/api?q=1\nload @ app.js"
+    },
+    {
+      "name": "frame_limit",
+      "input": {
+        "language": "java",
+        "error_type": "Error",
+        "error_message": "failed",
+        "stacktrace": "at app.Frame0.run(Frame0.java:1)\nat app.Frame1.run(Frame1.java:2)\nat app.Frame2.run(Frame2.java:3)\nat app.Frame3.run(Frame3.java:4)\nat app.Frame4.run(Frame4.java:5)\nat app.Frame5.run(Frame5.java:6)\nat app.Frame6.run(Frame6.java:7)\nat app.Frame7.run(Frame7.java:8)\nat app.Frame8.run(Frame8.java:9)\nat app.Frame9.run(Frame9.java:10)\nat app.Frame10.run(Frame10.java:11)\nat app.Frame11.run(Frame11.java:12)\nat app.Frame12.run(Frame12.java:13)\nat app.Frame13.run(Frame13.java:14)\nat app.Frame14.run(Frame14.java:15)\nat app.Frame15.run(Frame15.java:16)\nat app.Frame16.run(Frame16.java:17)\nat app.Frame17.run(Frame17.java:18)\nat app.Frame18.run(Frame18.java:19)\nat app.Frame19.run(Frame19.java:20)",
+        "mapped_stacktrace": null
+      },
+      "expected": "Error: failed\napp.Frame0.run @ Frame0.java\napp.Frame1.run @ Frame1.java\napp.Frame2.run @ Frame2.java\napp.Frame3.run @ Frame3.java\napp.Frame4.run @ Frame4.java\napp.Frame5.run @ Frame5.java\napp.Frame6.run @ Frame6.java\napp.Frame7.run @ Frame7.java\napp.Frame8.run @ Frame8.java\napp.Frame9.run @ Frame9.java\napp.Frame10.run @ Frame10.java\napp.Frame11.run @ Frame11.java\napp.Frame12.run @ Frame12.java\napp.Frame13.run @ Frame13.java\napp.Frame14.run @ Frame14.java\napp.Frame15.run @ Frame15.java"
+    },
+    {
+      "name": "legacy_blank_language",
+      "input": {
+        "language": "",
+        "error_type": "Error",
+        "error_message": "./World/level.dat",
+        "stacktrace": "at app.Main.run(Main.java:42)",
+        "mapped_stacktrace": null
+      },
+      "expected": "Error: <path>/level.dat\napp.Main.run @ Main.java"
+    },
+    {
+      "name": "message_25",
+      "input": {
+        "language": "java",
+        "error_type": "Error",
+        "error_message": "/a/source failed copying to /b/target",
+        "stacktrace": "at app.Main.run(Main.java:42)",
+        "mapped_stacktrace": null
+      },
+      "expected": "Error: <path>/source failed copying to <path>/target\napp.Main.run @ Main.java"
+    },
+    {
+      "name": "message_26",
+      "input": {
+        "language": "java",
+        "error_type": "Error",
+        "error_message": "/a/source permission denied reading /b/target",
+        "stacktrace": "at app.Main.run(Main.java:42)",
+        "mapped_stacktrace": null
+      },
+      "expected": "Error: <path>/source permission denied reading <path>/target\napp.Main.run @ Main.java"
+    },
+    {
+      "name": "context_stops_cause_selection",
+      "input": {
+        "language": "python",
+        "error_type": "RuntimeError",
+        "error_message": "actual failure",
+        "stacktrace": "Traceback (most recent call last):\n  File \"a.py\", line 1, in first\nValueError: original\n\nThe above exception was the direct cause of the following exception:\n\nTraceback (most recent call last):\n  File \"b.py\", line 2, in second\nOSError: intermediate\n\nDuring handling of the above exception, another exception occurred:\n\nTraceback (most recent call last):\n  File \"c.py\", line 3, in final\nRuntimeError: actual failure",
+        "mapped_stacktrace": null
+      },
+      "expected": "RuntimeError: actual failure\nfinal @ c.py"
+    },
+    {
+      "name": "java_partial_parse",
+      "input": {
+        "language": "java",
+        "error_type": "Error",
+        "error_message": "failed",
+        "stacktrace": "at app.Main.run(Main.java:1)\nat ???broken",
+        "mapped_stacktrace": null
+      },
+      "expected": "Error: failed\nraw: at app.Main.run(Main.java:1)\nat ???broken"
+    },
+    {
+      "name": "javascript_partial_parse",
+      "input": {
+        "language": "javascript",
+        "error_type": "Error",
+        "error_message": "failed",
+        "stacktrace": "at run (app.js:1:2)\nat ???broken",
+        "mapped_stacktrace": null
+      },
+      "expected": "Error: failed\nraw: at run (app.js:1:2)\nat ???broken"
+    },
+    {
+      "name": "python_partial_parse",
+      "input": {
+        "language": "python",
+        "error_type": "Error",
+        "error_message": "failed",
+        "stacktrace": "Traceback (most recent call last):\n  File \"app.py\", line 1, in run\n  File \"broken.py\", line ???\nError: failed",
+        "mapped_stacktrace": null
+      },
+      "expected": "Error: failed\nraw: Traceback (most recent call last):\n  File \"app.py\", line 1, in run\n  File \"broken.py\", line ???\nError: failed"
+    },
+    {
+      "name": "php_partial_parse",
+      "input": {
+        "language": "php",
+        "error_type": "Error",
+        "error_message": "failed",
+        "stacktrace": "#0 /app.php(1): App->run()\n#1 broken",
+        "mapped_stacktrace": null
+      },
+      "expected": "Error: failed\nraw: #0 /app.php(1): App->run()\n#1 broken"
+    },
+    {
+      "name": "rust_partial_parse",
+      "input": {
+        "language": "rust",
+        "error_type": "Error",
+        "error_message": "failed",
+        "stacktrace": "stack backtrace:\n0: app::run\n1: invalid frame text",
+        "mapped_stacktrace": null
+      },
+      "expected": "Error: failed\nraw: stack backtrace:\n0: app::run\n1: invalid frame text"
+    },
+    {
+      "name": "go_partial_parse",
+      "input": {
+        "language": "go",
+        "error_type": "Error",
+        "error_message": "failed",
+        "stacktrace": "goroutine 1 [running]:\napp.run()\n /app.go:1\napp.broken(",
+        "mapped_stacktrace": null
+      },
+      "expected": "Error: failed\nraw: goroutine 1 [running]:\napp.run()\n /app.go:1\napp.broken("
+    },
+    {
+      "name": "swift_partial_parse",
+      "input": {
+        "language": "swift",
+        "error_type": "Error",
+        "error_message": "failed",
+        "stacktrace": "Thread 0 crashed:\n0 App 0x1 App.run() + 4 (app.swift:1)\n1 0xBAD",
+        "mapped_stacktrace": null
+      },
+      "expected": "Error: failed\nraw: Thread 0 crashed:\n0 App 0x1 App.run() + 4 (app.swift:1)\n1 0xBAD"
+    },
+    {
+      "name": "python_group_children",
+      "input": {
+        "language": "python",
+        "error_type": "Error",
+        "error_message": "failed",
+        "stacktrace": " + Exception Group Traceback (most recent call last):\n |   File \"app.py\", line 8, in run\n | ExceptionGroup: failures (2 sub-exceptions)\n +-+---------------- 1 ----------------\n   | ValueError: one\n   +---------------- 2 ----------------\n   | TypeError: two",
+        "mapped_stacktrace": null
+      },
+      "expected": "Error: failed\nraw:  + Exception Group Traceback (most recent call last):\n |   File \"app.py\", line 8, in run\n | ExceptionGroup: failures (2 sub-exceptions)\n +-+---------------- 1 ----------------\n   | ValueError: one\n   +---------------- 2 ----------------\n   | TypeError: two"
+    },
+    {
+      "name": "java_impossible_elision",
+      "input": {
+        "language": "java",
+        "error_type": "Error",
+        "error_message": "failed",
+        "stacktrace": "Error: root\n at app.Root.run(Root.java:1)\nCaused by: Error: cause\n at app.Cause.run(Cause.java:2)\n ... 2 more",
+        "mapped_stacktrace": null
+      },
+      "expected": "Error: failed\nraw: Error: root\n at app.Root.run(Root.java:1)\nCaused by: Error: cause\n at app.Cause.run(Cause.java:2)\n ... 2 more"
+    },
+    {
+      "name": "swift_overflowing_index",
+      "input": {
+        "language": "swift",
+        "error_type": "Error",
+        "error_message": "failed",
+        "stacktrace": "Thread 0 crashed:\n0 App 0x1 App.run() + 4 (app.swift:1)\n9999999999999999999999 0x2 app.Other()",
+        "mapped_stacktrace": null
+      },
+      "expected": "Error: failed\nraw: Thread 0 crashed:\n0 App 0x1 App.run() + 4 (app.swift:1)\n9999999999999999999999 0x2 app.Other()"
+    },
+    {
+      "name": "sdk_root_elision",
+      "input": {
+        "language": "",
+        "error_type": "Error",
+        "error_message": "failed",
+        "stacktrace": "at app.Main.run(Main.java:1)\n ... 22 more",
+        "mapped_stacktrace": null
+      },
+      "expected": "Error: failed\napp.Main.run @ Main.java"
+    }
+  ]
+}

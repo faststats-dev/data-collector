@@ -1,0 +1,8 @@
+Error: fixture crash
+    at n (bundle.js:4:62)
+    at e.run (bundle.js:4:92)
+    at bundle.js:3:63
+    at g (bundle.js:2:1831)
+    at d (bundle.js:2:1327)
+    at i (bundle.js:2:552)
+    at bundle.js:5:1

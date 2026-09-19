@@ -1,0 +1,2 @@
+    at a (src/app.ts:10:3)  
+    at b (/other.js:1:1)

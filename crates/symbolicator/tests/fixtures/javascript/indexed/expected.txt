@@ -1,0 +1,3 @@
+at first (first.ts:1:1)
+at second (second.ts:1:1)
+at c (bundle.js:4:1)

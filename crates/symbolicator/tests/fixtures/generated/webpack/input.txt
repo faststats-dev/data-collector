@@ -1,0 +1,4 @@
+Error: fixture crash
+    at bundle.js:1:38
+    at bundle.js:1:65
+    at bundle.js:1:69

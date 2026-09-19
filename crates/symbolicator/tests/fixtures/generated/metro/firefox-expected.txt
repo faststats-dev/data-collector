@@ -1,0 +1,8 @@
+Error: fixture crash
+fail@metro-src/crash.js:2:9
+run@metro-src/crash.js:6:3
+<global>@metro-src/index.js:2:1
+loadModuleImplementation@node_modules/metro-runtime/src/polyfills/require.js:285:5
+guardedLoadModule@node_modules/metro-runtime/src/polyfills/require.js:190:12
+metroRequire@node_modules/metro-runtime/src/polyfills/require.js:98:7
+@bundle.js:5:1

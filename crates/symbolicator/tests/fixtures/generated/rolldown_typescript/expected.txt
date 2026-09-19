@@ -1,0 +1,6 @@
+Error: fixture crash
+    at e.fail (src/typed.ts:12:15)
+    at e.run (src/typed.ts:8:17)
+    at t (src/typed.ts:17:23)
+    at src/typed.ts:20:1
+    at src/typed.ts:20:47

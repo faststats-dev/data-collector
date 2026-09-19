@@ -1,0 +1,6 @@
+{
+  "tool": "hermes-compiler",
+  "version": "250829098.0.19",
+  "oracle": "metro-symbolicate 0.87.1",
+  "kind": "compiler-derived bytecode position probes, not a captured device crash"
+}

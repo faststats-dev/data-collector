@@ -1,0 +1,5 @@
+com.example.Service -> a:
+    java.lang.String label -> a
+    10:20:void first() -> b
+    30:40:void second() -> b
+    void run() -> c

@@ -1,0 +1,18 @@
+# compiler: R8
+# compiler_version: 8.3.37
+# common_typos_disable
+# {"id":"com.android.tools.r8.mapping","version":"2.2"}
+# pg_map_id: 6cb7c4d
+# pg_map_hash: SHA-256 6cb7c4d734820b3fedfc3126ea5faff5ae4dcd8d598d6adfdfef66cbfcc52628
+example.Helper -> a.a:
+# {"id":"sourceFile","fileName":"Helper.java"}
+    1:1:void fail(java.lang.String):5:5 -> a
+example.Main -> example.Main:
+# {"id":"sourceFile","fileName":"Main.java"}
+    1:3:void main(java.lang.String[]):6:8 -> main
+example.Worker -> a.b:
+# {"id":"sourceFile","fileName":"Worker.java"}
+    1:1:void run(int):0:0 -> a
+      # {"id":"com.android.tools.r8.synthesized"}
+    2:2:void run(int):5:5 -> a
+    2:2:void run(int):0 -> a

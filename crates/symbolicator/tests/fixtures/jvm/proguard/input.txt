@@ -1,0 +1,4 @@
+java.lang.RuntimeException: failed
+	at a.b(SourceFile:35)
+	at a.b(Unknown Source)
+	at a.c(Unknown Source)

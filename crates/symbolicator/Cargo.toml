@@ -1,0 +1,17 @@
+[package]
+name = "symbolicator"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+sourcemap = "9.3.2"
+serde_json.workspace = true
+serde.workspace = true
+
+[[bench]]
+name = "symbolication"
+harness = false
+
+[[bench]]
+name = "memory"
+harness = false

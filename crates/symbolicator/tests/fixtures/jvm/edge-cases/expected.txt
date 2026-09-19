@@ -1,0 +1,8 @@
+Exception in thread "main" loader/example.Service: fixture
+	at example.Service.b(Service.java:25)
+	at example.Service.b(Unknown Source)
+	at example.Service.nativeCall(Native Method)
+	at example.Service.plain(Unknown Source)
+	at example.Service.x(Service.java:5)
+	at example.Service.catchAll(Unknown Source:33)
+	at example.Future.run(Unknown Source)  

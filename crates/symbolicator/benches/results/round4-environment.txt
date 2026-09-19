@@ -1,0 +1,12 @@
+UTC: 2026-09-19T16:34:58.635010+00:00
+Platform: macOS-27.0-arm64-arm-64bit-Mach-O
+rustc 1.98.0 (88d9e12ae 2026-08-18)
+Cargo bench profile; same harness and dependency versions; alternating before/after, after/before, before/after.
+Fixture generation and builds finished before timing. Other host activity was not controlled.
+Baseline: source at start of this performance pass, after the aggressive cleanup.
+Baseline javascript.rs SHA-256: d316e53fde99e335c13a2d64df9b0c82f1caae7b93976cc62f5c710ea0ee4043
+Baseline lib.rs SHA-256: aa0431db42a21c4f037e849f3649af505a997cec4cb08fd4bf87997c0fec4887
+Baseline proguard.rs SHA-256: 49aaa055c6377f33ba847736e266f7a2fc65e848e367532b9259eebf35aa205e
+After javascript.rs SHA-256: cd47137db5a133a5f9193b279314b4ce335366aa35208702b945ddf4fee8ab7e
+After lib.rs SHA-256: aa0431db42a21c4f037e849f3649af505a997cec4cb08fd4bf87997c0fec4887
+After proguard.rs SHA-256: ba16f0542ac1ca598623cf5a47bf08a4530134aa0c57dde69a5edf4ff8bb35f6

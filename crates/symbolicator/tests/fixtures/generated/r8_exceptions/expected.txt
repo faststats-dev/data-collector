@@ -1,0 +1,11 @@
+Exception in thread "main" example.Exceptions$Failure: outer
+	at example.Exceptions.main(Exceptions.java:8)
+	Suppressed: example.Exceptions$Failure: suppressed
+		at example.Exceptions.main(Exceptions.java:9)
+Caused by: example.Exceptions$Failure: nested failure
+	at example.Exceptions$Task.run(Exceptions.java:25)
+	at example.Exceptions$Task.run(Exceptions.java:20)
+	at example.Exceptions$Task.run(Exceptions.java:18)
+	at example.Exceptions$Task.run(Exceptions.java:18)
+	at example.Exceptions$Task.run(Exceptions.java:18)
+	at example.Exceptions.main(Exceptions.java:6)

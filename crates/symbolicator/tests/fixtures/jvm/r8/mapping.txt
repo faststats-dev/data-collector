@@ -1,0 +1,7 @@
+# compiler: R8
+# {"id":"com.android.tools.r8.mapping","version":"2.2"}
+com.example.Service -> a:
+    # {"id":"sourceFile","fileName":"Service.kt"}
+    1:3:void execute():40:42 -> b
+    4:6:void constant():90 -> c
+com.example.Failure -> e:

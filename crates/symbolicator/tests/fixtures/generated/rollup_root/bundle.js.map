@@ -1,0 +1,15 @@
+{
+  "version": 3,
+  "file": "bundle.js",
+  "sources": [
+    "src/crash.js",
+    "src/index.js"
+  ],
+  "sourcesContent": [
+    "export function fail(message) {\n  throw new Error(message);\n}\n\nexport function run() {\n  fail('fixture crash');\n}\n",
+    "import {run} from './crash.js';\nrun();\n"
+  ],
+  "names": [],
+  "mappings": ";;;EAAO,SAAS,IAAI,CAAC,OAAO,EAAE;EAC9B,EAAE,MAAM,IAAI,KAAK,CAAC,OAAO,CAAC;EAC1B;;EAEO,SAAS,GAAG,GAAG;EACtB,EAAE,IAAI,CAAC,eAAe,CAAC;EACvB;;ECLA,GAAG,EAAE;;",
+  "sourceRoot": "/project/"
+}

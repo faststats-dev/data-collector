@@ -1,0 +1,12 @@
+{
+  "version": 3,
+  "file": "bundle.js",
+  "names": [],
+  "sources": [
+    "src/typed.ts"
+  ],
+  "sourcesContent": [
+    "interface Job {\n  label: string;\n  attempts: number;\n}\n\nclass Runner {\n  run(job: Job): never {\n    return this.fail(`${job.label}: ${job.attempts}`);\n  }\n\n  private fail(message: string): never {\n    throw new Error(message);\n  }\n}\n\nfunction dispatch(job: Job): never {\n  return new Runner().run(job);\n}\n\ndispatch({label: 'typed fixture', attempts: 3});\n"
+  ],
+  "mappings": "YAKA,IAAM,EAAN,KAAa,CACX,IAAI,EAAiB,CACnB,OAAO,KAAK,KAAK,GAAG,EAAI,MAAM,IAAI,EAAI,UAAU,CAClD,CAEA,KAAa,EAAwB,CACnC,MAAU,MAAM,CAAO,CACzB,CACF,EAEA,SAAS,EAAS,EAAiB,CACjC,OAAO,IAAI,EAAO,CAAC,CAAC,IAAI,CAAG,CAC7B,CAEA,EAAS,CAAC,MAAO,gBAAiB,SAAU,CAAC,CAAC"
+}

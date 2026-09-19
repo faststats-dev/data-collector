@@ -1,0 +1,10 @@
+java.lang.NullPointerException: fixture
+	at a.d(SourceFile:3)
+	at a.b(SourceFile:1)
+	at a.c(SourceFile:2)
+	at o.a(SourceFile:2)
+	at c.a(SourceFile:27)
+	at a.e(SourceFile:2147483647)
+Caused by: java.lang.NullPointerException: nested
+	at a.d(SourceFile:3)
+	at a.d(SourceFile:3)

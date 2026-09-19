@@ -1,0 +1,77 @@
+Run 1
+benchmark (median of 7 samples)           ns/op        MiB/s
+parse/webpack                               852        409.6
+parse/metro-hermes                        24395       1162.6
+parse/r8                                   2696        353.8
+apply/webpack                               300        276.7
+apply/r8-inline-outline-rewrite            1148        229.3
+apply/react-native-hermes                   711        265.5
+apply/r8-long-trace                       69913        241.0
+apply/js-long-trace                       18537        286.5
+apply/js-missing-map                      42145        648.8
+apply/js-unmapped-68k                     45124       1558.2
+apply/jvm-unmapped-68k                   101232        694.6
+apply/jvm-10-ranges                         153        137.0
+apply/jvm-1000-ranges                       173        132.6
+parse/jvm-10000-ranges                   858664        473.9
+apply/jvm-10000-ranges                      186        128.1
+apply/jvm-10-methods                        141        156.0
+apply/jvm-1000-methods                      144        165.7
+apply/jvm-10000-methods                     155        160.3
+parse/jvm-10000-methods                 1387408        280.3
+apply/jvm-no-line-10000-ranges              124        183.9
+apply/js-10-sections                         88        238.1
+apply/js-1000-sections                      102        224.9
+parse/js-1000-sources                     54746        330.0
+
+Run 2
+benchmark (median of 7 samples)           ns/op        MiB/s
+parse/webpack                               857        407.3
+parse/metro-hermes                        24435       1160.7
+parse/r8                                   2701        353.1
+apply/webpack                               302        275.2
+apply/r8-inline-outline-rewrite            1199        219.6
+apply/react-native-hermes                   722        261.6
+apply/r8-long-trace                       72233        233.2
+apply/js-long-trace                       18848        281.7
+apply/js-missing-map                      42726        640.0
+apply/js-unmapped-68k                     42979       1636.0
+apply/jvm-unmapped-68k                    93550        751.6
+apply/jvm-10-ranges                         150        139.8
+apply/jvm-1000-ranges                       169        135.3
+parse/jvm-10000-ranges                   855887        475.4
+apply/jvm-10000-ranges                      188        126.5
+apply/jvm-10-methods                        134        163.1
+apply/jvm-1000-methods                      139        172.1
+apply/jvm-10000-methods                     144        171.8
+parse/jvm-10000-methods                 1358603        286.3
+apply/jvm-no-line-10000-ranges              126        182.1
+apply/js-10-sections                         89        236.2
+apply/js-1000-sections                      104        219.9
+parse/js-1000-sources                     54855        329.4
+
+Run 3
+benchmark (median of 7 samples)           ns/op        MiB/s
+parse/webpack                               857        407.2
+parse/metro-hermes                        24776       1144.8
+parse/r8                                   2902        328.6
+apply/webpack                               310        267.2
+apply/r8-inline-outline-rewrite            1157        227.5
+apply/react-native-hermes                   740        255.2
+apply/r8-long-trace                       71306        236.2
+apply/js-long-trace                       18959        280.1
+apply/js-missing-map                      42873        637.8
+apply/js-unmapped-68k                     44434       1582.4
+apply/jvm-unmapped-68k                    93870        749.0
+apply/jvm-10-ranges                         153        137.0
+apply/jvm-1000-ranges                       169        135.7
+parse/jvm-10000-ranges                   861064        472.6
+apply/jvm-10000-ranges                      185        128.9
+apply/jvm-10-methods                        139        157.9
+apply/jvm-1000-methods                      139        171.2
+apply/jvm-10000-methods                     143        173.6
+parse/jvm-10000-methods                 1493841        260.3
+apply/jvm-no-line-10000-ranges              121        189.8
+apply/js-10-sections                         87        240.2
+apply/js-1000-sections                      102        223.9
+parse/js-1000-sources                     55031        328.3

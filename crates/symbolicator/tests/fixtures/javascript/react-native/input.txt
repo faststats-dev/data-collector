@@ -1,0 +1,5 @@
+Error: fixture
+    at a (address at index.android.bundle:1:0)
+a@1:0
+09-19 12:00:00 E ReactNativeJS: a@1:1
+    at nativeCall (native)

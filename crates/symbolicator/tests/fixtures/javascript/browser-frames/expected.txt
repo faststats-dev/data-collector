@@ -1,0 +1,4 @@
+Error: failed
+    at render (src/app.ts:10:3)
+render@src/app.ts:10:3
+render (src/app.ts:10:3)

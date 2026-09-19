@@ -1,0 +1,23 @@
+{
+  "version": 3,
+  "file": "bundle.js",
+  "mappings": ";;;;;;;;;;;;;;;AAAO;AACP;AACA;;AAEO;AACP;AACA;;;;;;;UCNA;UACA;;UAEA;UACA;UACA;UACA;UACA;UACA;UACA;UACA;UACA;UACA;UACA;UACA;UACA;;UAEA;UACA;UACA;UACA;UACA;UACA;UACA;UACA;;UAEA;UACA;UACA;;;;UC5BA;UACA;UACA;UACA;UACA,yCAAyC,wCAAwC;UACjF;UACA;UACA,E;;;UCPA,yF;;;UCAA;UACA;UACA,sDAAsD,iBAAiB;UACvE,gDAAgD,aAAa;UAC7D,E;;;;;;;;;;;ACJ+B;AAC/B,8CAAG",
+  "sources": [
+    "webpack:///././src/crash.js",
+    "webpack:///./webpack/bootstrap",
+    "webpack:///./webpack/runtime/define property getters",
+    "webpack:///./webpack/runtime/hasOwnProperty shorthand",
+    "webpack:///./webpack/runtime/make namespace object",
+    "webpack:///././src/index.js"
+  ],
+  "sourcesContent": [
+    "export function fail(message) {\n  throw new Error(message);\n}\n\nexport function run() {\n  fail('fixture crash');\n}\n",
+    "// The module cache\nconst __webpack_module_cache__ = {};\n\n// The require function\nfunction __webpack_require__(moduleId) {\n\t// Check if module is in cache\n\tconst cachedModule = __webpack_module_cache__[moduleId];\n\tif (cachedModule !== undefined) {\n\t\treturn cachedModule.exports;\n\t}\n\t// Create a new module (and put it into the cache)\n\tconst module = __webpack_module_cache__[moduleId] = {\n\t\t// no module.id needed\n\t\t// no module.loaded needed\n\t\texports: {}\n\t};\n\n\t// Execute the module function\n\tif (!(moduleId in __webpack_modules__)) {\n\t\tdelete __webpack_module_cache__[moduleId];\n\t\tconst e = new Error(\"Cannot find module '\" + moduleId + \"'\");\n\t\te.code = 'MODULE_NOT_FOUND';\n\t\tthrow e;\n\t}\n\t__webpack_modules__[moduleId](module, module.exports, __webpack_require__);\n\n\t// Return the exports of the module\n\treturn module.exports;\n}\n\n",
+    "// define getter/value functions for harmony exports\n__webpack_require__.d = (exports, definition) => {\n\tfor(var key in definition) {\n\t\tif(__webpack_require__.o(definition, key) && !__webpack_require__.o(exports, key)) {\n\t\t\tObject.defineProperty(exports, key, { enumerable: true, get: definition[key] });\n\t\t}\n\t}\n};",
+    "__webpack_require__.o = (obj, prop) => (Object.prototype.hasOwnProperty.call(obj, prop));",
+    "// define __esModule on exports\n__webpack_require__.r = (exports) => {\n\tObject.defineProperty(exports, Symbol.toStringTag, { value: 'Module' });\n\tObject.defineProperty(exports, '__esModule', { value: true });\n};",
+    "import {run} from './crash.js';\nrun();\n"
+  ],
+  "names": [],
+  "sourceRoot": ""
+}

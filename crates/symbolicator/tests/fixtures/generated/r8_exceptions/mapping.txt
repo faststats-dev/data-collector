@@ -1,0 +1,25 @@
+# compiler: R8
+# compiler_version: 8.3.37
+# common_typos_disable
+# {"id":"com.android.tools.r8.mapping","version":"2.2"}
+# pg_map_id: de19b51
+# pg_map_hash: SHA-256 de19b510848c76b92b1a748917bfa325da93ee7227e31cd43f235d6be2b4c2cd
+example.Exceptions -> example.Exceptions:
+# {"id":"sourceFile","fileName":"Exceptions.java"}
+    1:6:void main(java.lang.String[]):6:11 -> main
+example.Exceptions$Failure -> a.a:
+# {"id":"sourceFile","fileName":"Exceptions.java"}
+    1:1:void <init>(java.lang.String,java.lang.RuntimeException):0:0 -> <init>
+      # {"id":"com.android.tools.r8.synthesized"}
+      # {"id":"com.android.tools.r8.residualsignature","signature":"(Ljava/lang/String;Ljava/lang/RuntimeException;)V"}
+    2:2:void <init>(java.lang.String,java.lang.Throwable):31:31 -> <init>
+    2:2:void <init>(java.lang.String,java.lang.RuntimeException):0 -> <init>
+example.Exceptions$Task -> a.b:
+# {"id":"sourceFile","fileName":"Exceptions.java"}
+    1:1:void run(int):0:0 -> a
+      # {"id":"com.android.tools.r8.synthesized"}
+    2:4:void run(int):18:20 -> a
+    2:4:void run(int):0 -> a
+    5:5:void run(java.lang.String):25:25 -> a
+    5:5:void run(int):20 -> a
+    5:5:void run(int):0 -> a

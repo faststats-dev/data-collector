@@ -1,0 +1,6 @@
+com.example.Failure: failed
+	at module/com.example.Service.execute(Service.kt:41)
+	at com.example.Service.constant(Service.kt:90)
+	Suppressed: com.example.Failure: nested
+Caused by: com.example.Failure: cause
+	at external.Library.run(Native Method)

@@ -1,0 +1,4 @@
+Error: no matching frames
+    at a (/assets/app.js:0:0)
+    at a (/assets/app.js:2:1)
+    at a (/missing.js:1:1)

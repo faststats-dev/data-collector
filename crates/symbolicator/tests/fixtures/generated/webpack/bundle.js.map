@@ -1,0 +1,16 @@
+{
+  "version": 3,
+  "file": "bundle.js",
+  "mappings": "oBAAO,WACP,UAAAA,MAIA,gBAHA,CAGAC,E",
+  "sources": [
+    "webpack:///././src/crash.js"
+  ],
+  "sourcesContent": [
+    "export function fail(message) {\n  throw new Error(message);\n}\n\nexport function run() {\n  fail('fixture crash');\n}\n"
+  ],
+  "names": [
+    "Error",
+    "fail"
+  ],
+  "sourceRoot": ""
+}

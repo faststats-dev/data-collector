@@ -1,0 +1,8 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>example</groupId><artifactId>symbolicator-fixtures</artifactId><version>1</version>
+  <dependencies>
+    <dependency><groupId>com.guardsquare</groupId><artifactId>proguard-base</artifactId><version>7.6.1</version></dependency>
+    <dependency><groupId>com.guardsquare</groupId><artifactId>proguard-retrace</artifactId><version>7.6.1</version></dependency>
+  </dependencies>
+</project>

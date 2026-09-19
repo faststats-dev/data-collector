@@ -1,0 +1,11 @@
+java.lang.NullPointerException: fixture
+	at example.Worker.run(Worker.kt:30)
+	at example.Inner.fail(Inner.kt:42)
+	at example.Worker.run(Worker.kt:10)
+	at example.Inner.fail(Inner.kt:50)
+	at example.Caller.call(Caller.java:100)
+	at example.Worker.catchAll(Worker.kt:88)
+Caused by: java.lang.NullPointerException: nested
+	at example.Worker.run(Worker.kt:30)
+	at example.Inner.fail(Inner.kt:60)
+	at example.Worker.run(Worker.kt:30)

@@ -1,0 +1,5 @@
+Error: fixture
+    at render (App.tsx:1:1)
+render@App.tsx:1:1
+09-19 12:00:00 E ReactNativeJS: fail@App.tsx:5:2
+    at nativeCall (native)

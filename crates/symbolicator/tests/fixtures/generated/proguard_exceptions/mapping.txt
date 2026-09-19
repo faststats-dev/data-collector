@@ -1,0 +1,12 @@
+example.Exceptions -> example.Exceptions:
+# {"fileName":"Exceptions.java","id":"sourceFile"}
+    3:3:void <init>() -> <init>
+    6:13:void main(java.lang.String[]) -> main
+example.Exceptions$Failure -> example.a:
+# {"fileName":"Exceptions.java","id":"sourceFile"}
+    31:32:void <init>(java.lang.String,java.lang.Throwable) -> <init>
+example.Exceptions$Task -> example.b:
+# {"fileName":"Exceptions.java","id":"sourceFile"}
+    15:15:void <init>() -> <init>
+    17:22:void run(int) -> a
+    25:25:void run(java.lang.String) -> a

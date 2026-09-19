@@ -1,0 +1,23 @@
+# {"id":"com.android.tools.r8.mapping","version":"2.2"}
+example.Inner -> i:
+# {"id":"sourceFile","fileName":"Inner.kt"}
+example.Worker -> a:
+# {"id":"sourceFile","fileName":"Worker.kt"}
+    1:1:void example.Inner.fail():42:42 -> b
+    1:1:void run():10:10 -> b
+    2:2:void example.Inner.fail():50:50 -> c
+    2:2:void wrapper():20:20 -> c
+    # {"id":"com.android.tools.r8.synthesized"}
+    3:3:void example.Inner.fail():60:60 -> d
+    3:3:void run():30:30 -> d
+    # {"id":"com.android.tools.r8.rewriteFrame","conditions":["throws(Ljava/lang/NullPointerException;)"],"actions":["removeInnerFrames(1)"]}
+    0:4294967295:void catchAll():88:88 -> e
+example.Outline -> o:
+    1:2:int outline() -> a
+    # {"id":"com.android.tools.r8.outline"}
+example.Caller -> c:
+# {"id":"sourceFile","fileName":"Caller.java"}
+    4:4:int call():98:98 -> a
+    5:5:int call():100:100 -> a
+    27:27:int call():0:0 -> a
+    # {"id":"com.android.tools.r8.outlineCallsite","positions":{"1":4,"2":5},"outline":"Lo;a()I"}

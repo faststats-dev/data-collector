@@ -1,0 +1,14 @@
+{
+  "tool": "rollup_indexed",
+  "node": "v22.14.0",
+  "oracle": "source-map",
+  "versions": {
+    "rollup": "4.63.4",
+    "rolldown": "1.2.9",
+    "webpack": "5.111.1",
+    "metro": "0.87.1",
+    "metro-symbolicate": "0.87.1",
+    "hermes-compiler": "250829098.0.19",
+    "source-map": "0.7.6"
+  }
+}

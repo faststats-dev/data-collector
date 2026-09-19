@@ -1,0 +1,4 @@
+Error: fixture crash
+    at webpack:///src/crash.js:2:1
+    at fail (webpack:///src/crash.js:6:1)
+    at bundle.js:1:69

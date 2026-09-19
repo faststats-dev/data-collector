@@ -1,0 +1,4 @@
+java.lang.IllegalStateException: fixture crash 0
+	at example.Helper.fail(Helper.java:5)
+	at example.Worker.run(Worker.java:5)
+	at example.Main.main(Main.java:6)

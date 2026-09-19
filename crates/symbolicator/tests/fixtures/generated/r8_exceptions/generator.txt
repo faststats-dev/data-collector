@@ -1,0 +1,2 @@
+R8 8.3.37; official Retrace oracle; OpenJDK 17
+Explicit --regex for JVM frames and custom exception headers; see generator script.

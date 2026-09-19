@@ -1,0 +1,5 @@
+Error: fixture crash
+fail@src/crash.js:2:9
+run@src/crash.js:6:3
+@src/index.js:2:1
+@bundle.js:14:3

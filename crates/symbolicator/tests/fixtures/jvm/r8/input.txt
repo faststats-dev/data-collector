@@ -1,0 +1,6 @@
+e: failed
+	at module/a.b(SourceFile:2)
+	at a.c(SourceFile:6)
+	Suppressed: e: nested
+Caused by: e: cause
+	at external.Library.run(Native Method)

@@ -1,0 +1,7 @@
+Error: fixture crash
+    at fail (metro-src/crash.js:2:13)
+fail@metro-src/crash.js:2:13
+    at fail (metro-src/crash.js:2:13)
+fail@metro-src/crash.js:2:13
+    at fail (metro-src/crash.js:2:13)
+fail@metro-src/crash.js:2:13

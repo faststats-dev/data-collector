@@ -1,0 +1,6 @@
+parser                           retained B  allocations
+hermes/upstream decoder               46587          296
+hermes/symbolicator                   46587          310
+jvm/10000-ranges                    2196785        30019
+1MiB-source/upstream decoder        1049048           10
+1MiB-source/symbolicator            1049048           15

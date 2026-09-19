@@ -1,0 +1,13 @@
+prefix preserved
+    at example.Service.early(Service.java:20)
+    at example.Service.early(Service.java:22)
+    at example.Service.m(Service.java:4)
+    at example.Inline.run(Inline.java:40)
+    at example.Service.caller(Service.java:50)
+    at example.Service.later(Service.java:100)
+    at example.Service.later(Service.java:102)
+    at example.Service.m(Service.java:13)
+    at example.Service.outer(Service.java:31)
+    at example.Service.o(Service.java:5)
+    at example.Service.outer(Service.java:35)
+suffix preserved

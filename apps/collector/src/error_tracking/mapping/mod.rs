@@ -1,18 +1,13 @@
 use crate::error_tracking::ErrorLanguage;
-use ::sourcemap::SourceMap;
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce, Tag, aead::AeadInOut};
 use aws_sdk_s3::Client;
 use moka::future::Cache;
 use sqlx::PgPool;
 use std::sync::Arc;
 use std::time::Duration;
+use symbolicator::{JavaScriptMapping, Mapping, ProguardMapping, SourceMap};
 use tracing::warn;
 use uuid::Uuid;
-
-mod proguard;
-mod sourcemap;
-
-use proguard::ProguardMapping;
 
 const NONCE_LEN: usize = 12;
 const TAG_LEN: usize = 16;
@@ -116,13 +111,18 @@ impl MappingResolver {
 
         let (stacktrace, mapper) = if language == ErrorLanguage::Java {
             let mapping = self.load_proguard_mapping(project_id, build_id).await?;
-            let mapped = mapping.retrace(stacktrace);
-            (mapped != stacktrace).then_some((mapped, "r8"))?
+            (mapping.apply(stacktrace)?, "r8")
         } else {
-            (
-                sourcemap::apply(self, project_id, build_id, stacktrace).await?,
-                "javascript",
-            )
+            let mut maps = JavaScriptMapping::new();
+            let mut files = std::collections::HashSet::new();
+            for file in JavaScriptMapping::files(stacktrace) {
+                if files.insert(file)
+                    && let Some(map) = self.load_sourcemap(project_id, build_id, file).await
+                {
+                    maps.insert(file, map);
+                }
+            }
+            (maps.apply(stacktrace)?, "javascript")
         };
 
         Some(MappedStacktrace {
@@ -156,13 +156,13 @@ impl MappingResolver {
             .await
     }
 
-    pub(super) async fn load_sourcemap(
+    async fn load_sourcemap(
         &self,
         project_id: Uuid,
         build_id: &str,
         file_name: &str,
     ) -> Option<Arc<SourceMap>> {
-        let key = sourcemap::s3_key(project_id, build_id, file_name);
+        let key = sourcemap_key(project_id, build_id, file_name);
         if let Some(map) = self
             .sourcemaps
             .get_with_by_ref(&key, self.fetch_sourcemap(&key))
@@ -176,7 +176,7 @@ impl MappingResolver {
             return None;
         }
 
-        let fallback_key = sourcemap::s3_key(project_id, build_id, basename);
+        let fallback_key = sourcemap_key(project_id, build_id, basename);
         self.sourcemaps
             .get_with_by_ref(&fallback_key, self.fetch_sourcemap(&fallback_key))
             .await
@@ -329,11 +329,33 @@ fn proguard_prefix(project_id: Uuid, build_id: &str) -> String {
     format!("{project_id}/{build_id}/{PROGUARD_DIR}/")
 }
 
+fn sourcemap_key(project_id: Uuid, build_id: &str, file_name: &str) -> String {
+    let suffix = if file_name.ends_with(".map") {
+        ""
+    } else {
+        ".map"
+    };
+    format!("{project_id}/{build_id}/{file_name}{suffix}")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{MappingCrypto, proguard_prefix};
+    use super::{MappingCrypto, proguard_prefix, sourcemap_key};
     use aes_gcm::{Nonce, aead::AeadInOut};
     use uuid::Uuid;
+
+    #[test]
+    fn source_map_keys() {
+        let id = Uuid::nil();
+        assert_eq!(
+            sourcemap_key(id, "build", "assets/app.js"),
+            format!("{id}/build/assets/app.js.map")
+        );
+        assert_eq!(
+            sourcemap_key(id, "build", "assets/app.js.map"),
+            format!("{id}/build/assets/app.js.map")
+        );
+    }
 
     #[test]
     fn decrypts_nonce_tag_ciphertext_layout() {

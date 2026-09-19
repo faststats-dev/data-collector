@@ -1,0 +1,17 @@
+benchmark (median of 7 samples)           ns/op        MiB/s
+parse/webpack                               871        400.8
+parse/metro-hermes                        24475       1158.8
+parse/r8                                   2716        351.2
+apply/webpack                               334        248.7
+apply/r8-inline-outline-rewrite             944        279.0
+apply/react-native-hermes                   624        302.6
+apply/r8-long-trace                       64145        262.6
+apply/js-unmapped-68k                     48606       1446.6
+apply/jvm-unmapped-68k                    95045        739.8
+apply/jvm-10-ranges                         130        161.1
+apply/jvm-1000-ranges                       161        142.1
+apply/jvm-10000-ranges                      184        129.5
+apply/jvm-10-methods                        116        189.2
+apply/jvm-1000-methods                      118        201.8
+apply/jvm-10000-methods                     120        206.1
+parse/jvm-10000-methods                 1305677        297.9

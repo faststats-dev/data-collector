@@ -1,0 +1,14 @@
+# {"id":"com.android.tools.r8.mapping","version":"2.2"}
+example.Service -> a:
+    10:20:void one():100:110 -> b
+    30:40:void two():200:210 -> b
+    5:1:void invalid():10 -> x
+    void nativeCall() -> n
+    int count -> f
+    # {"id":"com.android.tools.r8.synthesized"}
+    void plain() -> p
+    0:65535:void catchAll():33:33 -> c
+example.Future -> f:
+    # {"id":"com.android.tools.r8.mapping","version":"99.0"}
+    # {"id":"com.android.tools.r8.synthesized"}
+    void run() -> r

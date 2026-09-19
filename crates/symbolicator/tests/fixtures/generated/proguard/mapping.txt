@@ -1,0 +1,10 @@
+example.Main -> example.Main:
+# {"fileName":"Main.java","id":"sourceFile"}
+    3:3:void <init>() -> <init>
+    6:10:void main(java.lang.String[]) -> main
+example.Worker -> example.a:
+# {"fileName":"Worker.java","id":"sourceFile"}
+    3:3:void <init>() -> <init>
+    5:6:void run(int) -> a
+    1005:1005:void example.Helper.fail(java.lang.String):5:5 -> a
+    1005:1005:void run(int):5 -> a

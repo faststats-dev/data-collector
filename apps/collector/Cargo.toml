@@ -21,7 +21,7 @@ serde_json.workspace = true
 sha2 = "0.11.0"
 aes-gcm = "0.11.1"
 hex = "0.4.3"
-sourcemap = "9.3.2"
+symbolicator = { path = "../../crates/symbolicator" }
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "json"] }
 tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "signal"] }
 zstd = "0.13.3"

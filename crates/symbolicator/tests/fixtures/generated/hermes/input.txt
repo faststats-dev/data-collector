@@ -1,0 +1,7 @@
+Error: fixture crash
+    at a (address at index.android.bundle:1:1875)
+a@1:1875
+    at a (address at index.android.bundle:1:1881)
+a@1:1881
+    at a (address at index.android.bundle:1:1892)
+a@1:1892

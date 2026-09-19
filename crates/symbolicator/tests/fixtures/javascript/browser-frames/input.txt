@@ -1,0 +1,4 @@
+Error: failed
+    at a (https://cdn.test/assets/app.js?v=2:1:1)
+a@/assets/app.js:1:1
+/assets/app.js:1:1

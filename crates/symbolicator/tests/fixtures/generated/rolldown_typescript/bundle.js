@@ -1,0 +1,2 @@
+(function(){var e=class{run(e){return this.fail(`${e.label}: ${e.attempts}`)}fail(e){throw Error(e)}};function t(t){return new e().run(t)}t({label:`typed fixture`,attempts:3})})();
+//# sourceMappingURL=bundle.js.map

@@ -1,0 +1,4 @@
+java.lang.IllegalStateException: fixture crash 0
+	at a.a.a(SourceFile:1)
+	at a.b.a(SourceFile:2)
+	at example.Main.main(SourceFile:1)

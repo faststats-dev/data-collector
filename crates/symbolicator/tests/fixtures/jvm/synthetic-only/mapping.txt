@@ -1,0 +1,4 @@
+# {"id":"com.android.tools.r8.mapping","version":"2.2"}
+example.Generated -> a:
+    void run() -> b
+    # {"id":"com.android.tools.r8.synthesized"}

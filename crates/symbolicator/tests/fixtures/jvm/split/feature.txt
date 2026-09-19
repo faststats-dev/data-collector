@@ -1,0 +1,5 @@
+core.file.Validatable -> a.a.b:
+# {"fileName":"Validatable.java","id":"sourceFile"}
+    26:26:core.file.FileIO validate() -> a_
+core.file.FileIO -> a.a.a:
+    93:93:void close() -> d

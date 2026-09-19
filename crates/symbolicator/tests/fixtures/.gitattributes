@@ -1,0 +1,2 @@
+# These fixtures assert exact bytes, including CRLF and trailing whitespace.
+*.txt -text whitespace=-trailing-space

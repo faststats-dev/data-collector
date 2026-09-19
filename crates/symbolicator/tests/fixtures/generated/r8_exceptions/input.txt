@@ -1,0 +1,10 @@
+Exception in thread "main" a.a: outer
+	at example.Exceptions.main(SourceFile:3)
+	Suppressed: a.a: suppressed
+		at example.Exceptions.main(SourceFile:4)
+Caused by: a.a: nested failure
+	at a.b.a(SourceFile:5)
+	at a.b.a(SourceFile:2)
+	at a.b.a(SourceFile:2)
+	at a.b.a(SourceFile:2)
+	at example.Exceptions.main(SourceFile:1)

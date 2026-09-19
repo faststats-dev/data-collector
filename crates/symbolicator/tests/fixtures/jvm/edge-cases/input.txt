@@ -1,0 +1,8 @@
+Exception in thread "main" loader/a: fixture
+	at a.b(SourceFile:25)
+	at a.b(Unknown Source)
+	at a.n(Native Method)
+	at a.p(Unknown Source)
+	at a.x(SourceFile:5)
+	at a.c(Unknown Source)
+	at f.r(Unknown Source)  

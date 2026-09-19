@@ -1,0 +1,1 @@
+ProGuard 7.6.1; official ReTrace oracle; OpenJDK 17

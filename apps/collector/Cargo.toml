@@ -6,7 +6,7 @@ edition.workspace = true
 [dependencies]
 user-agent = { path = "../../crates/user-agent" }
 rrweb-types = { path = "../../crates/rrweb-types" }
-error_grouping = { path = "../../crates/error_grouping" }
+stack-trace-parser = { path = "../../crates/stack-trace-parser" }
 legacy-grouping = { path = "../../crates/legacy-grouping" }
 replay-message = { path = "../../crates/replay-message" }
 collector-message = { path = "../../crates/collector-message" }

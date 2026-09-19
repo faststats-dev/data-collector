@@ -1,5 +1,5 @@
 [package]
-name = "error_grouping"
+name = "stack-trace-parser"
 version.workspace = true
 edition.workspace = true
 

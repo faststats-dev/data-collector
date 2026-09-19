@@ -1,4 +1,4 @@
-use error_grouping::{Language, SegmentRelation, StackTrace};
+use stack_trace_parser::{Language, SegmentRelation, StackTrace};
 use serde::Deserialize;
 
 use crate::normalize;

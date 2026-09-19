@@ -7,7 +7,7 @@ exact_hash)`. Regular issue IDs still come from `legacy-grouping`.
 
 ## Preparation
 
-`jina-code-516f4baf-v3` uses the shared `error_grouping` parser for Java/JVM,
+`jina-code-516f4baf-v3` uses the shared `stack-trace-parser` crate for Java/JVM,
 JavaScript/TypeScript, Python, Rust, PHP, Go and Swift. Mapped stacks take precedence.
 Missing language defaults to Java, matching historical collector behavior;
 explicit unsupported languages use raw text.
@@ -106,8 +106,8 @@ modern-grouping projects to legacy requires a separate issue-identity review;
 embedding backfills do not migrate issue IDs or their metadata.
 
 ```sh
-cargo test --locked -p error_grouping -p error-embedder
-cargo clippy --locked -p error_grouping -p error-embedder --all-targets -- -D warnings
+cargo test --locked -p stack-trace-parser -p error-embedder
+cargo clippy --locked -p stack-trace-parser -p error-embedder --all-targets -- -D warnings
 EMBED_MODEL_DIR=/models ORT_DYLIB_PATH=/path/to/libonnxruntime.so \
 cargo test --locked -p error-embedder model::tests -- --include-ignored
 ```

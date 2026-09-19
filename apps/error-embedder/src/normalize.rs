@@ -1,4 +1,4 @@
-//! Normalize message values; stack syntax is handled by error_grouping.
+//! Normalize message values; stack syntax is handled by stack_trace_parser.
 use std::borrow::Cow;
 use uuid::Uuid;
 

@@ -1,8 +1,8 @@
-pub use error_grouping::Language as ErrorLanguage;
+pub use stack_trace_parser::Language as ErrorLanguage;
 
 pub(crate) fn parse_optional_language(
     value: Option<&str>,
-) -> Result<ErrorLanguage, error_grouping::UnsupportedLanguage> {
+) -> Result<ErrorLanguage, stack_trace_parser::UnsupportedLanguage> {
     value
         .map(str::trim)
         .filter(|value| !value.is_empty())

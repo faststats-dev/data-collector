@@ -1,12 +1,11 @@
-# error_grouping
+# stack-trace-parser
 
-Parses stack traces into exception segments and frames. It does not create group
-IDs or fingerprints.
+Parses stack traces into exception segments and frames.
 
 ## Usage
 
 ```rust
-use error_grouping::Language;
+use stack_trace_parser::Language;
 
 let trace = Language::Java
     .parse_stack("at app.Main.run(Main.java:42)")
@@ -48,8 +47,8 @@ Default limits: 1 MiB input, 16,384 lines, 64 KiB per line, 64 segments, and 256
 per segment. Use `parse_stack_with_limits` with `ParserLimits` to change input limits.
 
 ```sh
-cargo test -p error_grouping
-cargo bench -p error_grouping --bench parsers
+cargo test -p stack-trace-parser
+cargo bench -p stack-trace-parser --bench parsers
 ```
 
 Parser output affects embedding preparation. Run the embedder compatibility tests

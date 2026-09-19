@@ -1,4 +1,4 @@
-use error_grouping::{Language, ParseError};
+use stack_trace_parser::{Language, ParseError};
 
 const LANGUAGES: [Language; 7] = [
     Language::Java,

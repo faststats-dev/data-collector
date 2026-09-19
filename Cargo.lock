@@ -822,7 +822,6 @@ dependencies = [
  "chrono",
  "collector-message",
  "dotenvy",
- "error_grouping",
  "flate2",
  "futures-util",
  "hex",
@@ -839,6 +838,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "sqlx",
+ "stack-trace-parser",
  "symbolicator",
  "thiserror",
  "tokio",
@@ -1340,7 +1340,6 @@ name = "error-embedder"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "error_grouping",
  "hex",
  "ort",
  "rdkafka",
@@ -1348,19 +1347,12 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "stack-trace-parser",
  "tokenizers",
  "tokio",
  "tracing",
  "tracing-subscriber",
  "uuid",
-]
-
-[[package]]
-name = "error_grouping"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -4012,6 +4004,14 @@ name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
+
+[[package]]
+name = "stack-trace-parser"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "static_assertions"

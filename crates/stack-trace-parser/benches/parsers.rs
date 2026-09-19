@@ -1,6 +1,6 @@
 use std::{hint::black_box, time::Instant};
 
-use error_grouping::Language;
+use stack_trace_parser::Language;
 
 const JAVA: &str = "java.lang.RuntimeException: boom\n    at app.Main.run(Main.java:42)\nCaused by: java.lang.IllegalStateException: bad\n    at app.Work.go(Work.java:7)\n    ... 2 more";
 const JAVA_NESTED: &str = "java.lang.Error: root\n    at loader/java.base@17/java.lang.Thread.run(Thread.java:1)\n    Suppressed: java.lang.IllegalStateException: suppressed\n        at app.Work.close(Work.java:8)\n        Caused by: java.io.IOException: nested\n            at app.IO.fail(IO.java:9)\nCaused by: java.lang.RuntimeException: cause\n    at app.Main.run(Main.java:42)";

@@ -9,10 +9,9 @@ use sqlx::postgres::PgPoolOptions;
 use std::collections::HashMap;
 use tracing::{info, warn};
 
-#[derive(Default)]
 struct PendingPatch {
     partition: i32,
-    patch: Option<replay_message::ReplaySessionPatch>,
+    patch: replay_message::ReplaySessionPatch,
 }
 
 fn command_key(project_id: uuid::Uuid, session_id: &str, window_id: &str) -> String {
@@ -145,17 +144,16 @@ async fn handle_message(
                 .map_err(|error| error.to_string())?;
             if !applied {
                 let key = command_key(patch.project_id, &patch.session_id, &patch.window_id);
-                let item = pending.entry(key).or_insert_with(|| PendingPatch {
-                    partition: message.partition(),
-                    patch: None,
-                });
-                match item.patch.as_mut() {
-                    Some(current) => {
-                        current.has_errors |= patch.has_errors;
-                        current.has_poor_vitals |= patch.has_poor_vitals;
-                    }
-                    None => item.patch = Some(patch),
-                }
+                pending
+                    .entry(key)
+                    .and_modify(|item| {
+                        item.patch.has_errors |= patch.has_errors;
+                        item.patch.has_poor_vitals |= patch.has_poor_vitals;
+                    })
+                    .or_insert(PendingPatch {
+                        partition: message.partition(),
+                        patch,
+                    });
                 warn!("Deferring replay patch until its session arrives");
             }
             Ok(())
@@ -169,11 +167,9 @@ async fn apply_pending(
     key: &str,
     pending: &mut HashMap<String, PendingPatch>,
 ) -> Result<(), String> {
-    if let Some(item) = pending.remove(key)
-        && let Some(patch) = item.patch.as_ref()
-    {
+    if let Some(item) = pending.remove(key) {
         let applied = storage
-            .apply_session_patch(pool, patch)
+            .apply_session_patch(pool, &item.patch)
             .await
             .map_err(|error| error.to_string())?;
         if !applied {

@@ -42,18 +42,20 @@ fn parser() -> &'static Parser {
 }
 
 struct Parser {
-    rules: RuleMatcher,
+    set: RegexSet,
+    user_agents: Vec<Regex>,
+    operating_systems: Vec<Regex>,
+}
+
+struct MetadataMatches<'a> {
+    user_agent: Option<(&'static Rule, &'a Regex)>,
+    operating_system: Option<(&'static Rule, &'a Regex)>,
+    device_is_bot: bool,
 }
 
 impl Parser {
-    fn compile() -> Result<Self, regex::Error> {
-        Ok(Self {
-            rules: RuleMatcher::compile()?,
-        })
-    }
-
     fn parse(&self, user_agent: &str) -> Option<UserAgentInfo> {
-        let matches = self.rules.matches(user_agent);
+        let matches = self.matches(user_agent);
         let device = classify_device(user_agent, matches.device_is_bot);
         if device == "Bot" {
             return None;
@@ -89,21 +91,7 @@ impl Parser {
             device,
         })
     }
-}
 
-struct RuleMatcher {
-    set: RegexSet,
-    user_agents: Vec<Regex>,
-    operating_systems: Vec<Regex>,
-}
-
-struct MetadataMatches<'a> {
-    user_agent: Option<(&'static Rule, &'a Regex)>,
-    operating_system: Option<(&'static Rule, &'a Regex)>,
-    device_is_bot: bool,
-}
-
-impl RuleMatcher {
     fn compile() -> Result<Self, regex::Error> {
         let patterns = UA_RULES
             .iter()
@@ -211,13 +199,7 @@ fn has_substitution(template: &str) -> bool {
 
 fn format_version(major: Option<Cow<'_, str>>, minor: Option<Cow<'_, str>>) -> String {
     match (major, minor) {
-        (Some(major), Some(minor)) => {
-            let mut version = String::with_capacity(major.len() + minor.len() + 1);
-            version.push_str(&major);
-            version.push('.');
-            version.push_str(&minor);
-            version
-        }
+        (Some(major), Some(minor)) => format!("{major}.{minor}"),
         (Some(major), None) => major.into_owned(),
         _ => String::new(),
     }

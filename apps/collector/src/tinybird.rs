@@ -101,10 +101,6 @@ impl TinybirdError {
 
 impl TinybirdClient {
     pub fn new(base_url: String, token: String) -> Self {
-        let mut bearer_token = String::with_capacity(7 + token.len());
-        bearer_token.push_str("Bearer ");
-        bearer_token.push_str(&token);
-
         Self {
             client: Client::builder()
                 .pool_idle_timeout(std::time::Duration::from_secs(15))
@@ -112,7 +108,7 @@ impl TinybirdClient {
                 .build()
                 .unwrap_or_else(|_| Client::new()),
             base_url,
-            bearer_token,
+            bearer_token: format!("Bearer {token}"),
         }
     }
 

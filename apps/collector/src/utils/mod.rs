@@ -7,7 +7,7 @@ pub fn sha256_hex(parts: &[&[u8]]) -> String {
         hasher.update(part);
     }
 
-    hex_encode(&hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 fn hash_parts_to_uuid(parts: &[&[u8]]) -> Uuid {
@@ -25,10 +25,7 @@ pub fn hash_server_id(server_id: Uuid, project_id: Uuid) -> Uuid {
     hash_parts_to_uuid(&[server_id.as_bytes(), project_id.as_bytes()])
 }
 
-/// GDPR-compliant daily-rotating hash for cookieless tracking.
-/// Produces a deterministic UUID from IP + User-Agent + project_id + today's date.
-/// The hash rotates daily so visitors cannot be tracked long-term,
-/// and the original IP/UA cannot be recovered.
+/// Hash IP, User-Agent, project ID, and the UTC date for cookieless tracking.
 pub fn cookieless_server_id(ip: &str, user_agent: &str, project_id: Uuid) -> Uuid {
     let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
     hash_parts_to_uuid(&[
@@ -37,16 +34,6 @@ pub fn cookieless_server_id(ip: &str, user_agent: &str, project_id: Uuid) -> Uui
         project_id.as_bytes(),
         today.as_bytes(),
     ])
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for &byte in bytes {
-        out.push(HEX[(byte >> 4) as usize] as char);
-        out.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    out
 }
 
 #[cfg(test)]
@@ -127,7 +114,6 @@ mod tests {
     fn cookieless_server_id_handles_empty_inputs() {
         let project_id = Uuid::parse_str("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb").unwrap();
         let result = cookieless_server_id("", "", project_id);
-        // Should still produce a valid UUID, not panic
         assert_ne!(result, Uuid::nil());
     }
 }

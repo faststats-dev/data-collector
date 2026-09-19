@@ -5,7 +5,6 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 use std::collections::HashSet;
-use std::io::Write;
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -588,48 +587,14 @@ fn record_replay_chunk_metrics(
         .record(uncompressed_bytes as f64);
 }
 
-struct CountingWriter<W> {
-    inner: W,
-    bytes_written: usize,
-}
-
-impl<W> CountingWriter<W> {
-    fn new(inner: W) -> Self {
-        Self {
-            inner,
-            bytes_written: 0,
-        }
-    }
-
-    fn into_inner(self) -> W {
-        self.inner
-    }
-
-    fn bytes_written(&self) -> usize {
-        self.bytes_written
-    }
-}
-
-impl<W: Write> Write for CountingWriter<W> {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let written = self.inner.write(buf)?;
-        self.bytes_written = self.bytes_written.saturating_add(written);
-        Ok(written)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.inner.flush()
-    }
-}
-
 fn zstd_json_value_array(events: &[Value]) -> Result<(Vec<u8>, i64), ReplayStorageError> {
-    let writer = CountingWriter::new(Vec::new());
-    let mut encoder = zstd::stream::write::Encoder::new(writer, ZSTD_COMPRESSION_LEVEL)?;
+    let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), ZSTD_COMPRESSION_LEVEL)?;
     serde_json::to_writer(&mut encoder, events)?;
-    let writer = encoder.finish()?;
-    let uncompressed_bytes = i64::try_from(writer.bytes_written()).unwrap_or(i64::MAX);
+    let compressed = encoder.finish()?;
+    // Preserve the stored byte count, which historically measures compressed output.
+    let uncompressed_bytes = i64::try_from(compressed.len()).unwrap_or(i64::MAX);
 
-    Ok((writer.into_inner(), uncompressed_bytes))
+    Ok((compressed, uncompressed_bytes))
 }
 
 async fn compress_replay_events(events: Vec<Value>) -> Result<(Vec<u8>, i64), ReplayStorageError> {
@@ -687,12 +652,9 @@ fn replay_event_order_cmp(left: &Value, right: &Value) -> Ordering {
 }
 
 fn replay_events_are_ordered(events: &[Value]) -> bool {
-    for pair in events.windows(2) {
-        if replay_event_order_cmp(&pair[0], &pair[1]).is_gt() {
-            return false;
-        }
-    }
-    true
+    events
+        .windows(2)
+        .all(|pair| !replay_event_order_cmp(&pair[0], &pair[1]).is_gt())
 }
 
 fn replay_has_full_snapshot(events: &[Value]) -> bool {
@@ -818,6 +780,22 @@ fn normalize_path(path: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn compression_preserves_events_and_stored_byte_count() {
+        for events in [
+            vec![],
+            vec![json!({"timestamp": 1000, "data": "repeated".repeat(100)})],
+        ] {
+            let (compressed, byte_count) = zstd_json_value_array(&events).unwrap();
+            assert_eq!(byte_count, compressed.len() as i64);
+            let decoded = zstd::stream::decode_all(compressed.as_slice()).unwrap();
+            assert_eq!(
+                serde_json::from_slice::<Vec<Value>>(&decoded).unwrap(),
+                events
+            );
+        }
+    }
 
     #[test]
     fn replay_object_keys_are_generation_scoped() {

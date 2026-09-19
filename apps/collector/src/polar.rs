@@ -65,17 +65,13 @@ pub struct UsageCounts {
 
 impl PolarClient {
     pub fn new(token: String) -> Self {
-        let mut bearer_token = String::with_capacity("Bearer ".len() + token.len());
-        bearer_token.push_str("Bearer ");
-        bearer_token.push_str(&token);
-
         Self {
             client: Client::builder()
                 .pool_idle_timeout(std::time::Duration::from_secs(15))
                 .pool_max_idle_per_host(1)
                 .build()
                 .unwrap_or_else(|_| Client::new()),
-            bearer_token,
+            bearer_token: format!("Bearer {token}"),
         }
     }
 
@@ -124,13 +120,6 @@ impl PolarClient {
                     },
                 });
             }
-        }
-
-        if events.is_empty() {
-            return Ok(EventsIngestResponse {
-                inserted: 0,
-                duplicates: 0,
-            });
         }
 
         let mut total_inserted = 0;

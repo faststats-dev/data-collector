@@ -32,7 +32,6 @@ pub struct OwnerUsage {
 
 pub type AggregatedUsage = HashMap<Arc<str>, OwnerUsage>;
 
-/// Tracking context for billing purposes
 #[derive(Debug, Clone)]
 pub struct TrackingContext {
     pub owner_id: Arc<str>,
@@ -53,7 +52,6 @@ pub enum QueuedEvent {
     ErrorOccurrenceV3 {
         row: Box<ErrorOccurrenceV3Row>,
         language: ErrorLanguage,
-
         tracking: Option<TrackingContext>,
     },
     WebVital {
@@ -107,12 +105,9 @@ impl TinybirdBatch {
         match event {
             QueuedEvent::WebEvent { row, tracking } => self.web_events.push((*row, tracking)),
             QueuedEvent::ModsEvent { row, tracking } => self.mods_events.push((row, tracking)),
-            QueuedEvent::ErrorOccurrenceV3 {
-                row,
-                language: _,
-
-                tracking,
-            } => self.error_occurrences_v3.push((*row, tracking)),
+            QueuedEvent::ErrorOccurrenceV3 { row, tracking, .. } => {
+                self.error_occurrences_v3.push((*row, tracking))
+            }
             QueuedEvent::WebVital { row, tracking } => self.web_vitals.push((row, tracking)),
         }
     }
@@ -142,19 +137,7 @@ impl TinybirdBatch {
 
         count_usage!(&self.web_events, events);
         count_usage!(&self.mods_events, events);
-        for (_, ctx) in &self.error_occurrences_v3 {
-            if let Some(ctx) = ctx {
-                usage
-                    .entry(Arc::clone(&ctx.owner_id))
-                    .or_insert_with(|| OwnerUsage {
-                        counts: UsageCounts::default(),
-                        token: Arc::clone(&ctx.token),
-                        org: ctx.organization_id.as_ref().map(Arc::clone),
-                    })
-                    .counts
-                    .error_tracking += 1;
-            }
-        }
+        count_usage!(&self.error_occurrences_v3, error_tracking);
         count_usage!(&self.web_vitals, web_vitals);
         usage
     }
@@ -508,36 +491,11 @@ impl BatchQueue {
         let web_vital_rows: Vec<_> = web_vitals.iter().map(|(e, _)| e).collect();
 
         let (web_events_res, mods_events_res, error_occurrences_v3_res, web_vitals_res) = tokio::join!(
-            async {
-                if web_event_rows.is_empty() {
-                    Ok(())
-                } else {
-                    self.tinybird.insert_web_events(&web_event_rows).await
-                }
-            },
-            async {
-                if mods_event_rows.is_empty() {
-                    Ok(())
-                } else {
-                    self.tinybird.insert_mods_events(&mods_event_rows).await
-                }
-            },
-            async {
-                if error_occurrence_v3_rows.is_empty() {
-                    Ok(())
-                } else {
-                    self.tinybird
-                        .insert_error_occurrences_v3(&error_occurrence_v3_rows)
-                        .await
-                }
-            },
-            async {
-                if web_vital_rows.is_empty() {
-                    Ok(())
-                } else {
-                    self.tinybird.insert_web_vitals(&web_vital_rows).await
-                }
-            },
+            self.tinybird.insert_web_events(&web_event_rows),
+            self.tinybird.insert_mods_events(&mods_event_rows),
+            self.tinybird
+                .insert_error_occurrences_v3(&error_occurrence_v3_rows),
+            self.tinybird.insert_web_vitals(&web_vital_rows),
         );
 
         let (delivered, retryable, permanent) =
@@ -604,30 +562,23 @@ impl BatchQueue {
     }
 
     async fn enrich_event(&self, event: QueuedEvent) -> QueuedEvent {
+        let Some(resolver) = self.mappings.as_ref() else {
+            return event;
+        };
+
         let QueuedEvent::ErrorOccurrenceV3 {
             row,
             language,
-
             tracking,
         } = event
         else {
             return event;
         };
 
-        let Some(resolver) = self.mappings.as_ref() else {
-            return QueuedEvent::ErrorOccurrenceV3 {
-                row,
-                language,
-
-                tracking,
-            };
-        };
-
         let row = crate::error_tracking::v3::enrich_with_mapping(resolver, *row, language).await;
         QueuedEvent::ErrorOccurrenceV3 {
             row: Box::new(row),
             language,
-
             tracking,
         }
     }

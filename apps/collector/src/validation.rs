@@ -1,5 +1,4 @@
 use crate::models::DataSource;
-use regex::Regex;
 use serde_json::Value;
 use std::collections::HashMap;
 use tracing::debug;
@@ -24,8 +23,7 @@ pub fn validate_and_filter_payload(
             return false;
         };
 
-        let re = ds.regex.as_ref();
-        let shape = metric_shape(ds);
+        let shape = ds.metric_shape.as_deref();
 
         if ds.data_type == "json" {
             match validate_json_metric(value) {
@@ -41,12 +39,12 @@ pub fn validate_and_filter_payload(
             }
         }
 
-        if shape == "array" {
+        if shape == Some("array") {
             if let Some(arr) = value.as_array_mut() {
                 let mut first_invalid: Option<(usize, &'static str)> = None;
                 let mut idx = 0;
 
-                arr.retain(|elem| match validate_scalar(elem, ds, re) {
+                arr.retain(|elem| match validate_scalar(elem, ds) {
                     Ok(_) => {
                         idx += 1;
                         true
@@ -82,10 +80,10 @@ pub fn validate_and_filter_payload(
                 debug!("key='{}' VALID=false reason='expected array'", ref_id);
                 false
             }
-        } else if shape == "map" {
+        } else if shape == Some("map") {
             if let Some(obj) = value.as_object_mut() {
                 let mut first_invalid: Option<(String, &'static str)> = None;
-                obj.retain(|key, elem| match validate_scalar(elem, ds, re) {
+                obj.retain(|key, elem| match validate_scalar(elem, ds) {
                     Ok(_) => true,
                     Err(reason) => {
                         if first_invalid.is_none() {
@@ -130,7 +128,7 @@ pub fn validate_and_filter_payload(
                 return false;
             }
 
-            match validate_scalar(value, ds, re) {
+            match validate_scalar(value, ds) {
                 Ok(_) => {
                     debug!("key='{}' VALID=true", ref_id);
                     true
@@ -145,14 +143,6 @@ pub fn validate_and_filter_payload(
     });
 
     (data, warnings)
-}
-
-fn metric_shape(ds: &DataSource) -> &str {
-    match ds.metric_shape.as_deref() {
-        Some("array") => "array",
-        Some("map") => "map",
-        _ => "scalar",
-    }
 }
 
 fn validate_json_metric(value: &Value) -> Result<(), &'static str> {
@@ -189,11 +179,11 @@ fn validate_json_node(value: &Value, depth: usize, items: &mut usize) -> Result<
     Ok(())
 }
 
-fn validate_scalar(v: &Value, ds: &DataSource, re: Option<&Regex>) -> Result<(), &'static str> {
+fn validate_scalar(v: &Value, ds: &DataSource) -> Result<(), &'static str> {
     match ds.data_type.as_str() {
         "string" => {
             let s = v.as_str().ok_or("expected string")?;
-            if let Some(re) = re
+            if let Some(re) = &ds.regex
                 && !re.is_match(s)
             {
                 return Err("regex mismatch");
@@ -250,6 +240,7 @@ fn extract_number(v: &Value) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use regex::Regex;
     use serde_json::json;
 
     fn make_data_source(data_type: &str) -> DataSource {
@@ -323,8 +314,6 @@ mod tests {
         }
     }
 
-    // ==================== STRING VALIDATION TESTS ====================
-
     mod string_validation {
         use super::*;
 
@@ -332,96 +321,95 @@ mod tests {
         fn validates_simple_string() {
             let ds = make_data_source("string");
             let value = json!("hello world");
-            assert!(validate_scalar(&value, &ds, None).is_ok());
+            assert!(validate_scalar(&value, &ds).is_ok());
         }
 
         #[test]
         fn rejects_number_as_string() {
             let ds = make_data_source("string");
             let value = json!(42);
-            assert!(validate_scalar(&value, &ds, None).is_err());
+            assert!(validate_scalar(&value, &ds).is_err());
         }
 
         #[test]
         fn rejects_boolean_as_string() {
             let ds = make_data_source("string");
             let value = json!(true);
-            assert!(validate_scalar(&value, &ds, None).is_err());
+            assert!(validate_scalar(&value, &ds).is_err());
         }
 
         #[test]
         fn rejects_null_as_string() {
             let ds = make_data_source("string");
             let value = json!(null);
-            assert!(validate_scalar(&value, &ds, None).is_err());
+            assert!(validate_scalar(&value, &ds).is_err());
         }
 
         #[test]
         fn rejects_object_as_string() {
             let ds = make_data_source("string");
             let value = json!({"key": "value"});
-            assert!(validate_scalar(&value, &ds, None).is_err());
+            assert!(validate_scalar(&value, &ds).is_err());
         }
 
         #[test]
         fn validates_empty_string() {
             let ds = make_data_source("string");
             let value = json!("");
-            assert!(validate_scalar(&value, &ds, None).is_ok());
+            assert!(validate_scalar(&value, &ds).is_ok());
         }
 
         #[test]
         fn validates_string_with_unicode() {
             let ds = make_data_source("string");
             let value = json!("hello 世界 🌍");
-            assert!(validate_scalar(&value, &ds, None).is_ok());
+            assert!(validate_scalar(&value, &ds).is_ok());
         }
 
         #[test]
         fn validates_string_matching_regex() {
-            let ds = make_data_source("string");
-            let re = Regex::new(r"^[a-z]+$").unwrap();
+            let mut ds = make_data_source("string");
+            ds.regex = Some(Regex::new(r"^[a-z]+$").unwrap());
             let value = json!("hello");
-            assert!(validate_scalar(&value, &ds, Some(&re)).is_ok());
+            assert!(validate_scalar(&value, &ds).is_ok());
         }
 
         #[test]
         fn rejects_string_not_matching_regex() {
-            let ds = make_data_source("string");
-            let re = Regex::new(r"^[a-z]+$").unwrap();
+            let mut ds = make_data_source("string");
+            ds.regex = Some(Regex::new(r"^[a-z]+$").unwrap());
             let value = json!("Hello123");
-            assert!(validate_scalar(&value, &ds, Some(&re)).is_err());
+            assert!(validate_scalar(&value, &ds).is_err());
         }
 
         #[test]
         fn validates_email_regex() {
-            let ds = make_data_source("string");
-            let re = Regex::new(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$").unwrap();
+            let mut ds = make_data_source("string");
+            ds.regex =
+                Some(Regex::new(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$").unwrap());
 
             let valid_email = json!("test@example.com");
-            assert!(validate_scalar(&valid_email, &ds, Some(&re)).is_ok());
+            assert!(validate_scalar(&valid_email, &ds).is_ok());
 
             let invalid_email = json!("not-an-email");
-            assert!(validate_scalar(&invalid_email, &ds, Some(&re)).is_err());
+            assert!(validate_scalar(&invalid_email, &ds).is_err());
         }
 
         #[test]
         fn validates_uuid_regex() {
-            let ds = make_data_source("string");
-            let re = Regex::new(
+            let mut ds = make_data_source("string");
+            ds.regex = Some(Regex::new(
                 r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
             )
-            .unwrap();
+            .unwrap());
 
             let valid_uuid = json!("550e8400-e29b-41d4-a716-446655440000");
-            assert!(validate_scalar(&valid_uuid, &ds, Some(&re)).is_ok());
+            assert!(validate_scalar(&valid_uuid, &ds).is_ok());
 
             let invalid_uuid = json!("not-a-uuid");
-            assert!(validate_scalar(&invalid_uuid, &ds, Some(&re)).is_err());
+            assert!(validate_scalar(&invalid_uuid, &ds).is_err());
         }
     }
-
-    // ==================== BOOLEAN VALIDATION TESTS ====================
 
     mod boolean_validation {
         use super::*;
@@ -430,46 +418,44 @@ mod tests {
         fn validates_true() {
             let ds = make_data_source("boolean");
             let value = json!(true);
-            assert!(validate_scalar(&value, &ds, None).is_ok());
+            assert!(validate_scalar(&value, &ds).is_ok());
         }
 
         #[test]
         fn validates_false() {
             let ds = make_data_source("boolean");
             let value = json!(false);
-            assert!(validate_scalar(&value, &ds, None).is_ok());
+            assert!(validate_scalar(&value, &ds).is_ok());
         }
 
         #[test]
         fn rejects_string_as_boolean() {
             let ds = make_data_source("boolean");
             let value = json!("true");
-            assert!(validate_scalar(&value, &ds, None).is_err());
+            assert!(validate_scalar(&value, &ds).is_err());
         }
 
         #[test]
         fn rejects_number_as_boolean() {
             let ds = make_data_source("boolean");
             let value = json!(1);
-            assert!(validate_scalar(&value, &ds, None).is_err());
+            assert!(validate_scalar(&value, &ds).is_err());
         }
 
         #[test]
         fn rejects_zero_as_boolean() {
             let ds = make_data_source("boolean");
             let value = json!(0);
-            assert!(validate_scalar(&value, &ds, None).is_err());
+            assert!(validate_scalar(&value, &ds).is_err());
         }
 
         #[test]
         fn rejects_null_as_boolean() {
             let ds = make_data_source("boolean");
             let value = json!(null);
-            assert!(validate_scalar(&value, &ds, None).is_err());
+            assert!(validate_scalar(&value, &ds).is_err());
         }
     }
-
-    // ==================== NUMBER VALIDATION TESTS ====================
 
     mod number_validation {
         use super::*;
@@ -478,63 +464,63 @@ mod tests {
         fn validates_integer() {
             let ds = make_data_source("number");
             let value = json!(42);
-            assert!(validate_scalar(&value, &ds, None).is_ok());
+            assert!(validate_scalar(&value, &ds).is_ok());
         }
 
         #[test]
         fn validates_float() {
             let ds = make_data_source("number");
             let value = json!(1.25);
-            assert!(validate_scalar(&value, &ds, None).is_ok());
+            assert!(validate_scalar(&value, &ds).is_ok());
         }
 
         #[test]
         fn validates_negative_number() {
             let ds = make_data_source("number");
             let value = json!(-42);
-            assert!(validate_scalar(&value, &ds, None).is_ok());
+            assert!(validate_scalar(&value, &ds).is_ok());
         }
 
         #[test]
         fn validates_zero() {
             let ds = make_data_source("number");
             let value = json!(0);
-            assert!(validate_scalar(&value, &ds, None).is_ok());
+            assert!(validate_scalar(&value, &ds).is_ok());
         }
 
         #[test]
         fn validates_string_encoded_number() {
             let ds = make_data_source("number");
             let value = json!("42.5");
-            assert!(validate_scalar(&value, &ds, None).is_ok());
+            assert!(validate_scalar(&value, &ds).is_ok());
         }
 
         #[test]
         fn validates_string_encoded_negative() {
             let ds = make_data_source("number");
             let value = json!("-123.456");
-            assert!(validate_scalar(&value, &ds, None).is_ok());
+            assert!(validate_scalar(&value, &ds).is_ok());
         }
 
         #[test]
         fn rejects_non_numeric_string() {
             let ds = make_data_source("number");
             let value = json!("not a number");
-            assert!(validate_scalar(&value, &ds, None).is_err());
+            assert!(validate_scalar(&value, &ds).is_err());
         }
 
         #[test]
         fn rejects_boolean_as_number() {
             let ds = make_data_source("number");
             let value = json!(true);
-            assert!(validate_scalar(&value, &ds, None).is_err());
+            assert!(validate_scalar(&value, &ds).is_err());
         }
 
         #[test]
         fn rejects_null_as_number() {
             let ds = make_data_source("number");
             let value = json!(null);
-            assert!(validate_scalar(&value, &ds, None).is_err());
+            assert!(validate_scalar(&value, &ds).is_err());
         }
 
         // Float constraint tests
@@ -543,7 +529,7 @@ mod tests {
             let mut ds = make_data_source("number");
             ds.allow_float = Some(true);
             let value = json!(2.5);
-            assert!(validate_scalar(&value, &ds, None).is_ok());
+            assert!(validate_scalar(&value, &ds).is_ok());
         }
 
         #[test]
@@ -551,7 +537,7 @@ mod tests {
             let mut ds = make_data_source("number");
             ds.allow_float = Some(false);
             let value = json!(2.5);
-            assert!(validate_scalar(&value, &ds, None).is_err());
+            assert!(validate_scalar(&value, &ds).is_err());
         }
 
         #[test]
@@ -559,7 +545,7 @@ mod tests {
             let mut ds = make_data_source("number");
             ds.allow_float = Some(false);
             let value = json!(42);
-            assert!(validate_scalar(&value, &ds, None).is_ok());
+            assert!(validate_scalar(&value, &ds).is_ok());
         }
 
         #[test]
@@ -568,7 +554,7 @@ mod tests {
             ds.allow_float = Some(false);
             // 42.0 has fract() == 0.0, so it should be allowed
             let value = json!(42.0);
-            assert!(validate_scalar(&value, &ds, None).is_ok());
+            assert!(validate_scalar(&value, &ds).is_ok());
         }
 
         // Negative constraint tests
@@ -577,7 +563,7 @@ mod tests {
             let mut ds = make_data_source("number");
             ds.allow_negative = Some(true);
             let value = json!(-42);
-            assert!(validate_scalar(&value, &ds, None).is_ok());
+            assert!(validate_scalar(&value, &ds).is_ok());
         }
 
         #[test]
@@ -585,7 +571,7 @@ mod tests {
             let mut ds = make_data_source("number");
             ds.allow_negative = Some(false);
             let value = json!(-42);
-            assert!(validate_scalar(&value, &ds, None).is_err());
+            assert!(validate_scalar(&value, &ds).is_err());
         }
 
         #[test]
@@ -593,7 +579,7 @@ mod tests {
             let mut ds = make_data_source("number");
             ds.allow_negative = Some(false);
             let value = json!(42);
-            assert!(validate_scalar(&value, &ds, None).is_ok());
+            assert!(validate_scalar(&value, &ds).is_ok());
         }
 
         #[test]
@@ -601,7 +587,7 @@ mod tests {
             let mut ds = make_data_source("number");
             ds.allow_negative = Some(false);
             let value = json!(0);
-            assert!(validate_scalar(&value, &ds, None).is_ok());
+            assert!(validate_scalar(&value, &ds).is_ok());
         }
 
         // Min/max constraint tests
@@ -610,7 +596,7 @@ mod tests {
             let mut ds = make_data_source("number");
             ds.min_value = Some(10.0);
             let value = json!(15);
-            assert!(validate_scalar(&value, &ds, None).is_ok());
+            assert!(validate_scalar(&value, &ds).is_ok());
         }
 
         #[test]
@@ -618,7 +604,7 @@ mod tests {
             let mut ds = make_data_source("number");
             ds.min_value = Some(10.0);
             let value = json!(10);
-            assert!(validate_scalar(&value, &ds, None).is_ok());
+            assert!(validate_scalar(&value, &ds).is_ok());
         }
 
         #[test]
@@ -626,7 +612,7 @@ mod tests {
             let mut ds = make_data_source("number");
             ds.min_value = Some(10.0);
             let value = json!(5);
-            assert!(validate_scalar(&value, &ds, None).is_err());
+            assert!(validate_scalar(&value, &ds).is_err());
         }
 
         #[test]
@@ -634,7 +620,7 @@ mod tests {
             let mut ds = make_data_source("number");
             ds.max_value = Some(100.0);
             let value = json!(50);
-            assert!(validate_scalar(&value, &ds, None).is_ok());
+            assert!(validate_scalar(&value, &ds).is_ok());
         }
 
         #[test]
@@ -642,7 +628,7 @@ mod tests {
             let mut ds = make_data_source("number");
             ds.max_value = Some(100.0);
             let value = json!(100);
-            assert!(validate_scalar(&value, &ds, None).is_ok());
+            assert!(validate_scalar(&value, &ds).is_ok());
         }
 
         #[test]
@@ -650,7 +636,7 @@ mod tests {
             let mut ds = make_data_source("number");
             ds.max_value = Some(100.0);
             let value = json!(150);
-            assert!(validate_scalar(&value, &ds, None).is_err());
+            assert!(validate_scalar(&value, &ds).is_err());
         }
 
         #[test]
@@ -659,7 +645,7 @@ mod tests {
             ds.min_value = Some(0.0);
             ds.max_value = Some(100.0);
             let value = json!(50);
-            assert!(validate_scalar(&value, &ds, None).is_ok());
+            assert!(validate_scalar(&value, &ds).is_ok());
         }
 
         #[test]
@@ -668,7 +654,7 @@ mod tests {
             ds.min_value = Some(0.0);
             ds.max_value = Some(100.0);
             let value = json!(-10);
-            assert!(validate_scalar(&value, &ds, None).is_err());
+            assert!(validate_scalar(&value, &ds).is_err());
         }
 
         #[test]
@@ -677,17 +663,16 @@ mod tests {
             ds.min_value = Some(0.0);
             ds.max_value = Some(100.0);
             let value = json!(150);
-            assert!(validate_scalar(&value, &ds, None).is_err());
+            assert!(validate_scalar(&value, &ds).is_err());
         }
 
         // NaN and Infinity tests
         #[test]
         fn rejects_infinity() {
             let ds = make_data_source("number");
-            // Note: JSON doesn't support Infinity directly, but we test via string parsing
-            // "Infinity" parses to f64::INFINITY which is not finite
+            // JSON cannot represent infinity; numeric strings can.
             let string_inf = json!("Infinity");
-            let result = validate_scalar(&string_inf, &ds, None);
+            let result = validate_scalar(&string_inf, &ds);
             assert!(result.is_err());
         }
 
@@ -695,7 +680,7 @@ mod tests {
         fn rejects_negative_infinity() {
             let ds = make_data_source("number");
             let string_neg_inf = json!("-Infinity");
-            let result = validate_scalar(&string_neg_inf, &ds, None);
+            let result = validate_scalar(&string_neg_inf, &ds);
             assert!(result.is_err());
         }
 
@@ -703,7 +688,7 @@ mod tests {
         fn rejects_nan() {
             let ds = make_data_source("number");
             let string_nan = json!("NaN");
-            let result = validate_scalar(&string_nan, &ds, None);
+            let result = validate_scalar(&string_nan, &ds);
             assert!(result.is_err());
         }
 
@@ -717,19 +702,19 @@ mod tests {
             ds.max_value = Some(100.0);
 
             let valid = json!(50);
-            assert!(validate_scalar(&valid, &ds, None).is_ok());
+            assert!(validate_scalar(&valid, &ds).is_ok());
 
             let negative = json!(-5);
-            assert!(validate_scalar(&negative, &ds, None).is_err());
+            assert!(validate_scalar(&negative, &ds).is_err());
 
             let float = json!(50.5);
-            assert!(validate_scalar(&float, &ds, None).is_err());
+            assert!(validate_scalar(&float, &ds).is_err());
 
             let below_min = json!(0);
-            assert!(validate_scalar(&below_min, &ds, None).is_err());
+            assert!(validate_scalar(&below_min, &ds).is_err());
 
             let above_max = json!(101);
-            assert!(validate_scalar(&above_max, &ds, None).is_err());
+            assert!(validate_scalar(&above_max, &ds).is_err());
         }
 
         // Large numbers
@@ -737,18 +722,16 @@ mod tests {
         fn validates_large_number() {
             let ds = make_data_source("number");
             let value = json!(9007199254740991_i64); // MAX_SAFE_INTEGER in JS
-            assert!(validate_scalar(&value, &ds, None).is_ok());
+            assert!(validate_scalar(&value, &ds).is_ok());
         }
 
         #[test]
         fn validates_very_small_float() {
             let ds = make_data_source("number");
             let value = json!(0.000000001);
-            assert!(validate_scalar(&value, &ds, None).is_ok());
+            assert!(validate_scalar(&value, &ds).is_ok());
         }
     }
-
-    // ==================== UNSUPPORTED TYPE TESTS ====================
 
     mod unsupported_type_validation {
         use super::*;
@@ -757,7 +740,7 @@ mod tests {
         fn rejects_unsupported_data_type() {
             let ds = make_data_source("unknown_type");
             let value = json!("test");
-            let result = validate_scalar(&value, &ds, None);
+            let result = validate_scalar(&value, &ds);
             assert!(result.is_err());
             assert!(result.unwrap_err().contains("unsupported data_type"));
         }
@@ -766,11 +749,9 @@ mod tests {
         fn rejects_empty_data_type() {
             let ds = make_data_source("");
             let value = json!("test");
-            assert!(validate_scalar(&value, &ds, None).is_err());
+            assert!(validate_scalar(&value, &ds).is_err());
         }
     }
-
-    // ==================== ARRAY VALIDATION TESTS ====================
 
     mod array_validation {
         use super::*;
@@ -932,8 +913,6 @@ mod tests {
         }
     }
 
-    // ==================== VALIDATE_AND_FILTER_PAYLOAD TESTS ====================
-
     mod validate_and_filter_payload_tests {
         use super::*;
 
@@ -1054,8 +1033,6 @@ mod tests {
         }
     }
 
-    // ==================== EXTRACT_NUMBER TESTS ====================
-
     mod extract_number_tests {
         use super::*;
 
@@ -1136,8 +1113,6 @@ mod tests {
         }
     }
 
-    // ==================== EDGE CASE TESTS ====================
-
     mod edge_cases {
         use super::*;
 
@@ -1146,7 +1121,7 @@ mod tests {
             let ds = make_data_source("string");
             let long_string = "a".repeat(100_000);
             let value = json!(long_string);
-            assert!(validate_scalar(&value, &ds, None).is_ok());
+            assert!(validate_scalar(&value, &ds).is_ok());
         }
 
         #[test]
@@ -1154,14 +1129,14 @@ mod tests {
             let ds = make_data_source("string");
             let nested_json = r#"{"a":{"b":{"c":{"d":"value"}}}}"#;
             let value = json!(nested_json);
-            assert!(validate_scalar(&value, &ds, None).is_ok());
+            assert!(validate_scalar(&value, &ds).is_ok());
         }
 
         #[test]
         fn handles_whitespace_only_string() {
             let ds = make_data_source("string");
             let value = json!("   \t\n  ");
-            assert!(validate_scalar(&value, &ds, None).is_ok());
+            assert!(validate_scalar(&value, &ds).is_ok());
         }
 
         #[test]
@@ -1170,11 +1145,11 @@ mod tests {
 
             // Negative zero
             let neg_zero = json!(-0.0);
-            assert!(validate_scalar(&neg_zero, &ds, None).is_ok());
+            assert!(validate_scalar(&neg_zero, &ds).is_ok());
 
             // Very small positive
             let tiny = json!(f64::MIN_POSITIVE);
-            assert!(validate_scalar(&tiny, &ds, None).is_ok());
+            assert!(validate_scalar(&tiny, &ds).is_ok());
         }
 
         #[test]
@@ -1182,7 +1157,7 @@ mod tests {
             let ds = make_data_source("number");
             // Large integer that might lose precision as float
             let value = json!(9007199254740993_i64);
-            assert!(validate_scalar(&value, &ds, None).is_ok());
+            assert!(validate_scalar(&value, &ds).is_ok());
         }
 
         #[test]
@@ -1192,10 +1167,10 @@ mod tests {
             ds.max_value = Some(42.0);
 
             let exact = json!(42);
-            assert!(validate_scalar(&exact, &ds, None).is_ok());
+            assert!(validate_scalar(&exact, &ds).is_ok());
 
             let not_exact = json!(43);
-            assert!(validate_scalar(&not_exact, &ds, None).is_err());
+            assert!(validate_scalar(&not_exact, &ds).is_err());
         }
 
         #[test]
@@ -1264,8 +1239,6 @@ mod tests {
             assert!(warnings.is_empty());
         }
     }
-
-    // ==================== MAP VALIDATION TESTS ====================
 
     mod map_validation {
         use super::*;

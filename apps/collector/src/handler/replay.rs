@@ -103,21 +103,17 @@ pub(crate) fn normalize_window_id(window_id: Option<String>, session_id: &str) -
 pub(crate) struct ReplayRequest {
     pub(crate) token: String,
     pub(crate) session_id: String,
-    #[serde(default)]
     pub(crate) window_id: Option<String>,
-    #[serde(default, alias = "pageId")]
+    #[serde(alias = "pageId")]
     pub(crate) view_id: Option<String>,
-    #[serde(default)]
     pub(crate) session_start: Option<u64>,
     #[serde(default)]
     pub(crate) is_final: bool,
-    #[serde(default)]
     pub(crate) flush_reason: Option<String>,
-    #[serde(default)]
     pub(crate) batch_id: Option<String>,
     pub(crate) sequence: u64,
     pub(crate) url: String,
-    #[serde(default, alias = "anonymousId")]
+    #[serde(alias = "anonymousId")]
     pub(crate) identifier: Option<SqlxUuid>,
     pub(crate) events: Vec<Value>,
 }

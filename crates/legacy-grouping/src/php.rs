@@ -17,7 +17,7 @@ static ARGS_RE: LazyLock<Regex> =
 
 pub(super) fn group_hash(error_type: &str, stacktrace: &str) -> String {
     hash_frames(error_type, stacktrace, 80, normalize_piece, |line| {
-        !should_ignore_frame(line)
+        !TRACE_TRAILER_RE.is_match(line)
     })
 }
 
@@ -64,10 +64,6 @@ fn normalize_common(input: &str) -> Cow<'_, str> {
 
 fn basename(path: &str) -> &str {
     path.rsplit(['/', '\\']).next().unwrap_or(path)
-}
-
-fn should_ignore_frame(line: &str) -> bool {
-    TRACE_TRAILER_RE.is_match(line)
 }
 
 #[cfg(test)]

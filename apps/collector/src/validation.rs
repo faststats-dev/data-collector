@@ -228,13 +228,7 @@ fn validate_scalar(v: &Value, ds: &DataSource) -> Result<(), &'static str> {
 }
 
 fn extract_number(v: &Value) -> Option<f64> {
-    if let Some(n) = v.as_f64() {
-        Some(n)
-    } else if let Some(s) = v.as_str() {
-        s.parse::<f64>().ok()
-    } else {
-        None
-    }
+    v.as_f64().or_else(|| v.as_str()?.parse().ok())
 }
 
 #[cfg(test)]
@@ -523,7 +517,6 @@ mod tests {
             assert!(validate_scalar(&value, &ds).is_err());
         }
 
-        // Float constraint tests
         #[test]
         fn allows_float_when_permitted() {
             let mut ds = make_data_source("number");
@@ -552,12 +545,10 @@ mod tests {
         fn allows_float_ending_in_zero_when_float_not_permitted() {
             let mut ds = make_data_source("number");
             ds.allow_float = Some(false);
-            // 42.0 has fract() == 0.0, so it should be allowed
             let value = json!(42.0);
             assert!(validate_scalar(&value, &ds).is_ok());
         }
 
-        // Negative constraint tests
         #[test]
         fn allows_negative_when_permitted() {
             let mut ds = make_data_source("number");
@@ -590,7 +581,6 @@ mod tests {
             assert!(validate_scalar(&value, &ds).is_ok());
         }
 
-        // Min/max constraint tests
         #[test]
         fn validates_number_above_min() {
             let mut ds = make_data_source("number");
@@ -666,7 +656,6 @@ mod tests {
             assert!(validate_scalar(&value, &ds).is_err());
         }
 
-        // NaN and Infinity tests
         #[test]
         fn rejects_infinity() {
             let ds = make_data_source("number");
@@ -692,7 +681,6 @@ mod tests {
             assert!(result.is_err());
         }
 
-        // Combined constraints
         #[test]
         fn validates_with_multiple_constraints() {
             let mut ds = make_data_source("number");
@@ -717,7 +705,6 @@ mod tests {
             assert!(validate_scalar(&above_max, &ds).is_err());
         }
 
-        // Large numbers
         #[test]
         fn validates_large_number() {
             let ds = make_data_source("number");
@@ -1011,10 +998,8 @@ mod tests {
             let mut data = HashMap::new();
             data.insert("field".to_string(), json!("test"));
 
-            // Should not panic, regex just won't be applied
             let (valid, _warnings) = validate_and_filter_payload(data, &ds_map);
 
-            // Field should still be valid since regex couldn't be compiled
             assert!(valid.contains_key("field"));
         }
 
@@ -1143,11 +1128,9 @@ mod tests {
         fn handles_special_float_values() {
             let ds = make_data_source("number");
 
-            // Negative zero
             let neg_zero = json!(-0.0);
             assert!(validate_scalar(&neg_zero, &ds).is_ok());
 
-            // Very small positive
             let tiny = json!(f64::MIN_POSITIVE);
             assert!(validate_scalar(&tiny, &ds).is_ok());
         }
@@ -1155,7 +1138,6 @@ mod tests {
         #[test]
         fn handles_number_at_float_precision_boundary() {
             let ds = make_data_source("number");
-            // Large integer that might lose precision as float
             let value = json!(9007199254740993_i64);
             assert!(validate_scalar(&value, &ds).is_ok());
         }

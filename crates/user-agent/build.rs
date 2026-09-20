@@ -80,8 +80,7 @@ fn generate(rules: &Rules) -> String {
         };
         writeln!(
             output,
-            "    DeviceRule {{ regex: {}, is_bot: {} }},",
-            literal(&regex),
+            "    DeviceRule {{ regex: {regex:?}, is_bot: {} }},",
             rule.device_replacement.as_deref() == Some("Spider"),
         )
         .unwrap();
@@ -95,24 +94,13 @@ fn generate_rules(output: &mut String, name: &str, rules: &[ParserRule]) {
     for rule in rules {
         writeln!(
             output,
-            "    Rule {{ regex: {}, replacement: {}, v1_replacement: {}, v2_replacement: {} }},",
-            literal(&rewrite_regex(&rule.regex)),
-            optional_literal(rule.replacement.as_deref()),
-            optional_literal(rule.v1_replacement.as_deref()),
-            optional_literal(rule.v2_replacement.as_deref()),
+            "    Rule {{ regex: {:?}, replacement: {:?}, v1_replacement: {:?}, v2_replacement: {:?} }},",
+            rewrite_regex(&rule.regex),
+            rule.replacement,
+            rule.v1_replacement,
+            rule.v2_replacement,
         )
         .unwrap();
     }
     output.push_str("];\n\n");
-}
-
-fn optional_literal(value: Option<&str>) -> String {
-    value.map_or_else(
-        || "None".to_owned(),
-        |value| format!("Some({})", literal(value)),
-    )
-}
-
-fn literal(value: &str) -> String {
-    format!("{value:?}")
 }

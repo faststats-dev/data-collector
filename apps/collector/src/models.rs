@@ -34,13 +34,11 @@ pub struct Error {
 pub struct ErrorTracking {
     #[serde(flatten)]
     pub error: Error,
-    #[serde(default)]
     pub count: Option<i32>,
-    #[serde(default, rename = "buildId")]
+    #[serde(rename = "buildId")]
     pub build_id: Option<String>,
-    #[serde(default)]
     pub context: Option<Value>,
-    #[serde(default, rename = "sdkVersion", alias = "sdk_version")]
+    #[serde(rename = "sdkVersion", alias = "sdk_version")]
     pub sdk_version: Option<String>,
     #[serde(default, skip_deserializing)]
     pub session_id: Option<String>,
@@ -54,11 +52,10 @@ pub struct Request {
     pub server_id: String,
     pub data: HashMap<String, Value>,
     pub errors: Option<Vec<ErrorTracking>>,
-    #[serde(default, rename = "sdkVersion", alias = "sdk_version")]
+    #[serde(rename = "sdkVersion", alias = "sdk_version")]
     pub sdk_version: Option<String>,
-    #[serde(default)]
     pub context: Option<Value>,
-    #[serde(default, rename = "project_name")]
+    #[serde(rename = "project_name")]
     pub _project_name: Option<String>,
 }
 

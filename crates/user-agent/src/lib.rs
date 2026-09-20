@@ -155,11 +155,9 @@ fn resolve_family(captures: &Captures<'_>, replacement: Option<&str>) -> String 
 }
 
 fn resolve(captures: &Captures<'_>, replacement: Option<&str>, fallback: usize) -> String {
-    match replacement.filter(|replacement| !replacement.trim().is_empty()) {
-        Some(template) if has_substitution(template) => expand(captures, template),
-        Some(replacement) => replacement.to_owned(),
-        None => capture(captures, fallback).unwrap_or_default().to_owned(),
-    }
+    resolve_optional(captures, replacement, fallback)
+        .unwrap_or_default()
+        .into_owned()
 }
 
 fn resolve_optional<'a>(

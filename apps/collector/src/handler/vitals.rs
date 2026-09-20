@@ -33,66 +33,17 @@ pub(crate) struct WebVitalsMetadata {
 pub(crate) struct WebVitalMetric {
     pub(crate) metric: String,
     pub(crate) value: f64,
-    #[serde(default)]
     pub(crate) attributes: Option<HashMap<String, Value>>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct WebVitalRequest {
-    #[serde(default)]
     pub(crate) token: Option<String>,
     pub(crate) vitals: Vec<WebVitalMetric>,
-    #[serde(default)]
     pub(crate) metadata: Option<WebVitalsMetadata>,
-    #[serde(default)]
     pub(crate) session_id: Option<String>,
-    #[serde(default)]
     pub(crate) window_id: Option<String>,
-}
-
-struct WebVitalDimensions<'a> {
-    device: &'a str,
-    os: &'a str,
-    os_version: Option<String>,
-    browser: &'a str,
-    browser_version: Option<String>,
-    url: &'a str,
-}
-
-fn non_empty_owned(value: &str) -> Option<String> {
-    if value.is_empty() {
-        None
-    } else {
-        Some(value.to_owned())
-    }
-}
-
-fn resolve_dimensions<'a>(
-    metadata: Option<&'a WebVitalsMetadata>,
-    ua_info: Option<&'a UserAgentInfo>,
-) -> WebVitalDimensions<'a> {
-    let device = metadata
-        .and_then(|m| m.device.as_deref())
-        .or_else(|| ua_info.map(|info| info.device))
-        .unwrap_or(UNKNOWN_DIMENSION);
-    let os = metadata
-        .and_then(|m| m.os.as_deref())
-        .or_else(|| ua_info.map(|info| info.os.as_str()))
-        .unwrap_or(UNKNOWN_DIMENSION);
-    let browser = metadata
-        .and_then(|m| m.browser.as_deref())
-        .or_else(|| ua_info.map(|info| info.browser.as_str()))
-        .unwrap_or(UNKNOWN_DIMENSION);
-
-    WebVitalDimensions {
-        device,
-        os,
-        os_version: ua_info.and_then(|info| non_empty_owned(&info.os_version)),
-        browser,
-        browser_version: ua_info.and_then(|info| non_empty_owned(&info.browser_version)),
-        url: metadata.and_then(|m| m.url.as_deref()).unwrap_or(""),
-    }
 }
 
 pub(crate) fn build_web_vital_rows(
@@ -112,7 +63,26 @@ pub(crate) fn build_web_vital_rows(
         return Err("Invalid web vital metric");
     }
 
-    let dimensions = resolve_dimensions(request.metadata.as_ref(), ua_info);
+    let metadata = request.metadata.as_ref();
+    let device = metadata
+        .and_then(|m| m.device.as_deref())
+        .or_else(|| ua_info.map(|info| info.device))
+        .unwrap_or(UNKNOWN_DIMENSION);
+    let os = metadata
+        .and_then(|m| m.os.as_deref())
+        .or_else(|| ua_info.map(|info| info.os.as_str()))
+        .unwrap_or(UNKNOWN_DIMENSION);
+    let browser = metadata
+        .and_then(|m| m.browser.as_deref())
+        .or_else(|| ua_info.map(|info| info.browser.as_str()))
+        .unwrap_or(UNKNOWN_DIMENSION);
+    let os_version = ua_info
+        .map(|info| info.os_version.as_str())
+        .filter(|v| !v.is_empty());
+    let browser_version = ua_info
+        .map(|info| info.browser_version.as_str())
+        .filter(|v| !v.is_empty());
+    let url = metadata.and_then(|m| m.url.as_deref()).unwrap_or("");
     let now = chrono::Utc::now();
     Ok(request
         .vitals
@@ -122,13 +92,13 @@ pub(crate) fn build_web_vital_rows(
             project_id,
             metric: vital.metric.clone(),
             value: vital.value,
-            device: Some(dimensions.device.to_owned()),
+            device: Some(device.to_owned()),
             country: country.map(str::to_owned),
-            os: Some(dimensions.os.to_owned()),
-            os_version: dimensions.os_version.clone(),
-            browser: Some(dimensions.browser.to_owned()),
-            browser_version: dimensions.browser_version.clone(),
-            url: dimensions.url.to_owned(),
+            os: Some(os.to_owned()),
+            os_version: os_version.map(str::to_owned),
+            browser: Some(browser.to_owned()),
+            browser_version: browser_version.map(str::to_owned),
+            url: url.to_owned(),
             attributes: vital
                 .attributes
                 .as_ref()

@@ -21,24 +21,18 @@ use tracing::warn;
 #[serde(rename_all = "camelCase")]
 pub(crate) struct WebRequest {
     pub(crate) token: Option<String>,
-    #[serde(default, alias = "identifier", alias = "anonymousId")]
+    #[serde(alias = "identifier", alias = "anonymousId")]
     pub(crate) user_id: Option<Uuid>,
     #[serde(default)]
     pub(crate) properties: HashMap<String, Value>,
     #[serde(default, flatten)]
     pub(crate) data: HashMap<String, Value>,
     pub(crate) errors: Option<Vec<ErrorTracking>>,
-    #[serde(default)]
     pub(crate) session_id: Option<String>,
-    #[serde(default)]
     pub(crate) build_id: Option<String>,
-    #[serde(default)]
     pub(crate) window_id: Option<String>,
-    #[serde(default)]
     pub(crate) sdk_name: Option<String>,
-    #[serde(default)]
     pub(crate) sdk_version: Option<String>,
-    #[serde(default)]
     pub(crate) context: Option<Value>,
 }
 
@@ -93,10 +87,8 @@ pub async fn web(
             .map(String::from)
     });
 
-    // Extract known row fields before serializing event properties.
     let mut known = extract_known_fields(&mut data, WEB_EVENT_FIELDS);
     properties.extend(data);
-    let warnings = HashMap::new();
 
     let user_agent = headers
         .get("User-Agent")
@@ -220,7 +212,7 @@ pub async fn web(
         }
     }
 
-    success_response(warnings)
+    success_response(HashMap::new())
 }
 
 pub(crate) async fn stamp_person_identity(

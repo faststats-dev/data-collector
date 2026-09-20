@@ -49,9 +49,7 @@ pub fn build_occurrence(input: OccurrenceInput<'_>, error: ErrorTracking) -> Err
     ErrorOccurrenceV3Row {
         timestamp: Utc::now(),
         project_id: input.project_id,
-        // TODO(error-tracking-v3): hardcoded to "prod" while v3 is being tested.
-        // Replace this with the SDK/request-provided environment once grouping and
-        // release behavior are verified in production data.
+        // TODO(error-tracking-v3): use the request environment after production validation.
         environment: "prod".to_string(),
         language: input.language.as_str().to_owned(),
         release: build_id.unwrap_or_else(|| input.release.unwrap_or_default().to_owned()),
@@ -149,9 +147,7 @@ fn serialize_context(context: &Value) -> String {
 fn merge_context_values(base_context: Value, error_context: Value) -> Value {
     match (base_context, error_context) {
         (Value::Object(mut base), Value::Object(error)) => {
-            for (key, value) in error {
-                base.insert(key, value);
-            }
+            base.extend(error);
             Value::Object(base)
         }
         (Value::Object(mut base), error) => {
@@ -159,9 +155,7 @@ fn merge_context_values(base_context: Value, error_context: Value) -> Value {
             Value::Object(base)
         }
         (base, Value::Object(mut error)) => {
-            if !matches!(base, Value::Object(ref object) if object.is_empty()) {
-                error.insert("request".to_string(), base);
-            }
+            error.insert("request".to_string(), base);
             Value::Object(error)
         }
         (base, error) => {
@@ -180,7 +174,7 @@ mod tests {
         occurrence_context,
     };
     use crate::models::{Error, ErrorTracking};
-    use serde_json::json;
+    use serde_json::{Value, json};
     use uuid::Uuid;
 
     #[test]
@@ -406,5 +400,35 @@ mod tests {
                 "component": "pay-button"
             })
         );
+    }
+
+    #[test]
+    fn occurrence_context_preserves_non_object_values() {
+        for (base, error, expected) in [
+            (json!({}), json!({"code": 1}), json!({"code": 1})),
+            (
+                Value::Null,
+                json!({"code": 1}),
+                json!({"request": null, "code": 1}),
+            ),
+            (
+                json!([1]),
+                json!({"request": "old"}),
+                json!({"request": [1]}),
+            ),
+            (
+                json!({"page": "/"}),
+                json!("failed"),
+                json!({"page": "/", "error": "failed"}),
+            ),
+            (
+                json!(false),
+                json!(42),
+                json!({"request": false, "error": 42}),
+            ),
+        ] {
+            let context = occurrence_context(&base, Some(error));
+            assert_eq!(serde_json::from_str::<Value>(&context).unwrap(), expected);
+        }
     }
 }

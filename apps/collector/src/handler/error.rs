@@ -19,21 +19,15 @@ use tracing::warn;
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ErrorRequest {
     errors: Vec<ErrorTracking>,
-    #[serde(default)]
     identifier: Option<String>,
-    #[serde(default)]
     session_id: Option<String>,
-    #[serde(default)]
     window_id: Option<String>,
-    #[serde(default)]
     build_id: Option<String>,
-    #[serde(default)]
     context: Option<Value>,
-    #[serde(default, alias = "sdk_name")]
+    #[serde(alias = "sdk_name")]
     sdk_name: Option<String>,
-    #[serde(default, alias = "sdk_version")]
+    #[serde(alias = "sdk_version")]
     sdk_version: Option<String>,
-    #[serde(default)]
     language: Option<String>,
 }
 

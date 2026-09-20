@@ -132,7 +132,15 @@ async fn handle_message(
                     metrics::counter!("replay_first_sessions_total").increment(1);
                 }
             }
-            apply_pending(pool, &key, pending).await
+            if let Some(item) = pending.remove(&key) {
+                let applied = ReplayStorage::apply_session_patch(pool, &item.patch)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                if !applied {
+                    pending.insert(key, item);
+                }
+            }
+            Ok(())
         }
         ReplayCommand::SessionPatch(patch) => {
             let applied = ReplayStorage::apply_session_patch(pool, &patch)
@@ -155,20 +163,4 @@ async fn handle_message(
             Ok(())
         }
     }
-}
-
-async fn apply_pending(
-    pool: &sqlx::PgPool,
-    key: &str,
-    pending: &mut HashMap<String, PendingPatch>,
-) -> Result<(), String> {
-    if let Some(item) = pending.remove(key) {
-        let applied = ReplayStorage::apply_session_patch(pool, &item.patch)
-            .await
-            .map_err(|error| error.to_string())?;
-        if !applied {
-            pending.insert(key.to_owned(), item);
-        }
-    }
-    Ok(())
 }

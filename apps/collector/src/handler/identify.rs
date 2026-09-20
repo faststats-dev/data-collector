@@ -17,18 +17,13 @@ use std::collections::HashMap;
 #[serde(rename_all = "camelCase")]
 pub(crate) struct IdentifyRequest {
     pub(crate) token: Option<String>,
-    #[serde(default, alias = "anonymousId")]
+    #[serde(alias = "anonymousId")]
     pub(crate) identifier: Option<Uuid>,
     pub(crate) external_id: String,
-    #[serde(default)]
     pub(crate) email: Option<String>,
-    #[serde(default)]
     pub(crate) name: Option<String>,
-    #[serde(default)]
     pub(crate) phone: Option<String>,
-    #[serde(default)]
     pub(crate) avatar_url: Option<String>,
-    #[serde(default)]
     pub(crate) traits: Option<Map<String, Value>>,
     #[serde(default)]
     pub(crate) replace_traits: bool,

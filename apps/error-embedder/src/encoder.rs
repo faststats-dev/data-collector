@@ -74,12 +74,9 @@ impl Encoder {
         }
         if !missing.is_empty() {
             let model = self.model.clone();
-            let texts = missing
-                .iter()
-                .map(|(_, text)| text.clone())
-                .collect::<Vec<_>>();
+            let (missing_keys, texts): (Vec<_>, Vec<_>) = missing.into_iter().unzip();
             let vectors = tokio::task::spawn_blocking(move || model.embed_batch(&texts)).await??;
-            for ((key, _), (vector, _)) in missing.into_iter().zip(vectors) {
+            for (key, (vector, _)) in missing_keys.into_iter().zip(vectors) {
                 if let Some(cache) = &mut self.redis {
                     cache.set(&key, &vector).await;
                 }

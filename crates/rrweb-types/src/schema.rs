@@ -48,7 +48,6 @@ impl<'de> Deserialize<'de> for Event {
             kind: u8,
             data: Value,
             timestamp: f64,
-            #[serde(default)]
             delay: Option<f64>,
         }
 
@@ -187,7 +186,7 @@ pub struct MutationData {
     pub attributes: Vec<AttributeMutation>,
     pub removes: Vec<RemovedNodeMutation>,
     pub adds: Vec<AddedNodeMutation>,
-    #[serde(default, rename = "isAttachIframe")]
+    #[serde(rename = "isAttachIframe")]
     pub is_attach_iframe: Option<bool>,
 }
 
@@ -245,7 +244,6 @@ where
 pub struct RemovedNodeMutation {
     pub parent_id: i64,
     pub id: i64,
-    #[serde(default)]
     pub is_shadow: Option<bool>,
 }
 
@@ -253,7 +251,6 @@ pub struct RemovedNodeMutation {
 #[serde(rename_all = "camelCase")]
 pub struct AddedNodeMutation {
     pub parent_id: i64,
-    #[serde(default)]
     pub previous_id: Option<i64>,
     #[serde(deserialize_with = "required_option")]
     pub next_id: Option<i64>,
@@ -280,9 +277,7 @@ pub struct MouseInteractionData {
     #[serde(rename = "type", deserialize_with = "interaction_type")]
     pub kind: u8,
     pub id: i64,
-    #[serde(default)]
     pub x: Option<f64>,
-    #[serde(default)]
     pub y: Option<f64>,
     #[serde(default, deserialize_with = "optional_pointer_type")]
     pub pointer_type: Option<u8>,
@@ -326,7 +321,6 @@ pub struct InputData {
     pub id: i64,
     pub text: String,
     pub is_checked: bool,
-    #[serde(default)]
     pub user_triggered: Option<bool>,
 }
 
@@ -336,16 +330,11 @@ pub struct MediaInteractionData {
     #[serde(rename = "type", deserialize_with = "media_interaction_type")]
     pub kind: u8,
     pub id: i64,
-    #[serde(default)]
     pub current_time: Option<f64>,
-    #[serde(default)]
     pub volume: Option<f64>,
-    #[serde(default)]
     pub muted: Option<bool>,
-    #[serde(default)]
     #[serde(rename = "loop")]
     pub loop_: Option<bool>,
-    #[serde(default)]
     pub playback_rate: Option<f64>,
 }
 
@@ -371,24 +360,17 @@ where
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StyleSheetRuleData {
-    #[serde(default)]
     pub id: Option<i64>,
-    #[serde(default)]
     pub style_id: Option<i64>,
-    #[serde(default)]
     pub removes: Option<Vec<StyleSheetDeleteRule>>,
-    #[serde(default)]
     pub adds: Option<Vec<StyleSheetAddRule>>,
-    #[serde(default)]
     pub replace: Option<String>,
-    #[serde(default)]
     pub replace_sync: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct StyleSheetAddRule {
     pub rule: String,
-    #[serde(default)]
     pub index: Option<Index>,
 }
 
@@ -407,14 +389,10 @@ pub enum Index {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StyleDeclarationData {
-    #[serde(default)]
     pub id: Option<i64>,
-    #[serde(default)]
     pub style_id: Option<i64>,
     pub index: Vec<u64>,
-    #[serde(default)]
     pub set: Option<StyleDeclarationSet>,
-    #[serde(default)]
     pub remove: Option<StyleDeclarationRemove>,
 }
 
@@ -449,13 +427,9 @@ impl<'de> Deserialize<'de> for CanvasMutationData {
             id: i64,
             #[serde(rename = "type", deserialize_with = "canvas_context")]
             kind: u8,
-            #[serde(default)]
             commands: Option<Vec<CanvasMutationCommand>>,
-            #[serde(default)]
             property: Option<String>,
-            #[serde(default)]
             args: Option<Vec<Value>>,
-            #[serde(default)]
             setter: Option<bool>,
         }
 
@@ -499,7 +473,6 @@ where
 pub struct CanvasMutationCommand {
     pub property: String,
     pub args: Vec<Value>,
-    #[serde(default)]
     pub setter: Option<bool>,
 }
 
@@ -509,7 +482,6 @@ pub struct FontData {
     pub family: String,
     pub font_source: String,
     pub buffer: bool,
-    #[serde(default)]
     pub descriptors: Option<Value>,
 }
 
@@ -531,7 +503,6 @@ pub struct SelectionRange {
 #[serde(rename_all = "camelCase")]
 pub struct AdoptedStyleSheetData {
     pub id: i64,
-    #[serde(default)]
     pub styles: Option<Vec<AdoptedStyleSheet>>,
     pub style_ids: Vec<i64>,
 }
@@ -545,7 +516,6 @@ pub struct AdoptedStyleSheet {
 
 #[derive(Debug, Deserialize)]
 pub struct CustomElementData {
-    #[serde(default)]
     pub define: Option<CustomElementDefinition>,
 }
 
@@ -592,11 +562,8 @@ impl<'de> Deserialize<'de> for SerializedNode {
 #[serde(rename_all = "camelCase")]
 pub struct NodeMetadata {
     pub id: i64,
-    #[serde(default)]
     pub root_id: Option<i64>,
-    #[serde(default)]
     pub is_shadow_host: Option<bool>,
-    #[serde(default)]
     pub is_shadow: Option<bool>,
 }
 
@@ -606,7 +573,6 @@ pub struct DocumentNode {
     #[serde(flatten)]
     pub metadata: NodeMetadata,
     pub child_nodes: Vec<SerializedNode>,
-    #[serde(default)]
     pub compat_mode: Option<String>,
 }
 
@@ -628,11 +594,8 @@ pub struct ElementNode {
     pub tag_name: String,
     pub attributes: HashMap<String, NodeAttributeValue>,
     pub child_nodes: Vec<SerializedNode>,
-    #[serde(default)]
     pub is_svg: Option<bool>,
-    #[serde(default)]
     pub need_block: Option<bool>,
-    #[serde(default)]
     pub is_custom: Option<bool>,
 }
 
@@ -663,7 +626,6 @@ pub struct TextNode {
     #[serde(flatten)]
     pub metadata: NodeMetadata,
     pub text_content: String,
-    #[serde(default)]
     pub is_style: Option<bool>,
 }
 
@@ -720,7 +682,6 @@ impl<'de> Deserialize<'de> for AssetData {
 pub struct LoadedAssetData {
     pub url: String,
     pub payload: SerializedAsset,
-    #[serde(default)]
     pub timestamp: Option<f64>,
 }
 
@@ -732,7 +693,6 @@ pub struct FailedAssetData {
 
 #[derive(Debug, Deserialize)]
 pub struct AssetFailure {
-    #[serde(default)]
     pub status: Option<u16>,
     pub message: String,
 }
@@ -766,17 +726,12 @@ where
 #[derive(Debug, Deserialize)]
 pub struct SerializedCanvasAsset {
     pub rr_type: String,
-    #[serde(default)]
     pub base64: Option<String>,
-    #[serde(default)]
     pub data: Option<Vec<Value>>,
-    #[serde(default, rename = "type")]
+    #[serde(rename = "type")]
     pub mime_type: Option<String>,
-    #[serde(default)]
     pub src: Option<String>,
-    #[serde(default)]
     pub args: Option<Vec<Value>>,
-    #[serde(default)]
     pub index: Option<u64>,
 }
 

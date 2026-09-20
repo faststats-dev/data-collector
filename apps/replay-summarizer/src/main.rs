@@ -63,9 +63,10 @@ async fn attempt(
     event: &FinalReplay,
 ) -> Result<()> {
     if let Err(error) = process(pool, objects, event).await {
+        let error = format!("{error:#}");
         tracing::error!(job_id = %event.job_id, %error, "Replay processing failed");
         sqlx::query("UPDATE replay_summary_jobs SET attempts = attempts + 1, last_error = $2, next_attempt_at = NOW() + interval '1 minute', processed = attempts >= 2, processed_at = CASE WHEN attempts >= 2 THEN NOW() ELSE NULL END WHERE id = $1 AND NOT processed")
-            .bind(event.job_id).bind(error.to_string()).execute(pool).await?;
+            .bind(event.job_id).bind(error).execute(pool).await?;
     }
     Ok(())
 }

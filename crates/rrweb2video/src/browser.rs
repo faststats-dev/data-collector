@@ -49,7 +49,9 @@ impl Browser {
                 .stdout(Stdio::null())
                 .stderr(Stdio::from(browser_log))
                 .spawn()
-                .context("launch chrome-headless-shell")?,
+                .with_context(|| {
+                    format!("launch chrome-headless-shell at {}", executable.display())
+                })?,
         );
         let deadline = Instant::now() + Duration::from_secs(20);
         let endpoint = loop {
@@ -142,5 +144,25 @@ impl Browser {
             bail!("player JavaScript: {error}");
         }
         Ok(result["result"]["value"].clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Browser;
+
+    #[test]
+    fn launch_error_includes_executable_and_os_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("missing-chromium");
+        let error = match Browser::launch(&executable, 800, 600) {
+            Ok(_) => panic!("missing executable unexpectedly launched"),
+            Err(error) => error,
+        };
+        let cause = error.downcast_ref::<std::io::Error>().unwrap();
+        assert_eq!(cause.kind(), std::io::ErrorKind::NotFound);
+        let message = format!("{error:#}");
+        assert!(message.contains(&executable.display().to_string()));
+        assert!(message.contains(&cause.to_string()));
     }
 }

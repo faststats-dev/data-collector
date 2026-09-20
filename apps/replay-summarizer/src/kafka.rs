@@ -10,7 +10,7 @@ pub fn create_consumer(config: &Config) -> Result<StreamConsumer, String> {
         .set("bootstrap.servers", &config.brokers)
         .set("enable.auto.commit", "false")
         .set("enable.auto.offset.store", "false")
-        .set("auto.offset.reset", "earliest")
+        .set("auto.offset.reset", "latest")
         .set("max.poll.interval.ms", "86400000")
         .set(
             "fetch.message.max.bytes",

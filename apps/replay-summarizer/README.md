@@ -36,8 +36,14 @@ Each session/window, storage generation and chunk-count revision gets a durable
 outbox job. Late chunks reopen the recording and create a new job after another
 quiet period. The outbox is committed before Kafka publication. Duplicate
 messages are serialized on the job row and skipped after processing. Old/deleted
-storage revisions and disabled/nonmatching settings are skipped. Existing
-recordings can also be queued when deploying this worker.
+storage revisions and disabled/nonmatching settings are skipped.
+
+Only Kafka snapshot/terminal messages arm a durable `finalize_after` timer before
+acknowledgement. Historical PostgreSQL rows have no timer and are never queued.
+The migration leaves every existing job's `kafka_triggered` flag false, so jobs
+from the former database scan are neither published nor processed/retried.
+New Kafka groups start at `latest`; existing groups retain their committed offsets.
+No automatic historical discovery or offset reset is performed.
 
 Browser delivery remains best effort: inactivity cannot prove that every client
 batch arrived. Empty terminal markers consume SDK sequence numbers without an S3

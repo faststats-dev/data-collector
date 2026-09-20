@@ -63,6 +63,7 @@ impl ReplayStorage {
         &self,
         pool: &sqlx::PgPool,
         mut input: ReplayChunkInput,
+        quiet_seconds: i32,
     ) -> Result<bool, ReplayStorageError> {
         if !replay_storage_generation_is_active(pool, input.project_id, input.storage_generation)
             .await?
@@ -303,13 +304,14 @@ impl ReplayStorage {
                     has_errors,
                     has_poor_vitals,
                     is_complete,
-                    finalized_at
+                    finalized_at,
+                    finalize_after
                 ) VALUES (
                     $1, $2, $3, $4, $5,
                     COALESCE(timezone('UTC', to_timestamp($7::double precision / 1000.0)), timezone('UTC', to_timestamp($6::double precision / 1000.0))),
                     COALESCE(timezone('UTC', to_timestamp($8::double precision / 1000.0)), timezone('UTC', to_timestamp($7::double precision / 1000.0)), timezone('UTC', to_timestamp($6::double precision / 1000.0))),
                     $6, $7, $8, $9, $10, 1, $11, $12, $13, $14, $15, $16, $17, $18, $19, false, false,
-                    $20, CASE WHEN $20 THEN NOW() ELSE NULL END
+                    false, NULL, NOW() + make_interval(secs => $20::integer)
                 )
                 ON CONFLICT (project_id, session_id, window_id) DO UPDATE
                 SET
@@ -350,6 +352,7 @@ impl ReplayStorage {
                     os = COALESCE(EXCLUDED.os, replay_sessions.os),
                     is_complete = false,
                     finalized_at = NULL,
+                    finalize_after = EXCLUDED.finalize_after,
                     updated_at = NOW()
                 "#,
             )
@@ -372,7 +375,7 @@ impl ReplayStorage {
             .bind(input.browser.as_deref())
             .bind(input.country.as_deref())
             .bind(input.os.as_deref())
-            .bind(false)
+            .bind(quiet_seconds)
             .execute(&mut *tx)
             .await?;
 
@@ -435,6 +438,7 @@ impl ReplayStorage {
         session_id: &str,
         window_id: &str,
         storage_generation: i32,
+        quiet_seconds: i32,
     ) -> Result<(), ReplayStorageError> {
         let mut tx = pool.begin().await?;
         // Terminal hints only extend the quiet period. They neither prove delivery
@@ -446,13 +450,14 @@ impl ReplayStorage {
         sqlx::query(
             r#"
             UPDATE replay_sessions
-            SET updated_at = NOW()
-            WHERE project_id = $1 AND session_id = $2 AND window_id = $3
+            SET updated_at = NOW(), finalize_after = NOW() + make_interval(secs => $4::integer)
+            WHERE project_id = $1 AND session_id = $2 AND window_id = $3 AND deleted_at IS NULL
             "#,
         )
         .bind(project_id)
         .bind(session_id)
         .bind(window_id)
+        .bind(quiet_seconds)
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;

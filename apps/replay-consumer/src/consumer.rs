@@ -39,7 +39,6 @@ pub async fn run(config: Config) -> Result<(), String> {
         pool.clone(),
         producer,
         config.final_topic.clone(),
-        config.final_idle_seconds,
     ));
     loop {
         tokio::select! {
@@ -48,7 +47,7 @@ pub async fn run(config: Config) -> Result<(), String> {
             }
             message = consumer.recv() => {
                 let message = message.map_err(|error| format!("Kafka receive failed: {error}"))?;
-                handle_message(&storage, &pool, &message, &mut pending).await?;
+                handle_message(&storage, &pool, &message, &mut pending, config.final_idle_seconds).await?;
                 let partition_blocked = pending.values()
                     .any(|item| item.partition == message.partition());
                 if !partition_blocked {
@@ -72,7 +71,7 @@ fn create_consumer(config: &Config) -> Result<StreamConsumer, String> {
         .set("bootstrap.servers", &config.brokers)
         .set("enable.auto.commit", "false")
         .set("enable.auto.offset.store", "false")
-        .set("auto.offset.reset", "earliest")
+        .set("auto.offset.reset", "latest")
         .set(
             "fetch.message.max.bytes",
             config.max_message_bytes.to_string(),
@@ -104,6 +103,7 @@ async fn handle_message(
     pool: &sqlx::PgPool,
     message: &BorrowedMessage<'_>,
     pending: &mut HashMap<String, PendingPatch>,
+    quiet_seconds: i32,
 ) -> Result<(), String> {
     let Some(payload) = message.payload() else {
         warn!("Skipping Kafka record without a payload");
@@ -130,12 +130,13 @@ async fn handle_message(
                     &chunk.session_id,
                     &chunk.window_id,
                     chunk.storage_generation,
+                    quiet_seconds,
                 )
                 .await
                 .map_err(|error| error.to_string())?;
             } else {
                 let first_for_billing = storage
-                    .store_replay_chunk(pool, *chunk)
+                    .store_replay_chunk(pool, *chunk, quiet_seconds)
                     .await
                     .map_err(|error| error.to_string())?;
                 if first_for_billing {

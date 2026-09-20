@@ -38,7 +38,7 @@ async fn main() -> Result<()> {
     loop {
         tokio::select! {
             _ = retries.tick() => {
-                let rows = sqlx::query("SELECT * FROM replay_summary_jobs WHERE NOT processed AND last_error IS NOT NULL AND next_attempt_at <= NOW() ORDER BY next_attempt_at LIMIT 10").fetch_all(&pool).await?;
+                let rows = sqlx::query("SELECT * FROM replay_summary_jobs WHERE kafka_triggered AND NOT processed AND last_error IS NOT NULL AND next_attempt_at <= NOW() ORDER BY next_attempt_at LIMIT 10").fetch_all(&pool).await?;
                 for row in rows {
                     let event = FinalReplay { job_id: row.get("id"), project_id: row.get("project_id"), session_id: row.get("session_id"), window_id: row.get("window_id"), storage_generation: row.get("storage_generation"), chunk_count: row.get("chunk_count") };
                     attempt(&pool, &objects, &event).await?;
@@ -77,7 +77,7 @@ async fn process(
 ) -> Result<()> {
     let started = Instant::now();
     let mut tx = pool.begin().await?;
-    let job = sqlx::query("SELECT *, next_attempt_at > NOW() AS waiting FROM replay_summary_jobs WHERE id = $1 FOR UPDATE")
+    let job = sqlx::query("SELECT *, next_attempt_at > NOW() AS waiting FROM replay_summary_jobs WHERE id = $1 AND kafka_triggered FOR UPDATE")
         .bind(event.job_id).fetch_optional(&mut *tx).await?;
     let Some(job) = job else {
         return Ok(());
@@ -184,7 +184,7 @@ async fn process(
             processing_seconds = started.elapsed().as_secs_f64(), frames = report.1.frames,
             video_seconds = report.1.video_duration_seconds, "Replay encoded and discarded");
     } else {
-        tracing::info!(job_id = %event.job_id, "Replay skipped by settings or stale storage revision");
+        tracing::debug!(job_id = %event.job_id, "Replay skipped by settings or stale storage revision");
     }
     sqlx::query("UPDATE replay_summary_jobs SET processed = true, processed_at = NOW(), last_error = NULL WHERE id = $1")
         .bind(event.job_id).execute(&mut *tx).await?;

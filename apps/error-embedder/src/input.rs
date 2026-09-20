@@ -1,5 +1,5 @@
-use stack_trace_parser::{Language, SegmentRelation, StackTrace};
 use serde::Deserialize;
+use stack_trace_parser::{Language, SegmentRelation, StackTrace};
 
 use crate::normalize;
 

@@ -12,7 +12,6 @@ const REPLAY_CONTENT_ENCODING: &str = "zstd";
 const ZSTD_COMPRESSION_LEVEL: i32 = 3;
 const REPLAY_COMPRESSION_TIMEOUT: Duration = Duration::from_secs(10);
 
-#[derive(Clone)]
 pub struct ReplayStorage {
     objects: ObjectStore,
 }
@@ -65,18 +64,6 @@ impl ReplayStorage {
         pool: &sqlx::PgPool,
         mut input: ReplayChunkInput,
     ) -> Result<bool, ReplayStorageError> {
-        if !replay_events_are_ordered(&input.events) {
-            input.events.sort_by(replay_event_order_cmp);
-        }
-        let snapshot_id = Uuid::new_v4();
-        let first_event_timestamp_ms = replay_first_event_timestamp_ms(&input.events);
-        let last_event_timestamp_ms = replay_last_event_timestamp_ms(&input.events);
-        let has_full_snapshot = replay_has_full_snapshot(&input.events);
-        let event_count = i32::try_from(input.events.len()).unwrap_or(i32::MAX);
-        let first_sequence = input.first_sequence.unwrap_or(input.sequence);
-        let last_sequence = input.last_sequence.unwrap_or(input.sequence);
-        let client_batch_count = input.client_batch_count.max(1);
-
         if !replay_storage_generation_is_active(pool, input.project_id, input.storage_generation)
             .await?
         {
@@ -112,6 +99,21 @@ impl ReplayStorage {
         if already_stored {
             return Ok(false);
         }
+        if !replay_events_are_ordered(&input.events) {
+            input.events.sort_by(replay_event_order_cmp);
+        }
+        let snapshot_id = Uuid::new_v4();
+        let first_event_timestamp_ms = input.events.iter().find_map(replay_timestamp_ms);
+        let last_event_timestamp_ms = input.events.iter().rev().find_map(replay_timestamp_ms);
+        let has_full_snapshot = input
+            .events
+            .iter()
+            .any(|event| event["type"].as_u64() == Some(2));
+        let event_count = i32::try_from(input.events.len()).unwrap_or(i32::MAX);
+        let first_sequence = input.first_sequence.unwrap_or(input.sequence);
+        let last_sequence = input.last_sequence.unwrap_or(input.sequence);
+        let client_batch_count = input.client_batch_count.max(1);
+
         let click_analysis = crate::clicks::extract(&input.events);
         let route_metadata = replay_route_metadata(&input.events, input.url.as_deref());
         let object_key = replay_object_key(
@@ -122,8 +124,11 @@ impl ReplayStorage {
             input.sequence,
             first_event_timestamp_ms.unwrap_or(0),
         );
-        let (compressed, uncompressed_bytes) = compress_replay_events(input.events).await?;
+        let compressed = compress_replay_events(input.events).await?;
         let compressed_bytes = i64::try_from(compressed.len()).unwrap_or(i64::MAX);
+
+        // This column historically stores compressed size; keep existing accounting.
+        let uncompressed_bytes = compressed_bytes;
 
         let bucket = self.objects.bucket(input.project_id);
         self.objects
@@ -459,7 +464,6 @@ impl ReplayStorage {
     }
 
     pub async fn apply_session_patch(
-        &self,
         pool: &sqlx::PgPool,
         patch: &replay_message::ReplaySessionPatch,
     ) -> Result<bool, ReplayStorageError> {
@@ -484,9 +488,7 @@ impl ReplayStorage {
     }
 }
 
-/// Confirms the project's replay storage is active at `generation`, taking a
-/// `FOR SHARE` lock so the generation cannot change before the caller's
-/// transaction commits. This makes per-statement generation guards unnecessary.
+/// Inside a transaction, the share lock prevents generation changes until commit.
 async fn replay_storage_generation_is_active<'e, E>(
     executor: E,
     project_id: Uuid,
@@ -520,21 +522,17 @@ fn replay_object_key(
     sequence: i64,
     first_event_timestamp_ms: i64,
 ) -> String {
-    let identity = batch_id
-        .map(|value| sha256_hex(&[value.as_bytes()]))
-        .unwrap_or_else(|| sha256_hex(&[window_id.as_bytes(), &sequence.to_be_bytes()]));
-    format!(
-        "{}/{}/{}/{}-{}.json.zst",
-        storage_generation, session_id, window_id, first_event_timestamp_ms, identity
-    )
-}
-
-fn sha256_hex(parts: &[&[u8]]) -> String {
     let mut hasher = Sha256::new();
-    for part in parts {
-        hasher.update(part);
+    if let Some(batch_id) = batch_id {
+        hasher.update(batch_id.as_bytes());
+    } else {
+        hasher.update(window_id.as_bytes());
+        hasher.update(sequence.to_be_bytes());
     }
-    hex::encode(hasher.finalize())
+    let identity = hex::encode(hasher.finalize());
+    format!(
+        "{storage_generation}/{session_id}/{window_id}/{first_event_timestamp_ms}-{identity}.json.zst"
+    )
 }
 
 /// Allowed `flush_reason` metric labels. Anything else is bucketed into
@@ -587,17 +585,13 @@ fn record_replay_chunk_metrics(
         .record(uncompressed_bytes as f64);
 }
 
-fn zstd_json_value_array(events: &[Value]) -> Result<(Vec<u8>, i64), ReplayStorageError> {
+fn zstd_json_value_array(events: &[Value]) -> Result<Vec<u8>, ReplayStorageError> {
     let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), ZSTD_COMPRESSION_LEVEL)?;
     serde_json::to_writer(&mut encoder, events)?;
-    let compressed = encoder.finish()?;
-    // Preserve the stored byte count, which historically measures compressed output.
-    let uncompressed_bytes = i64::try_from(compressed.len()).unwrap_or(i64::MAX);
-
-    Ok((compressed, uncompressed_bytes))
+    Ok(encoder.finish()?)
 }
 
-async fn compress_replay_events(events: Vec<Value>) -> Result<(Vec<u8>, i64), ReplayStorageError> {
+async fn compress_replay_events(events: Vec<Value>) -> Result<Vec<u8>, ReplayStorageError> {
     let task = tokio::task::spawn_blocking(move || zstd_json_value_array(&events));
     tokio::time::timeout(REPLAY_COMPRESSION_TIMEOUT, task)
         .await
@@ -606,43 +600,24 @@ async fn compress_replay_events(events: Vec<Value>) -> Result<(Vec<u8>, i64), Re
 }
 
 fn replay_timestamp_ms(event: &Value) -> Option<i64> {
-    let value = event.get("timestamp")?;
-    if let Some(timestamp) = value.as_i64() {
-        return Some(timestamp);
-    }
-    if let Some(timestamp) = value.as_u64() {
-        return i64::try_from(timestamp).ok();
-    }
-    let timestamp = value.as_f64()?;
-    if timestamp.is_finite() && timestamp >= 0.0 {
-        Some(timestamp.round() as i64)
-    } else {
-        None
-    }
+    event.get("timestamp").and_then(event_integer)
 }
 
 fn replay_sequential_id(event: &Value) -> Option<i64> {
-    let value = event.get("_faststatsSeqId")?;
-    if let Some(sequence) = value.as_i64() {
-        return Some(sequence);
-    }
-    if let Some(sequence) = value.as_u64() {
-        return i64::try_from(sequence).ok();
-    }
-    let sequence = value.as_f64()?;
-    if sequence.is_finite() && sequence >= 0.0 {
-        Some(sequence.round() as i64)
-    } else {
-        None
-    }
+    event.get("_faststatsSeqId").and_then(event_integer)
 }
 
-fn replay_first_event_timestamp_ms(events: &[Value]) -> Option<i64> {
-    events.iter().filter_map(replay_timestamp_ms).min()
-}
-
-fn replay_last_event_timestamp_ms(events: &[Value]) -> Option<i64> {
-    events.iter().filter_map(replay_timestamp_ms).max()
+fn event_integer(value: &Value) -> Option<i64> {
+    if let Some(value) = value.as_i64() {
+        return Some(value);
+    }
+    if let Some(value) = value.as_u64() {
+        return i64::try_from(value).ok();
+    }
+    value
+        .as_f64()
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .map(|value| value.round() as i64)
 }
 
 fn replay_event_order_cmp(left: &Value, right: &Value) -> Ordering {
@@ -655,14 +630,6 @@ fn replay_events_are_ordered(events: &[Value]) -> bool {
     events
         .windows(2)
         .all(|pair| !replay_event_order_cmp(&pair[0], &pair[1]).is_gt())
-}
-
-fn replay_has_full_snapshot(events: &[Value]) -> bool {
-    events.iter().any(|event| {
-        event
-            .get("type")
-            .is_some_and(|value| value.as_u64() == Some(2) || value.as_i64() == Some(2))
-    })
 }
 
 fn replay_route_metadata(events: &[Value], fallback_url: Option<&str>) -> ReplayRouteMetadata {
@@ -694,7 +661,9 @@ fn replay_route_metadata(events: &[Value], fallback_url: Option<&str>) -> Replay
             current_count = 0;
         }
 
-        push_route_once(&mut routes, &mut seen_routes, &current_route);
+        if current_count == 0 && seen_routes.insert(current_route.clone()) {
+            routes.push(current_route.clone());
+        }
         if timestamp.is_some() {
             if current_from.is_none() {
                 current_from = timestamp;
@@ -725,12 +694,6 @@ fn replay_route_metadata(events: &[Value], fallback_url: Option<&str>) -> Replay
         route_spans,
         entry_route,
         exit_route,
-    }
-}
-
-fn push_route_once(routes: &mut Vec<String>, seen_routes: &mut HashSet<String>, route: &str) {
-    if seen_routes.insert(route.to_string()) {
-        routes.push(route.to_string());
     }
 }
 
@@ -782,13 +745,12 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn compression_preserves_events_and_stored_byte_count() {
+    fn compression_preserves_events() {
         for events in [
             vec![],
             vec![json!({"timestamp": 1000, "data": "repeated".repeat(100)})],
         ] {
-            let (compressed, byte_count) = zstd_json_value_array(&events).unwrap();
-            assert_eq!(byte_count, compressed.len() as i64);
+            let compressed = zstd_json_value_array(&events).unwrap();
             let decoded = zstd::stream::decode_all(compressed.as_slice()).unwrap();
             assert_eq!(
                 serde_json::from_slice::<Vec<Value>>(&decoded).unwrap(),
@@ -802,6 +764,33 @@ mod tests {
         let key = replay_object_key(7, "session-1", "window-1", Some("batch-1"), 3, 1234);
         assert!(key.starts_with("7/session-1/window-1/1234-"));
         assert!(key.ends_with(".json.zst"));
+    }
+
+    #[test]
+    fn object_keys_preserve_batch_and_sequence_identity() {
+        assert_eq!(
+            replay_object_key(7, "session-1", "window-1", Some("batch-1"), 3, 1234),
+            "7/session-1/window-1/1234-8f5815465303ca0a3b700c07068ef3ef0bf6f4d8a6cd60bf7220cd3d33e7c77e.json.zst"
+        );
+        assert_eq!(
+            replay_object_key(7, "session-1", "window-1", None, 3, 1234),
+            "7/session-1/window-1/1234-4070b5f677fec2a932773f091193ed1c4c3d5bbfba5924104aed48c8ab939bf4.json.zst"
+        );
+    }
+
+    #[test]
+    fn sorted_timestamp_bounds_skip_invalid_values() {
+        let mut events = [
+            json!({"timestamp": 12.6}),
+            json!({"timestamp": null}),
+            json!({"timestamp": -2}),
+            json!({"timestamp": u64::MAX}),
+            json!({"timestamp": -1.5}),
+            json!({"timestamp": "100"}),
+        ];
+        events.sort_by(replay_event_order_cmp);
+        assert_eq!(events.iter().find_map(replay_timestamp_ms), Some(-2));
+        assert_eq!(events.iter().rev().find_map(replay_timestamp_ms), Some(13));
     }
 
     #[test]

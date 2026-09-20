@@ -108,38 +108,34 @@ async fn handle_message(
     };
 
     match command {
-        ReplayCommand::Snapshot(chunk) if chunk.events.is_empty() => {
-            let key = command_key(chunk.project_id, &chunk.session_id, &chunk.window_id);
-            if !chunk.is_final {
-                return Ok(());
-            }
-            ReplayStorage::finalize_replay_session(
-                pool,
-                chunk.project_id,
-                &chunk.session_id,
-                &chunk.window_id,
-                chunk.storage_generation,
-            )
-            .await
-            .map_err(|error| error.to_string())?;
-            apply_pending(storage, pool, &key, pending).await
-        }
         ReplayCommand::Snapshot(chunk) => {
             let key = command_key(chunk.project_id, &chunk.session_id, &chunk.window_id);
-            storage
-                .store_replay_chunk(pool, *chunk)
+            if chunk.events.is_empty() {
+                if !chunk.is_final {
+                    return Ok(());
+                }
+                ReplayStorage::finalize_replay_session(
+                    pool,
+                    chunk.project_id,
+                    &chunk.session_id,
+                    &chunk.window_id,
+                    chunk.storage_generation,
+                )
                 .await
-                .map(|first_for_billing| {
-                    if first_for_billing {
-                        metrics::counter!("replay_first_sessions_total").increment(1);
-                    }
-                })
                 .map_err(|error| error.to_string())?;
-            apply_pending(storage, pool, &key, pending).await
+            } else {
+                let first_for_billing = storage
+                    .store_replay_chunk(pool, *chunk)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                if first_for_billing {
+                    metrics::counter!("replay_first_sessions_total").increment(1);
+                }
+            }
+            apply_pending(pool, &key, pending).await
         }
         ReplayCommand::SessionPatch(patch) => {
-            let applied = storage
-                .apply_session_patch(pool, &patch)
+            let applied = ReplayStorage::apply_session_patch(pool, &patch)
                 .await
                 .map_err(|error| error.to_string())?;
             if !applied {
@@ -162,14 +158,12 @@ async fn handle_message(
 }
 
 async fn apply_pending(
-    storage: &ReplayStorage,
     pool: &sqlx::PgPool,
     key: &str,
     pending: &mut HashMap<String, PendingPatch>,
 ) -> Result<(), String> {
     if let Some(item) = pending.remove(key) {
-        let applied = storage
-            .apply_session_patch(pool, &item.patch)
+        let applied = ReplayStorage::apply_session_patch(pool, &item.patch)
             .await
             .map_err(|error| error.to_string())?;
         if !applied {

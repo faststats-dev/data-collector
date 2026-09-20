@@ -1,7 +1,6 @@
 //! Versioned, privacy-safe replay click analysis. No DOM text or attributes are retained.
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashSet;
 use uuid::Uuid;
 
 const VERSION: u32 = 1;
@@ -27,12 +26,6 @@ pub struct ClickAnalysis {
 pub fn extract(events: &[Value]) -> ClickAnalysis {
     let mut signals: Vec<Signal> = Vec::new();
     for event in events {
-        let Some(timestamp) = event["timestamp"]
-            .as_f64()
-            .filter(|t| t.is_finite() && *t >= 0.0)
-        else {
-            continue;
-        };
         let data = &event["data"];
         let kind = event["type"].as_u64();
         let source = data["source"].as_u64();
@@ -43,6 +36,12 @@ pub fn extract(events: &[Value]) -> ClickAnalysis {
         if !click && !boundary {
             continue;
         }
+        let Some(timestamp) = event["timestamp"]
+            .as_f64()
+            .filter(|t| t.is_finite() && *t >= 0.0)
+        else {
+            continue;
+        };
         let (target, x, y) = if click {
             let (Some(target), Some(x), Some(y)) = (
                 data["id"].as_i64().filter(|id| *id > 0),
@@ -78,7 +77,10 @@ pub fn extract(events: &[Value]) -> ClickAnalysis {
 pub fn summarize(chunks: &[ClickAnalysis]) -> (i32, i32) {
     let mut signals: Vec<_> = chunks.iter().flat_map(|chunk| &chunk.signals).collect();
     signals.sort_by(|a, b| a.timestamp.total_cmp(&b.timestamp).then(a.seq.cmp(&b.seq)));
-    let mut seen = HashSet::new();
+    // Equal timestamp/sequence pairs are adjacent after the stable sort.
+    signals.dedup_by(|a, b| {
+        a.seq.is_some() && a.seq == b.seq && a.timestamp.to_bits() == b.timestamp.to_bits()
+    });
     let mut pending: Vec<&Signal> = Vec::new();
     let mut episode: Option<(&Signal, f64)> = None;
     let mut clicks = 0i32;
@@ -87,11 +89,6 @@ pub fn summarize(chunks: &[ClickAnalysis]) -> (i32, i32) {
         a.target == b.target && (a.x - b.x).powi(2) + (a.y - b.y).powi(2) <= RADIUS_SQUARED
     };
     for signal in signals {
-        if let Some(seq) = signal.seq {
-            if !seen.insert((signal.timestamp.to_bits(), seq)) {
-                continue;
-            }
-        }
         if signal.target.is_none() {
             pending.clear();
             episode = None;
@@ -135,11 +132,16 @@ pub async fn refresh(
         && rows
             .iter()
             .all(|row| row.as_ref().is_some_and(|row| row.version == VERSION));
-    let chunks: Vec<_> = rows.into_iter().flatten().map(|row| row.0).collect();
-    let (clicks, rage) = summarize(&chunks);
+    let (clicks, rage) = if complete {
+        let chunks: Vec<_> = rows.into_iter().flatten().map(|row| row.0).collect();
+        let (clicks, rage) = summarize(&chunks);
+        (Some(clicks), Some(rage))
+    } else {
+        (None, None)
+    };
     sqlx::query("UPDATE replay_sessions SET click_count=$4, rage_click_count=$5 WHERE project_id=$1 AND session_id=$2 AND window_id=$3")
         .bind(project).bind(session).bind(window)
-        .bind(complete.then_some(clicks)).bind(complete.then_some(rage)).execute(&mut **tx).await?;
+        .bind(clicks).bind(rage).execute(&mut **tx).await?;
     Ok(())
 }
 

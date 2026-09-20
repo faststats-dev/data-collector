@@ -4,9 +4,6 @@ use aws_sdk_s3::error::DisplayErrorContext;
 use aws_sdk_s3::primitives::ByteStream;
 use uuid::Uuid;
 
-const CONTENT_ENCODING: &str = "zstd";
-
-#[derive(Clone)]
 pub struct ObjectStore {
     client: Client,
     bucket_prefix: String,
@@ -64,7 +61,7 @@ impl ObjectStore {
             .bucket(bucket)
             .key(key)
             .content_type("application/json")
-            .content_encoding(CONTENT_ENCODING)
+            .content_encoding("zstd")
             .body(ByteStream::from(body))
             .send()
             .await

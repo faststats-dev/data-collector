@@ -1,6 +1,7 @@
 mod clicks;
 mod config;
 mod consumer;
+mod finalizer;
 mod object_store;
 mod storage;
 

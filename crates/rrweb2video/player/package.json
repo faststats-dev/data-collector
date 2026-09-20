@@ -1,0 +1,5 @@
+{
+  "name": "rrweb2video-player",
+  "private": true,
+  "dependencies": { "rrweb": "2.1.1" }
+}

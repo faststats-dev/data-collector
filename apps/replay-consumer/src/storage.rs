@@ -348,11 +348,8 @@ impl ReplayStorage {
                     browser = COALESCE(EXCLUDED.browser, replay_sessions.browser),
                     country = COALESCE(EXCLUDED.country, replay_sessions.country),
                     os = COALESCE(EXCLUDED.os, replay_sessions.os),
-                    is_complete = replay_sessions.is_complete OR EXCLUDED.is_complete,
-                    finalized_at = CASE
-                        WHEN EXCLUDED.is_complete THEN COALESCE(replay_sessions.finalized_at, EXCLUDED.finalized_at)
-                        ELSE replay_sessions.finalized_at
-                    END,
+                    is_complete = false,
+                    finalized_at = NULL,
                     updated_at = NOW()
                 "#,
             )
@@ -375,7 +372,7 @@ impl ReplayStorage {
             .bind(input.browser.as_deref())
             .bind(input.country.as_deref())
             .bind(input.os.as_deref())
-            .bind(input.is_final)
+            .bind(false)
             .execute(&mut *tx)
             .await?;
 
@@ -432,7 +429,7 @@ impl ReplayStorage {
         }
     }
 
-    pub async fn finalize_replay_session(
+    pub async fn record_terminal_hint(
         pool: &sqlx::PgPool,
         project_id: Uuid,
         session_id: &str,
@@ -440,17 +437,16 @@ impl ReplayStorage {
         storage_generation: i32,
     ) -> Result<(), ReplayStorageError> {
         let mut tx = pool.begin().await?;
-        // Use the same generation guard as data chunks so a delayed terminal
-        // request cannot finalize recordings after storage was cleared/recreated.
+        // Terminal hints only extend the quiet period. They neither prove delivery
+        // nor reopen an already completed revision when a beacon is retried.
+        // Keep the generation guard used by data chunks.
         if !replay_storage_generation_is_active(&mut *tx, project_id, storage_generation).await? {
             return Ok(());
         }
         sqlx::query(
             r#"
             UPDATE replay_sessions
-            SET is_complete = true,
-                finalized_at = COALESCE(finalized_at, NOW()),
-                updated_at = NOW()
+            SET updated_at = NOW()
             WHERE project_id = $1 AND session_id = $2 AND window_id = $3
             "#,
         )

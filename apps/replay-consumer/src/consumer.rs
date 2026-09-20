@@ -34,8 +34,18 @@ pub async fn run(config: Config) -> Result<(), String> {
         "Replay consumer started"
     );
     let mut pending = HashMap::<String, PendingPatch>::new();
+    let producer = crate::finalizer::producer(&config)?;
+    let mut finalizer = tokio::spawn(crate::finalizer::run(
+        pool.clone(),
+        producer,
+        config.final_topic.clone(),
+        config.final_idle_seconds,
+    ));
     loop {
         tokio::select! {
+            result = &mut finalizer => {
+                return Err(format!("Finalizer stopped unexpectedly: {result:?}"));
+            }
             message = consumer.recv() => {
                 let message = message.map_err(|error| format!("Kafka receive failed: {error}"))?;
                 handle_message(&storage, &pool, &message, &mut pending).await?;
@@ -114,7 +124,7 @@ async fn handle_message(
                 if !chunk.is_final {
                     return Ok(());
                 }
-                ReplayStorage::finalize_replay_session(
+                ReplayStorage::record_terminal_hint(
                     pool,
                     chunk.project_id,
                     &chunk.session_id,

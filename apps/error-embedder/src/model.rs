@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use std::{io::Read, path::Path, sync::Mutex};
 use tokenizers::Tokenizer;
 
-pub const VERSION: &str = "jina-code-516f4baf-v3";
+pub const VERSION: &str = "jina-code-516f4baf-v4";
 pub const REVISION: &str = "516f4baf13dec4ddddda8631e019b5737c8bc250";
 const WIDTH: usize = 768;
 const MAX_TOKENS: usize = 512;
@@ -93,7 +93,8 @@ impl Model {
         })
     }
 
-    pub fn embed(&self, text: &str) -> Result<(Vec<f32>, bool)> {
+    #[cfg(test)]
+    fn embed(&self, text: &str) -> Result<(Vec<f32>, bool)> {
         self.embed_batch(&[text.to_owned()])?
             .pop()
             .context("Missing embedding")
@@ -161,7 +162,11 @@ fn bounded_ids(tokens: &[u32]) -> Result<(Vec<i64>, bool)> {
         .map(|&id| i64::from(id))
         .collect();
     if truncated {
-        ids[MAX_TOKENS - 1] = i64::from(*tokens.last().context("No separator")?);
+        // Keep the exception and leading frames, plus the message at the end.
+        let half = MAX_TOKENS / 2;
+        for (id, &token) in ids[half..].iter_mut().zip(&tokens[tokens.len() - half..]) {
+            *id = i64::from(token);
+        }
     }
     Ok((ids, truncated))
 }
@@ -190,6 +195,10 @@ mod tests {
             assert_eq!(truncated, n > 512);
             assert_eq!(ids.len(), (n as usize).min(512));
             assert_eq!(ids.last().copied(), Some(i64::from(n - 1)));
+            if truncated {
+                assert_eq!(ids[255], 255);
+                assert_eq!(ids[256], i64::from(n - 256));
+            }
         }
         assert!(bounded_ids(&[]).is_err());
         Ok(())

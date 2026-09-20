@@ -88,7 +88,7 @@ def feeds(tokenizer, text):
     ids = tokenizer.encode(text).ids
     truncated = len(ids) > 512
     if truncated:
-        ids = ids[:511] + ids[-1:]
+        ids = ids[:256] + ids[-256:]
     return {"input_ids": np.array([ids], dtype=np.int64), "attention_mask": np.ones((1, len(ids)), dtype=np.int64)}, truncated
 
 

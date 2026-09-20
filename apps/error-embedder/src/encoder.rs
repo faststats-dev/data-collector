@@ -53,7 +53,6 @@ impl Encoder {
             let text = input.input.text();
             let key = cache::key(model::VERSION, &text);
             keys.push(key.clone());
-            // Deduplicate prepared text before any cache lookup or inference.
             if prepared.contains_key(&key) {
                 continue;
             }

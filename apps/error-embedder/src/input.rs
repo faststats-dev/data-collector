@@ -85,9 +85,6 @@ impl Input {
         };
         let mut output = String::with_capacity(1024);
         output.push_str(bounded(kind, 256).trim());
-        output.push_str(": ");
-        output.push_str(&normalize::message(bounded(message, 768)));
-
         let frames = selected.map_or(&[][..], |(_, segment)| segment.frames.as_slice());
         for frame in frames.iter().take(MAX_FRAMES) {
             output.push('\n');
@@ -105,6 +102,12 @@ impl Input {
                 output.push_str(bounded(module, 512));
             }
         }
+        output.push_str(if frames.is_empty() {
+            ": "
+        } else {
+            "\nmessage: "
+        });
+        output.push_str(&normalize::message(bounded(message, 768)));
         // A failed or header-only parse must not discard the original evidence.
         if frames.is_empty() && !stack.trim().is_empty() {
             output.push_str("\nraw: ");
@@ -163,7 +166,7 @@ mod tests {
             expected: String,
         }
         let corpus: Corpus =
-            serde_json::from_str(include_str!("../tests/fixtures/preparation-v3.json")).unwrap();
+            serde_json::from_str(include_str!("../tests/fixtures/preparation-v4.json")).unwrap();
         assert_eq!(corpus.model_version, crate::model::VERSION);
         for case in corpus.cases {
             assert_eq!(
@@ -251,7 +254,7 @@ mod tests {
         let a = input("java", "java.lang.RuntimeException", "wrapper", stack);
         assert_eq!(
             a.text(),
-            "java.lang.NoSuchMethodError: api.run(int)\napp.Main.call @ Main.java"
+            "java.lang.NoSuchMethodError\napp.Main.call @ Main.java\nmessage: api.run(int)"
         );
         let b = input(
             "java",
@@ -272,7 +275,9 @@ mod tests {
             &stack.replace("Sword", "library"),
         );
         assert_eq!(a.text(), b.text());
-        assert!(a.text().starts_with("FileNotFoundError: [Errno 2]"));
+        assert!(
+            a.text().starts_with("FileNotFoundError\n") && a.text().contains("message: [Errno 2]")
+        );
     }
     #[test]
     fn mappings_and_unknown_stacks_preserve_evidence() {

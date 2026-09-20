@@ -7,21 +7,25 @@ exact_hash)`. Regular issue IDs still come from `legacy-grouping`.
 
 ## Preparation
 
-`jina-code-516f4baf-v3` uses the shared `stack-trace-parser` crate for Java/JVM,
+`jina-code-516f4baf-v4` uses the shared `stack-trace-parser` crate for Java/JVM,
 JavaScript/TypeScript, Python, Rust, PHP, Go and Swift. Mapped stacks take precedence.
 Missing language defaults to Java, matching historical collector behavior;
 explicit unsupported languages use raw text.
 
 Preparation selects the primary cause, excluding suppressed errors and implicit
-context chains. It includes the exception type, message and first 16 frames.
+context chains. Parsed errors put the exception type first, then the first 16
+frames, then the message. The same layout applies to every language and message;
+there are no application-specific message templates.
 Source coordinates and redundant module/JAR names are omitted. Message values
 normalize UUIDs and explicit paths while retaining filenames, codes and signatures.
 Quoted paths may contain spaces; unquoted sentences are never treated as one path.
 Malformed, truncated, unknown and header-only stacks retain bounded raw evidence.
 
 Limits: 256 bytes for type, 768 for message, 512 per frame field and 4,096 for raw
-fallback, all on UTF-8 boundaries. Tokenization keeps at most 512 tokens including
-the final separator. Live ingestion and every backfill command use this preparation.
+fallback, all on UTF-8 boundaries. Tokenization keeps at most 512 tokens. Longer
+inputs retain the first 256 and last 256 tokens, preserving both the crash site
+and trailing message evidence. Live ingestion and every backfill command use this
+preparation and token budget.
 
 ## Run
 

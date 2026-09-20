@@ -14,8 +14,6 @@ pub struct Cache {
     ttl: u64,
 }
 
-// Hash the actual prepared input, including mapped frames and the message.
-// Bump the model version whenever model artifacts or preparation change.
 pub fn key(version: &str, text: &str) -> String {
     format!(
         "error-embedder:{version}:{}",

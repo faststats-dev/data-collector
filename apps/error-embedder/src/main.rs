@@ -56,7 +56,6 @@ struct Envelope {
     data: Occurrence,
 }
 
-// The exact error is the reference point for vector queries; no stored group ID.
 #[derive(Deserialize)]
 struct Occurrence {
     project_id: uuid::Uuid,
@@ -145,7 +144,6 @@ async fn main() -> Result<()> {
         ),
         "Use consume, publish, embed, encode, prepare, or version"
     );
-    // Preparation/version diagnostics must not load a model or connect to Kafka.
     if action == "version" {
         println!("{}", model::VERSION);
         return Ok(());
@@ -160,18 +158,20 @@ async fn main() -> Result<()> {
         }
         return Ok(());
     }
+    let batch_size = if action == "consume" {
+        1
+    } else {
+        let size: usize = std::env::var("EMBED_BATCH_SIZE")
+            .unwrap_or_else(|_| "1".into())
+            .parse()?;
+        ensure!((1..=32).contains(&size), "EMBED_BATCH_SIZE must be 1..32");
+        size
+    };
     let model_dir =
         PathBuf::from(std::env::var("EMBED_MODEL_DIR").context("EMBED_MODEL_DIR is required")?);
     let model =
         Arc::new(tokio::task::spawn_blocking(move || model::Model::load(&model_dir)).await??);
     if action == "embed" {
-        let batch_size: usize = std::env::var("EMBED_BATCH_SIZE")
-            .unwrap_or_else(|_| "1".into())
-            .parse()?;
-        ensure!(
-            (1..=32).contains(&batch_size),
-            "EMBED_BATCH_SIZE must be 1..32"
-        );
         let stdin = io::stdin();
         let mut lines = stdin.lock().lines();
         loop {
@@ -186,11 +186,7 @@ async fn main() -> Result<()> {
             if texts.is_empty() {
                 break;
             }
-            let vectors = if texts.len() == 1 {
-                vec![model.embed(&texts[0])?]
-            } else {
-                model.embed_batch(&texts)?
-            };
+            let vectors = model.embed_batch(&texts)?;
             for (text, (embedding, truncated)) in texts.iter().zip(vectors) {
                 println!(
                     "{}",
@@ -200,7 +196,7 @@ async fn main() -> Result<()> {
         }
         return Ok(());
     }
-    let mut encoder = Encoder::new(model.clone())?;
+    let mut encoder = Encoder::new(model)?;
     let output = std::env::var("ERROR_EMBEDDINGS_KAFKA_TOPIC")
         .unwrap_or_else(|_| "error-embeddings-v1".into());
     let producer: Option<FutureProducer> = if action == "encode" {
@@ -221,13 +217,6 @@ async fn main() -> Result<()> {
         ensure!(
             (1..=256).contains(&in_flight),
             "EMBED_PUBLISH_IN_FLIGHT must be 1..256"
-        );
-        let batch_size: usize = std::env::var("EMBED_BATCH_SIZE")
-            .unwrap_or_else(|_| "1".into())
-            .parse()?;
-        ensure!(
-            (1..=32).contains(&batch_size),
-            "EMBED_BATCH_SIZE must be 1..32"
         );
         let mut pending = JoinSet::new();
         let mut published = 0u64;

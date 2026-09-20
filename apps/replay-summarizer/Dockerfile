@@ -16,8 +16,11 @@ RUN npm ci --ignore-scripts --no-audit --no-fund && \
     rm -rf /var/lib/apt/lists/* && \
     find /opt/browsers -type f \( -name chrome-headless-shell -o -name headless_shell \) -exec ln -sf '{}' /usr/local/bin/chromium-headless-real \; && \
     test -x /usr/local/bin/chromium-headless-real
-COPY --chmod=755 apps/replay-summarizer/chromium.sh /usr/local/bin/chromium-headless
+COPY apps/replay-summarizer/chromium.sh /usr/local/bin/chromium-headless
+# Set permissions explicitly so builders need not support COPY --chmod.
+RUN chmod 755 /usr/local/bin/chromium-headless
 COPY --from=builder /app/target/release/replay-summarizer /usr/local/bin/replay-summarizer
 USER node
 WORKDIR /tmp
+RUN /usr/local/bin/chromium-headless --version
 ENTRYPOINT ["/usr/local/bin/replay-summarizer"]

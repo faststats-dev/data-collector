@@ -25,7 +25,7 @@ pub struct RenderOptions {
     /// Optional replay-time limit, useful for previews.
     pub max_duration_ms: Option<u64>,
 }
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct RenderReport {
     pub output: PathBuf,
     pub frames: u64,
@@ -35,7 +35,7 @@ pub struct RenderReport {
 
 /// Wall-clock stage timings. Encoder work overlaps replay/capture; `encoder_wait`
 /// measures backpressure, not total FFmpeg CPU time.
-#[derive(Debug, Default, serde::Serialize)]
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct RenderStats {
     pub screenshots: u64,
     pub packets: u64,
@@ -47,21 +47,69 @@ pub struct RenderStats {
     pub total: f64,
 }
 
+/// A warm browser process; every recording receives a fresh isolated context.
+#[derive(Default)]
+pub struct RenderSession {
+    browser: Option<Browser>,
+    uses: usize,
+}
+impl RenderSession {
+    pub fn render_owned(
+        &mut self,
+        mut replay: Replay,
+        options: &RenderOptions,
+        mut progress: impl FnMut(&str, u64, u64),
+    ) -> Result<RenderReport> {
+        if self.uses >= 50 {
+            self.browser = None;
+            self.uses = 0;
+        }
+        let events = std::mem::take(&mut replay.events);
+        let result = render_inner(&replay, options, true, events, self, &mut progress);
+        if result.is_err() {
+            self.browser = None;
+            self.uses = 0;
+        }
+        result
+    }
+}
+
 /// Synchronously stream JPEG frames to FFmpeg, publishing the MP4 only on success.
 /// Existing output files are never overwritten.
 pub fn render(replay: &Replay, options: &RenderOptions) -> Result<RenderReport> {
-    render_inner(replay, options, false, &replay.events)
+    render_inner(
+        replay,
+        options,
+        false,
+        &replay.events,
+        &mut RenderSession::default(),
+        &mut |_, _, _| {},
+    )
 }
 
 /// Encode the complete MP4 stream into the null sink without saving a video.
 pub fn render_discard(replay: &Replay, options: &RenderOptions) -> Result<RenderReport> {
-    render_inner(replay, options, true, &replay.events)
+    render_inner(
+        replay,
+        options,
+        true,
+        &replay.events,
+        &mut RenderSession::default(),
+        &mut |_, _, _| {},
+    )
 }
 
 /// Release Rust event payloads as they are transferred to Chromium.
 pub fn render_discard_owned(mut replay: Replay, options: &RenderOptions) -> Result<RenderReport> {
     let events = std::mem::take(&mut replay.events);
-    render_inner(&replay, options, true, events)
+    render_inner(
+        &replay,
+        options,
+        true,
+        events,
+        &mut RenderSession::default(),
+        &mut |_, _, _| {},
+    )
 }
 
 fn render_inner(
@@ -69,6 +117,8 @@ fn render_inner(
     options: &RenderOptions,
     discard: bool,
     events: impl IntoIterator<Item = impl AsRef<serde_json::value::RawValue>>,
+    session: &mut RenderSession,
+    progress: &mut dyn FnMut(&str, u64, u64),
 ) -> Result<RenderReport> {
     let start = std::time::Instant::now();
     let mut stats = RenderStats::default();
@@ -106,7 +156,17 @@ fn render_inner(
         .as_ref()
         .map(|file| file.path())
         .unwrap_or(std::path::Path::new("/dev/null"));
-    let mut browser = Browser::launch(&options.chromium, replay.width, replay.height)?;
+    progress("setup", 0, plan.frame_count);
+    if let Some(browser) = session.browser.as_mut() {
+        browser.new_page(replay.width, replay.height)?;
+    } else {
+        session.browser = Some(Browser::launch(
+            &options.chromium,
+            replay.width,
+            replay.height,
+        )?);
+    }
+    let browser = session.browser.as_mut().expect("browser initialized");
     browser.eval(include_str!("clock.js").replace("__EPOCH__", &replay.start_ms.to_string()))?;
     browser.eval(js)?;
     browser.eval(format!(
@@ -136,6 +196,8 @@ fn render_inner(
     let mut pixels_changed = true;
     stats.setup = start.elapsed().as_secs_f64();
     let mut index = 0;
+    let mut last_progress = std::time::Instant::now();
+    progress("capture", 0, plan.frame_count);
     while index < plan.frame_count {
         let tick = std::time::Instant::now();
         // Visit every virtual tick; bound idle batches to one output second.
@@ -192,8 +254,13 @@ fn render_inner(
         }
         stats.encoder_wait += tick.elapsed().as_secs_f64();
         index += 1;
+        if last_progress.elapsed().as_secs_f64() >= 1.0 {
+            progress("capture", index, plan.frame_count);
+            last_progress = std::time::Instant::now();
+        }
     }
     let tick = std::time::Instant::now();
+    progress("encoding", plan.frame_count, plan.frame_count);
     encoder.finish()?;
     stats.finalize = tick.elapsed().as_secs_f64();
     if let Some(temporary) = temporary {
@@ -201,7 +268,8 @@ fn render_inner(
             .persist_noclobber(&options.output)
             .context("publish completed MP4")?;
     }
-    drop(browser);
+    browser.release_page()?;
+    session.uses += 1;
     stats.total = start.elapsed().as_secs_f64();
     if std::env::var_os("RRWEB2VIDEO_PROFILE").is_some() {
         eprintln!("PROFILE {}", serde_json::to_string(&stats)?);

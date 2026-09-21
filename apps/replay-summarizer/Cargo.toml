@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+futures-util = "0.3.32"
 replay-message = { path = "../../crates/replay-message" }
 aws-sdk-s3 = { version = "1.144.0", features = ["behavior-version-latest"] }
 dotenvy = "0.15.7"
@@ -11,7 +12,7 @@ rdkafka = { version = "0.38.0", features = ["cmake-build", "sasl", "ssl", "tokio
 serde.workspace = true
 serde_json.workspace = true
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "json"] }
-tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "signal", "time"] }
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "signal", "time", "process", "io-util", "io-std", "sync"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 uuid = { version = "1.26.0", features = ["serde", "v4"] }
@@ -19,3 +20,6 @@ zstd = "0.13.3"
 
 rrweb2video = { path = "../../crates/rrweb2video" }
 anyhow = "1"
+
+libc = "0.2"
+tempfile = "3"

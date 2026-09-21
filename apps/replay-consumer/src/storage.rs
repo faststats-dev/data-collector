@@ -64,6 +64,7 @@ impl ReplayStorage {
         pool: &sqlx::PgPool,
         mut input: ReplayChunkInput,
         quiet_seconds: i32,
+        grace_seconds: i32,
     ) -> Result<bool, ReplayStorageError> {
         if !replay_storage_generation_is_active(pool, input.project_id, input.storage_generation)
             .await?
@@ -379,7 +380,9 @@ impl ReplayStorage {
             .execute(&mut *tx)
             .await?;
 
-            crate::clicks::refresh(&mut tx, input.project_id, &input.session_id, &input.window_id, input.storage_generation).await?;
+            crate::controls::record_chunk(&mut tx, input.project_id, input.storage_generation, &input.session_id, &input.window_id, last_sequence, input.is_final, true, grace_seconds).await?;
+
+            crate::clicks::refresh(&mut tx, input.project_id, &input.session_id, &input.window_id, input.storage_generation, Some(&click_analysis)).await?;
 
             let first_for_billing = sqlx::query_scalar::<_, Uuid>(
                 r#"
@@ -438,54 +441,35 @@ impl ReplayStorage {
         session_id: &str,
         window_id: &str,
         storage_generation: i32,
-        quiet_seconds: i32,
+        sequence: i64,
+        grace_seconds: i32,
     ) -> Result<(), ReplayStorageError> {
         let mut tx = pool.begin().await?;
-        // Terminal hints only extend the quiet period. They neither prove delivery
-        // nor reopen an already completed revision when a beacon is retried.
-        // Keep the generation guard used by data chunks.
         if !replay_storage_generation_is_active(&mut *tx, project_id, storage_generation).await? {
             return Ok(());
         }
-        sqlx::query(
-            r#"
-            UPDATE replay_sessions
-            SET updated_at = NOW(), finalize_after = NOW() + make_interval(secs => $4::integer)
-            WHERE project_id = $1 AND session_id = $2 AND window_id = $3 AND deleted_at IS NULL
-            "#,
+        crate::controls::lock_stream(
+            &mut tx,
+            project_id,
+            storage_generation,
+            session_id,
+            window_id,
         )
-        .bind(project_id)
-        .bind(session_id)
-        .bind(window_id)
-        .bind(quiet_seconds)
-        .execute(&mut *tx)
+        .await?;
+        crate::controls::record_chunk(
+            &mut tx,
+            project_id,
+            storage_generation,
+            session_id,
+            window_id,
+            sequence,
+            true,
+            false,
+            grace_seconds,
+        )
         .await?;
         tx.commit().await?;
         Ok(())
-    }
-
-    pub async fn apply_session_patch(
-        pool: &sqlx::PgPool,
-        patch: &replay_message::ReplaySessionPatch,
-    ) -> Result<bool, ReplayStorageError> {
-        let result = sqlx::query(
-            r#"
-            UPDATE replay_sessions
-            SET
-                has_errors = has_errors OR $4,
-                has_poor_vitals = has_poor_vitals OR $5,
-                updated_at = NOW()
-            WHERE project_id = $1 AND session_id = $2 AND window_id = $3 AND deleted_at IS NULL
-            "#,
-        )
-        .bind(patch.project_id)
-        .bind(&patch.session_id)
-        .bind(&patch.window_id)
-        .bind(patch.has_errors)
-        .bind(patch.has_poor_vitals)
-        .execute(pool)
-        .await?;
-        Ok(result.rows_affected() > 0)
     }
 }
 

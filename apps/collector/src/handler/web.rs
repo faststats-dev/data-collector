@@ -203,6 +203,7 @@ pub async fn web(
                 .replay_publisher
                 .mark_error(
                     ctx.project_id,
+                    ctx.replay_storage_generation,
                     session_id,
                     window_id.as_deref().unwrap_or(session_id),
                 )

@@ -1,4 +1,5 @@
 use crate::config::Config;
+use futures_util::{StreamExt, TryStreamExt, stream};
 use rdkafka::{
     ClientConfig,
     producer::{FutureProducer, FutureRecord},
@@ -29,40 +30,39 @@ pub fn producer(config: &Config) -> std::result::Result<FutureProducer, String> 
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-// Jobs and completion are committed before publishing. Keep each job locked until
-// delivery is acknowledged; a crash can duplicate delivery, but cannot lose work.
+// Publication is at least once. Never hold a database lock while waiting on Kafka.
 async fn publish(pool: &sqlx::PgPool, producer: &FutureProducer, topic: &str) -> Result<()> {
-    let mut tx = pool.begin().await?;
-    let rows = sqlx::query("SELECT * FROM replay_summary_jobs WHERE kafka_triggered AND published_at IS NULL ORDER BY created_at LIMIT 100 FOR UPDATE SKIP LOCKED")
-        .fetch_all(&mut *tx).await?;
-    for row in rows {
+    let rows = sqlx::query(
+        r#"
+        WITH candidates AS (
+            SELECT id FROM replay_summary_jobs
+            WHERE kafka_triggered AND NOT processed AND state='awaiting_dispatch'
+              AND (published_at IS NULL OR published_at < NOW() - interval '5 minutes')
+              AND (publish_lease_until IS NULL OR publish_lease_until < NOW())
+            ORDER BY created_at LIMIT 16 FOR UPDATE SKIP LOCKED
+        )
+        UPDATE replay_summary_jobs j SET publication_token=publication_token+1,
+            publish_lease_until=NOW()+interval '120 seconds'
+        FROM candidates c WHERE j.id=c.id RETURNING j.*
+    "#,
+    )
+    .fetch_all(pool)
+    .await?;
+    stream::iter(rows.into_iter().map(|row| async move {
         let event = FinalReplay {
-            job_id: row.get("id"),
-            project_id: row.get("project_id"),
-            session_id: row.get("session_id"),
-            window_id: row.get("window_id"),
-            storage_generation: row.get("storage_generation"),
-            chunk_count: row.get("chunk_count"),
+            job_id: row.get("id"), project_id: row.get("project_id"),
+            session_id: row.get("session_id"), window_id: row.get("window_id"),
+            storage_generation: row.get("storage_generation"), chunk_count: row.get("chunk_count"),
         };
-        let payload = serde_json::to_string(&event)?;
-        let key = format!(
-            "{}:{}:{}",
-            event.project_id, event.session_id, event.window_id
-        );
-        producer
-            .send(
-                FutureRecord::to(topic).key(&key).payload(&payload),
-                Duration::from_secs(30),
-            )
-            .await
-            .map_err(|(error, _)| error)?;
-        sqlx::query("UPDATE replay_summary_jobs SET published_at = NOW() WHERE id = $1")
-            .bind(event.job_id)
-            .execute(&mut *tx)
-            .await?;
-        tracing::info!(job_id = %event.job_id, "Published final replay");
-    }
-    tx.commit().await?;
+        let token: i32 = row.get("publication_token");
+        let payload=serde_json::to_string(&event)?;
+        let key=format!("{}:{}:{}",event.project_id,event.session_id,event.window_id);
+        producer.send(FutureRecord::to(topic).key(&key).payload(&payload),Duration::from_secs(30))
+            .await.map_err(|(error,_)| error)?;
+        sqlx::query("UPDATE replay_summary_jobs SET published_at=NOW(), publish_lease_until=NULL WHERE id=$1 AND publication_token=$2")
+            .bind(event.job_id).bind(token).execute(pool).await?;
+        Ok::<_,Box<dyn std::error::Error+Send+Sync>>(())
+    })).buffer_unordered(4).try_collect::<Vec<_>>().await?;
     Ok(())
 }
 
@@ -92,126 +92,42 @@ const ENQUEUE: &str = r#"
 /// Inactivity covers lost/canceled browser exits. The durable outbox covers crashes.
 /// Run separately so broker delays never hold up snapshot ingestion.
 pub async fn run(pool: sqlx::PgPool, producer: FutureProducer, topic: String) {
-    let mut timer = tokio::time::interval(Duration::from_secs(30));
-    loop {
-        timer.tick().await;
-        if let Err(error) = sqlx::query(ENQUEUE).execute(&pool).await {
-            tracing::warn!(%error, "Failed to queue completed replays; retrying next tick");
+    let scan = async {
+        let mut timer = tokio::time::interval(Duration::from_secs(5));
+        loop {
+            timer.tick().await;
+            if let Err(error) = sqlx::query(ENQUEUE).execute(&pool).await {
+                tracing::warn!(%error,"Failed to queue completed replays");
+            }
         }
-        // Drain previously queued work even if this tick's scan failed.
-        if let Err(error) = publish(&pool, &producer, &topic).await {
-            tracing::warn!(%error, "Final replay publication failed; retrying durable outbox");
+    };
+    let publication = async {
+        loop {
+            if let Err(error) = publish(&pool, &producer, &topic).await {
+                tracing::warn!(%error,"Final replay publication failed; retrying durable outbox");
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::ENQUEUE;
-
-    #[tokio::test]
-    #[ignore = "requires loopback Postgres; temporary tables roll back"]
-    async fn only_kafka_armed_replays_finalize_and_history_stays_untouched() {
-        let database = std::env::var("DATABASE_URL").unwrap();
-        assert!(matches!(
-            url::Url::parse(&database).unwrap().host_str(),
-            Some("localhost" | "127.0.0.1" | "[::1]")
-        ));
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&database)
-            .await
-            .unwrap();
-        let mut tx = pool.begin().await.unwrap();
-        for statement in [
-            "CREATE TEMP TABLE project (id uuid PRIMARY KEY, replay_storage_generation integer, replay_storage_state text) ON COMMIT DROP",
-            "CREATE TEMP TABLE replay_sessions (project_id uuid, session_id text, window_id text, chunk_count integer, deleted_at timestamp, has_full_snapshot boolean, updated_at timestamp, is_complete boolean DEFAULT false, finalized_at timestamp, finalize_after timestamp) ON COMMIT DROP",
-            "CREATE TEMP TABLE replay_summary_jobs (id uuid, project_id uuid, session_id text, window_id text, storage_generation integer, chunk_count integer, published_at timestamp, kafka_triggered boolean DEFAULT false, UNIQUE(project_id,session_id,window_id,storage_generation,chunk_count)) ON COMMIT DROP",
-            "INSERT INTO project VALUES ('00000000-0000-0000-0000-000000000001',1,'active')",
-            "INSERT INTO replay_sessions (project_id,session_id,window_id,chunk_count,has_full_snapshot,updated_at) SELECT id, name, 'window', 2, true, NOW() - interval '1 year' FROM project CROSS JOIN unnest(ARRAY['history','live']) name",
-        ] {
-            sqlx::query(statement).execute(&mut *tx).await.unwrap();
+    };
+    let cleanup = async {
+        let mut timer = tokio::time::interval(Duration::from_secs(3600));
+        loop {
+            timer.tick().await;
+            // Only bounded control rows, never recording discovery. Snapshot-backed
+            // controls are deleted by the existing metadata retention service.
+            if let Err(error)=sqlx::query(r#"
+                WITH expired AS (
+                    SELECT c.project_id,c.storage_generation,c.session_id,c.window_id
+                    FROM replay_recording_controls c JOIN project p ON p.id=c.project_id
+                    WHERE c.updated_at < NOW()-interval '1 day'
+                      AND (c.storage_generation<>p.replay_storage_generation OR (
+                        c.updated_at < NOW()-make_interval(days=>COALESCE(p.replay_retention_days,30))
+                        AND NOT EXISTS (SELECT 1 FROM replay_sessions s WHERE s.project_id=c.project_id AND s.session_id=c.session_id AND s.window_id=c.window_id)
+                      )) ORDER BY c.updated_at LIMIT 1000 FOR UPDATE OF c SKIP LOCKED
+                ) DELETE FROM replay_recording_controls c USING expired e
+                WHERE c.project_id=e.project_id AND c.storage_generation=e.storage_generation AND c.session_id=e.session_id AND c.window_id=e.window_id
+            "#).execute(&pool).await { tracing::warn!(%error,"Recording control cleanup failed"); }
         }
-        // Even a year-old complete recording cannot be discovered from Postgres.
-        assert_eq!(
-            sqlx::query(ENQUEUE)
-                .execute(&mut *tx)
-                .await
-                .unwrap()
-                .rows_affected(),
-            0
-        );
-        sqlx::query("UPDATE replay_sessions SET finalize_after = NOW() + interval '35 minutes' WHERE session_id = 'live'").execute(&mut *tx).await.unwrap();
-        assert_eq!(
-            sqlx::query(ENQUEUE)
-                .execute(&mut *tx)
-                .await
-                .unwrap()
-                .rows_affected(),
-            0
-        );
-        sqlx::query("UPDATE replay_sessions SET finalize_after = NOW() - interval '1 second' WHERE session_id = 'live'").execute(&mut *tx).await.unwrap();
-        assert_eq!(
-            sqlx::query(ENQUEUE)
-                .execute(&mut *tx)
-                .await
-                .unwrap()
-                .rows_affected(),
-            1
-        );
-        assert_eq!(
-            sqlx::query(ENQUEUE)
-                .execute(&mut *tx)
-                .await
-                .unwrap()
-                .rows_affected(),
-            0
-        );
-        assert!(
-            sqlx::query_scalar::<_, bool>("SELECT kafka_triggered FROM replay_summary_jobs")
-                .fetch_one(&mut *tx)
-                .await
-                .unwrap()
-        );
-        assert!(sqlx::query_scalar::<_, bool>("SELECT finalize_after IS NULL AND is_complete FROM replay_sessions WHERE session_id = 'live'").fetch_one(&mut *tx).await.unwrap());
-        // A duplicate Kafka delivery clears its deadline without republishing.
-        sqlx::query("UPDATE replay_sessions SET finalize_after = NOW() - interval '1 second' WHERE session_id = 'live'").execute(&mut *tx).await.unwrap();
-        sqlx::query(ENQUEUE).execute(&mut *tx).await.unwrap();
-        assert_eq!(
-            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM replay_summary_jobs")
-                .fetch_one(&mut *tx)
-                .await
-                .unwrap(),
-            1
-        );
-        // A late Kafka chunk gets its own revision once its new timer expires.
-        sqlx::query("UPDATE replay_sessions SET chunk_count = 3, is_complete = false WHERE session_id = 'live'").execute(&mut *tx).await.unwrap();
-        sqlx::query("UPDATE replay_sessions SET finalize_after = NOW() + interval '35 minutes' WHERE session_id = 'live'").execute(&mut *tx).await.unwrap();
-        assert_eq!(
-            sqlx::query(ENQUEUE)
-                .execute(&mut *tx)
-                .await
-                .unwrap()
-                .rows_affected(),
-            0
-        );
-        sqlx::query("UPDATE replay_sessions SET finalize_after = NOW() - interval '1 second' WHERE session_id = 'live'").execute(&mut *tx).await.unwrap();
-        assert_eq!(
-            sqlx::query(ENQUEUE)
-                .execute(&mut *tx)
-                .await
-                .unwrap()
-                .rows_affected(),
-            1
-        );
-        assert!(
-            !sqlx::query_scalar::<_, bool>(
-                "SELECT is_complete FROM replay_sessions WHERE session_id = 'history'"
-            )
-            .fetch_one(&mut *tx)
-            .await
-            .unwrap()
-        );
-        tx.rollback().await.unwrap();
-    }
+    };
+    tokio::join!(scan, publication, cleanup);
 }

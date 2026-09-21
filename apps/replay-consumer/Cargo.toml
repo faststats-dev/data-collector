@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+futures-util = "0.3.32"
 replay-message = { path = "../../crates/replay-message" }
 aws-sdk-s3 = { version = "1.144.0", features = ["behavior-version-latest"] }
 dotenvy = "0.15.7"

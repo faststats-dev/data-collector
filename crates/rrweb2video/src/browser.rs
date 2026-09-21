@@ -21,6 +21,7 @@ pub(crate) struct Browser {
     socket: WebSocket<MaybeTlsStream<TcpStream>>,
     session: String,
     id: u64,
+    context: Option<String>,
     _process: Process,
     _profile: TempDir,
 }
@@ -118,29 +119,53 @@ impl Browser {
             socket,
             session: String::new(),
             id: 0,
+            context: None,
             _process: process,
             _profile: profile,
         };
-        let target = browser.call("Target.createTarget", json!({"url":"about:blank","width":width,"height":height,"enableBeginFrameControl":true}))?;
-        let attached = browser.call(
+        browser.new_page(width, height)?;
+        Ok(browser)
+    }
+    pub fn new_page(&mut self, width: u32, height: u32) -> Result<()> {
+        self.release_page()?;
+        let context = self.call(
+            "Target.createBrowserContext",
+            json!({"disposeOnDetach":true}),
+        )?;
+        let context = context["browserContextId"]
+            .as_str()
+            .context("missing browser context")?
+            .to_owned();
+        self.context = Some(context.clone());
+        let target=self.call("Target.createTarget",json!({"url":"about:blank","width":width,"height":height,"browserContextId":context,"enableBeginFrameControl":true}))?;
+        let attached = self.call(
             "Target.attachToTarget",
             json!({"targetId":target["targetId"],"flatten":true}),
         )?;
-        browser.session = attached["sessionId"]
+        self.session = attached["sessionId"]
             .as_str()
             .context("missing CDP session")?
             .into();
-        browser.call(
+        self.call(
             "Emulation.setDeviceMetricsOverride",
             json!({"width":width,"height":height,"deviceScaleFactor":1,"mobile":false}),
         )?;
-        // Offline by default: only inline resources/data URLs are replayed.
-        browser.call("Network.enable", json!({}))?;
-        browser.call(
+        self.call("Network.enable", json!({}))?;
+        self.call(
             "Network.setBlockedURLs",
             json!({"urls":["http://*","https://*","file://*","ftp://*","ws://*","wss://*"]}),
         )?;
-        Ok(browser)
+        Ok(())
+    }
+    pub fn release_page(&mut self) -> Result<()> {
+        self.session.clear();
+        if let Some(context) = self.context.take() {
+            self.call(
+                "Target.disposeBrowserContext",
+                json!({"browserContextId":context}),
+            )?;
+        }
+        Ok(())
     }
     pub fn call(&mut self, method: &str, params: Value) -> Result<Value> {
         self.id += 1;

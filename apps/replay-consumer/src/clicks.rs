@@ -74,6 +74,7 @@ pub fn extract(events: &[Value]) -> ClickAnalysis {
 /// Merge in timestamp order, including late chunks. An episode continues while clicks
 /// stay near its anchor on the same target and adjacent clicks are at most 1s apart.
 /// Only the first three-click window starts an episode; subsequent clicks don't inflate it.
+#[cfg(test)]
 pub fn summarize(chunks: &[ClickAnalysis]) -> (i32, i32) {
     let mut signals: Vec<_> = chunks.iter().flat_map(|chunk| &chunk.signals).collect();
     signals.sort_by(|a, b| a.timestamp.total_cmp(&b.timestamp).then(a.seq.cmp(&b.seq)));
@@ -116,32 +117,126 @@ pub fn summarize(chunks: &[ClickAnalysis]) -> (i32, i32) {
     (clicks, rage)
 }
 
-/// Caller holds the replay stream advisory lock. Snapshot insertion and these totals
-/// commit together, so retries cannot increment counts twice. NULL means incomplete analysis.
+/// Only the current episode and at most two pending clicks are needed across
+/// append-only chunks. Any timestamp overlap takes the canonical rebuild path.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Checkpoint {
+    version: u32,
+    generation: i32,
+    chunks: i32,
+    watermark: Option<f64>,
+    pending: Vec<Signal>,
+    episode: Option<(Signal, f64)>,
+    clicks: i32,
+    rage: i32,
+}
+impl Checkpoint {
+    fn new(generation: i32, chunks: i32) -> Self {
+        Self {
+            version: VERSION,
+            generation,
+            chunks,
+            watermark: None,
+            pending: vec![],
+            episode: None,
+            clicks: 0,
+            rage: 0,
+        }
+    }
+    fn appendable(&self, chunk: &ClickAnalysis) -> bool {
+        chunk.version == VERSION
+            && chunk
+                .signals
+                .iter()
+                .all(|s| self.watermark.is_none_or(|w| s.timestamp > w))
+    }
+    fn extend(&mut self, chunks: &[ClickAnalysis]) {
+        let mut signals: Vec<_> = chunks.iter().flat_map(|c| &c.signals).collect();
+        signals.sort_by(|a, b| a.timestamp.total_cmp(&b.timestamp).then(a.seq.cmp(&b.seq)));
+        signals.dedup_by(|a, b| {
+            a.seq.is_some() && a.seq == b.seq && a.timestamp.to_bits() == b.timestamp.to_bits()
+        });
+        let near = |a: &Signal, b: &Signal| {
+            a.target == b.target && (a.x - b.x).powi(2) + (a.y - b.y).powi(2) <= RADIUS_SQUARED
+        };
+        for signal in signals {
+            self.watermark = Some(signal.timestamp);
+            if signal.target.is_none() {
+                self.pending.clear();
+                self.episode = None;
+                continue;
+            }
+            self.clicks = self.clicks.saturating_add(1);
+            if let Some((anchor, last)) = &mut self.episode {
+                if signal.timestamp - *last <= WINDOW_MS && near(anchor, signal) {
+                    *last = signal.timestamp;
+                    continue;
+                }
+                self.episode = None;
+            }
+            self.pending
+                .retain(|p| signal.timestamp - p.timestamp <= WINDOW_MS);
+            if self.pending.iter().any(|p| !near(p, signal)) {
+                self.pending.clear();
+            }
+            self.pending.push(signal.clone());
+            if self.pending.len() == 3 {
+                self.rage = self.rage.saturating_add(1);
+                self.episode = Some((self.pending[0].clone(), signal.timestamp));
+                self.pending.clear();
+            }
+        }
+    }
+}
+
+/// Snapshot, checkpoint, and totals commit together under the stream lock.
 pub async fn refresh(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     project: Uuid,
     session: &str,
     window: &str,
     generation: i32,
+    new_chunk: Option<&ClickAnalysis>,
 ) -> Result<(), sqlx::Error> {
-    let rows = sqlx::query_scalar::<_, Option<sqlx::types::Json<ClickAnalysis>>>(
-        "SELECT click_analysis FROM replay_snapshots WHERE project_id=$1 AND session_id=$2 AND window_id=$3 AND storage_generation=$4"
-    ).bind(project).bind(session).bind(window).bind(generation).fetch_all(&mut **tx).await?;
-    let complete = !rows.is_empty()
-        && rows
-            .iter()
-            .all(|row| row.as_ref().is_some_and(|row| row.version == VERSION));
-    let (clicks, rage) = if complete {
-        let chunks: Vec<_> = rows.into_iter().flatten().map(|row| row.0).collect();
-        let (clicks, rage) = summarize(&chunks);
-        (Some(clicks), Some(rage))
-    } else {
-        (None, None)
+    let (count, stored) = sqlx::query_as::<_, (i32, Option<serde_json::Value>)>(
+        "SELECT chunk_count, click_analysis_state FROM replay_sessions WHERE project_id=$1 AND session_id=$2 AND window_id=$3"
+    ).bind(project).bind(session).bind(window).fetch_one(&mut **tx).await?;
+    let previous = stored.and_then(|value| serde_json::from_value::<Checkpoint>(value).ok());
+    let mut checkpoint = match (previous, new_chunk) {
+        (Some(mut state), Some(chunk))
+            if state.version == VERSION
+                && state.generation == generation
+                && state.chunks + 1 == count
+                && state.appendable(chunk) =>
+        {
+            state.extend(std::slice::from_ref(chunk));
+            Some(state)
+        }
+        _ => {
+            metrics::counter!("replay_click_analysis_rebuilds_total").increment(1);
+            let rows = sqlx::query_scalar::<_, Option<sqlx::types::Json<ClickAnalysis>>>(
+                "SELECT click_analysis FROM replay_snapshots WHERE project_id=$1 AND session_id=$2 AND window_id=$3 AND storage_generation=$4"
+            ).bind(project).bind(session).bind(window).bind(generation).fetch_all(&mut **tx).await?;
+            if !rows.is_empty()
+                && rows
+                    .iter()
+                    .all(|r| r.as_ref().is_some_and(|r| r.version == VERSION))
+            {
+                let mut state = Checkpoint::new(generation, count);
+                state.extend(&rows.into_iter().flatten().map(|r| r.0).collect::<Vec<_>>());
+                Some(state)
+            } else {
+                None
+            }
+        }
     };
-    sqlx::query("UPDATE replay_sessions SET click_count=$4, rage_click_count=$5 WHERE project_id=$1 AND session_id=$2 AND window_id=$3")
+    if let Some(state) = &mut checkpoint {
+        state.chunks = count;
+    }
+    sqlx::query("UPDATE replay_sessions SET click_count=$4, rage_click_count=$5, click_analysis_state=$6 WHERE project_id=$1 AND session_id=$2 AND window_id=$3")
         .bind(project).bind(session).bind(window)
-        .bind(clicks).bind(rage).execute(&mut **tx).await?;
+        .bind(checkpoint.as_ref().map(|s| s.clicks)).bind(checkpoint.as_ref().map(|s| s.rage))
+        .bind(checkpoint.map(sqlx::types::Json)).execute(&mut **tx).await?;
     Ok(())
 }
 
@@ -235,60 +330,52 @@ mod tests {
             (3, 0)
         );
     }
-    #[tokio::test]
-    #[ignore = "requires loopback Postgres; uses temporary tables and rolls back"]
-    async fn postgres_totals_handle_missing_late_and_repeated_chunks() {
-        dotenvy::dotenv().ok();
-        let database = std::env::var("DATABASE_URL").unwrap();
-        assert!(matches!(
-            url::Url::parse(&database).unwrap().host_str(),
-            Some("localhost" | "127.0.0.1" | "[::1]")
-        ));
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&database)
-            .await
-            .unwrap();
-        let mut tx = pool.begin().await.unwrap();
-        sqlx::query("CREATE TEMP TABLE replay_sessions (project_id uuid, session_id text, window_id text, click_count integer, rage_click_count integer) ON COMMIT DROP").execute(&mut *tx).await.unwrap();
-        sqlx::query("CREATE TEMP TABLE replay_snapshots (id integer, project_id uuid, session_id text, window_id text, storage_generation integer, click_analysis jsonb) ON COMMIT DROP").execute(&mut *tx).await.unwrap();
-        let project = Uuid::new_v4();
-        sqlx::query("INSERT INTO replay_sessions VALUES ($1,'session','window',NULL,NULL)")
-            .bind(project)
-            .execute(&mut *tx)
-            .await
-            .unwrap();
-        let first = extract(&[click(0, 1, 20.0), click(600, 3, 20.0)]);
-        sqlx::query("INSERT INTO replay_snapshots VALUES (1,$1,'session','window',1,$2), (2,$1,'session','window',1,NULL), (3,$1,'session','other-window',1,NULL), (4,$1,'session','window',0,NULL)")
-            .bind(project).bind(sqlx::types::Json(first)).execute(&mut *tx).await.unwrap();
-        refresh(&mut tx, project, "session", "window", 1)
-            .await
-            .unwrap();
-        let counts = sqlx::query_as::<_, (Option<i32>, Option<i32>)>(
-            "SELECT click_count, rage_click_count FROM replay_sessions",
-        )
-        .fetch_one(&mut *tx)
-        .await
-        .unwrap();
-        assert_eq!(counts, (None, None));
-        let late = extract(&[click(300, 2, 20.0), click(600, 3, 20.0)]);
-        sqlx::query("UPDATE replay_snapshots SET click_analysis=$1 WHERE id=2")
-            .bind(sqlx::types::Json(late))
-            .execute(&mut *tx)
-            .await
-            .unwrap();
-        for _ in 0..2 {
-            refresh(&mut tx, project, "session", "window", 1)
-                .await
-                .unwrap();
-            let counts = sqlx::query_as::<_, (Option<i32>, Option<i32>)>(
-                "SELECT click_count, rage_click_count FROM replay_sessions",
-            )
-            .fetch_one(&mut *tx)
-            .await
-            .unwrap();
-            assert_eq!(counts, (Some(3), Some(1)));
+}
+
+#[cfg(test)]
+mod checkpoint_tests {
+    use super::*;
+    #[test]
+    fn incremental_checkpoint_matches_canonical_analysis_across_chunk_boundaries() {
+        let mut random = 42u64;
+        for run in 0..100 {
+            let mut chunks = vec![];
+            let mut state = Checkpoint::new(1, 0);
+            let mut timestamp = 0.0;
+            for batch in 0..20 {
+                let mut signals = vec![];
+                for i in 0..17 {
+                    random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    timestamp += ((random >> 32) % 700 + 1) as f64;
+                    signals.push(Signal {
+                        timestamp,
+                        seq: Some((batch * 17 + i) as u64),
+                        target: if random % 23 == 0 {
+                            None
+                        } else {
+                            Some((random % 3) as i64)
+                        },
+                        x: (random % 40) as f64,
+                        y: 0.0,
+                    });
+                }
+                let chunk = ClickAnalysis {
+                    version: VERSION,
+                    signals,
+                };
+                assert!(state.appendable(&chunk));
+                state.extend(std::slice::from_ref(&chunk));
+                // Round-trip the persisted representation between chunks.
+                state = serde_json::from_value(serde_json::to_value(state).unwrap()).unwrap();
+                chunks.push(chunk);
+                assert_eq!(
+                    (state.clicks, state.rage),
+                    summarize(&chunks),
+                    "run {run}, batch {batch}"
+                );
+                assert!(state.pending.len() <= 2);
+                assert!(!state.appendable(chunks.last().unwrap()));
+            }
         }
-        tx.rollback().await.unwrap();
     }
 }

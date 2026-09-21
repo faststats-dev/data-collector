@@ -184,6 +184,7 @@ pub async fn vitals(
                 .replay_publisher
                 .mark_poor_vital(
                     ctx.project_id,
+                    ctx.replay_storage_generation,
                     session_id,
                     request.window_id.as_deref().unwrap_or(session_id),
                 )

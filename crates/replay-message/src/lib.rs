@@ -39,6 +39,8 @@ pub struct ReplayChunk {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ReplaySessionPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_generation: Option<i32>,
     pub project_id: Uuid,
     pub session_id: String,
     pub window_id: String,

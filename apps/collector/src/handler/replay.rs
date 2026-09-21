@@ -40,11 +40,17 @@ impl ReplayPublisher {
     pub(crate) async fn mark_error(
         &self,
         project_id: Uuid,
+        storage_generation: i32,
         session_id: &str,
         window_id: &str,
     ) -> Result<(), String> {
         self.publish(ReplayCommand::SessionPatch(session_patch(
-            project_id, session_id, window_id, true, false,
+            project_id,
+            Some(storage_generation),
+            session_id,
+            window_id,
+            true,
+            false,
         )))
         .await
     }
@@ -52,11 +58,17 @@ impl ReplayPublisher {
     pub(crate) async fn mark_poor_vital(
         &self,
         project_id: Uuid,
+        storage_generation: i32,
         session_id: &str,
         window_id: &str,
     ) -> Result<(), String> {
         self.publish(ReplayCommand::SessionPatch(session_patch(
-            project_id, session_id, window_id, false, true,
+            project_id,
+            Some(storage_generation),
+            session_id,
+            window_id,
+            false,
+            true,
         )))
         .await
     }
@@ -64,12 +76,14 @@ impl ReplayPublisher {
 
 fn session_patch(
     project_id: Uuid,
+    storage_generation: Option<i32>,
     session_id: &str,
     window_id: &str,
     has_errors: bool,
     has_poor_vitals: bool,
 ) -> ReplaySessionPatch {
     ReplaySessionPatch {
+        storage_generation,
         project_id,
         session_id: session_id.into(),
         window_id: window_id.into(),

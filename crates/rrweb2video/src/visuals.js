@@ -1,7 +1,7 @@
 // Reuse pixels only after the Rust side has seen two identical captures. This
 // observer also requires static, fully loaded resources and stops on any change.
 (() => {
-  let dirty = true, safePreviously = false, dynamicStyles = false;
+  let dirty = true, safePreviously = false, initialized = false, safetyDirty = true;
   let sheets = new WeakMap();
   const documents = new WeakSet(), staticImages = new Map(), failedLinks = new WeakSet();
   const invalidate = event => {
@@ -52,10 +52,11 @@
     return true;
   };
   window.__replayer.on('event-cast', event => {
+    // Custom metadata has no visual effect in this player (no custom handlers).
+    if (event.type === 5) return;
     dirty = true;
-    // CSSOM changes can introduce resources without DOM mutations. Conservatively
-    // retain every-frame capture after stylesheet/declaration/adoption events.
-    if (event.type === 3 && [8, 13, 15].includes(event.data.source)) dynamicStyles = true;
+    // Recheck CSS resources after CSSOM changes instead of permanently disabling reuse.
+    if (event.type === 3 && [8, 13, 15].includes(event.data.source)) sheets = new WeakMap();
   });
   const inspect = doc => {
     if (!doc) return false;
@@ -70,7 +71,7 @@
       for (const event of ['load', 'error', 'scroll', 'resize', 'focusin', 'focusout']) doc.addEventListener(event, invalidate, true);
       for (const event of ['loading', 'loadingdone', 'loadingerror']) owner.fonts.addEventListener(event, invalidate);
     }
-    let safe = !dynamicStyles && owner.fonts.status === 'loaded';
+    let safe = owner.fonts.status === 'loaded';
     if (doc.querySelector('video, canvas, animate, animateMotion, animateTransform, set, link[rel~="stylesheet"][href^="data:"]') ||
         (doc.getAnimations ? doc.getAnimations() : [...doc.querySelectorAll('*')].flatMap(e => e.getAnimations())).some(a => a.playState === 'running' || a.pending) ||
         doc.activeElement?.matches('input, textarea, [contenteditable]')) safe = false;
@@ -95,9 +96,17 @@
     return safe;
   };
   window.__captureNeeded = () => {
-    const safe = dirty ? inspect(document) : safePreviously;
-    safePreviously = safe;
-    const result = dirty || !safe;
+    // A dirty frame must be captured regardless of resource safety. Defer the
+    // expensive tree inspection until the first clean tick that might reuse it.
+    // Always inspect initially to register observers before any reuse is possible.
+    if (!initialized || (!dirty && safetyDirty)) {
+      safePreviously = inspect(document);
+      initialized = true;
+      safetyDirty = false;
+    } else if (dirty) {
+      safetyDirty = true;
+    }
+    const result = dirty || !safePreviously;
     dirty = false;
     return result;
   };

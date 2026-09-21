@@ -6,6 +6,7 @@ pub struct Config {
     pub group_id: String,
     pub final_topic: String,
     pub final_idle_seconds: i32,
+    pub final_grace_seconds: i32,
     pub max_message_bytes: usize,
     pub security_protocol: String,
     pub sasl_mechanism: Option<String>,
@@ -23,7 +24,12 @@ impl Config {
         if final_idle_seconds < 60 {
             return Err("REPLAY_FINAL_IDLE_SECONDS must be at least 60".into());
         }
+        let final_grace_seconds = optional("REPLAY_FINAL_GRACE_SECONDS", 10)?;
+        if final_grace_seconds < 1 {
+            return Err("REPLAY_FINAL_GRACE_SECONDS must be positive".into());
+        }
         Ok(Self {
+            final_grace_seconds,
             final_idle_seconds,
             final_topic: std::env::var(replay_message::FINAL_TOPIC_ENV)
                 .unwrap_or_else(|_| replay_message::FINAL_TOPIC.into()),

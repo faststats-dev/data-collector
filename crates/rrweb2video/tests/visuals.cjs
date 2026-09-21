@@ -58,11 +58,11 @@ test('static PNGs are reusable but animated CSS background images are not', () =
   assert.equal(other.c.__captureNeeded(), true); assert.equal(other.c.__captureNeeded(), true);
 });
 
-test('CSSOM mutations conservatively disable reuse', () => {
+test('CSSOM mutations recheck resources without permanently disabling reuse', () => {
   const { c, cast } = setup();
   c.__captureNeeded(); assert.equal(c.__captureNeeded(), false);
   cast['event-cast']({ type: 3, data: { source: 13 } });
-  assert.equal(c.__captureNeeded(), true); assert.equal(c.__captureNeeded(), true);
+  assert.equal(c.__captureNeeded(), true); assert.equal(c.__captureNeeded(), false);
 });
 
 test('batched clock steps preserve every tick and stop at the first mutation', async () => {
@@ -98,4 +98,34 @@ test('unreadable blocked HTTP stylesheets are static; unknown blob sheets are no
     doc.styleSheets = [{ href, get cssRules() { throw new Error('cross origin'); } }];
     assert.equal(c.__captureNeeded(), true); assert.equal(c.__captureNeeded(), !reusable);
   }
+});
+
+
+test('continuous activity captures without rescanning the whole DOM', () => {
+  const { c, doc, cast } = setup();
+  let scans = 0;
+  const query = doc.querySelectorAll;
+  doc.querySelectorAll = function(selector) { if (selector === '*') scans++; return query.call(this, selector); };
+  c.__captureNeeded();
+  for (let i=0; i<100; i++) {
+    cast['event-cast']({ type: 3, data: { source: 1 } });
+    assert.equal(c.__captureNeeded(), true);
+  }
+  assert.equal(scans, 1);
+  assert.equal(c.__captureNeeded(), false);
+  assert.equal(scans, 2);
+  cast['event-cast']({ type: 5, data: { tag: 'metadata' } });
+  assert.equal(c.__captureNeeded(), false);
+});
+
+test('resources introduced by CSSOM stay unsafe after the deferred check', () => {
+  const { c, doc, cast } = setup();
+  const sheet = { cssRules: [] };
+  doc.styleSheets = [sheet];
+  c.__captureNeeded(); c.__captureNeeded();
+  sheet.cssRules = [{ type: 1, style: { cssText: 'background:url(data:image/gif;base64,R0lG)' } }];
+  cast['event-cast']({ type: 3, data: { source: 8 } });
+  assert.equal(c.__captureNeeded(), true);
+  assert.equal(c.__captureNeeded(), true);
+  assert.equal(c.__captureNeeded(), true);
 });

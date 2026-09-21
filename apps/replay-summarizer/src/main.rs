@@ -1,202 +1,202 @@
 mod config;
+mod jobs;
 mod kafka;
 mod object_store;
+mod renderer;
 mod replay_loader;
 
-use anyhow::{Context, Result, anyhow, ensure};
+use anyhow::{Context, Result};
 use rdkafka::{
     Message,
     consumer::{CommitMode, Consumer},
 };
 use replay_message::FinalReplay;
 use serde_json::Value;
-use sqlx::{Row, postgres::PgPoolOptions};
-use std::{path::PathBuf, time::Instant};
+use sqlx::postgres::PgPoolOptions;
+use std::time::{Duration, Instant};
+use tokio::sync::watch;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     dotenvy::dotenv().ok();
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
                 .add_directive(tracing::Level::INFO.into()),
         )
         .init();
-    let config = config::Config::from_env().map_err(|e| anyhow!(e))?;
+    if std::env::args().any(|a| a == "--render-child") {
+        return renderer::child_main().await;
+    }
+    let config = config::Config::from_env().map_err(anyhow::Error::msg)?;
     let pool = PgPoolOptions::new()
         .max_connections(config.database_max_connections)
+        .acquire_timeout(Duration::from_secs(10))
         .connect(&config.database_url)
         .await?;
-    let objects = object_store::ObjectStore::from_env()
-        .map_err(|e| anyhow!(e))?
-        .context("Replay S3 configuration must be set")?;
-    let consumer = kafka::create_consumer(&config).map_err(|e| anyhow!(e))?;
-    tracing::info!(
-        topic = config.topic,
-        "Replay summarizer started (encode and discard)"
-    );
-    let mut retries = tokio::time::interval(std::time::Duration::from_secs(30));
-    loop {
-        tokio::select! {
-            _ = retries.tick() => {
-                let rows = sqlx::query("SELECT * FROM replay_summary_jobs WHERE kafka_triggered AND NOT processed AND last_error IS NOT NULL AND next_attempt_at <= NOW() ORDER BY next_attempt_at LIMIT 10").fetch_all(&pool).await?;
-                for row in rows {
-                    let event = FinalReplay { job_id: row.get("id"), project_id: row.get("project_id"), session_id: row.get("session_id"), window_id: row.get("window_id"), storage_generation: row.get("storage_generation"), chunk_count: row.get("chunk_count") };
-                    attempt(&pool, &objects, &event, config.max_decoded_bytes).await?;
+    let consumer = kafka::create_consumer(&config).map_err(anyhow::Error::msg)?;
+    let (shutdown, stop) = watch::channel(false);
+    let dispatch_pool = pool.clone();
+    let mut dispatcher = tokio::spawn(async move {
+        let mut stop = stop;
+        loop {
+            tokio::select! {
+                _=stop.changed()=>return Ok::<_,anyhow::Error>(()),
+                message=consumer.recv()=> {
+                    let message=message?;
+                    let epoch=*consumer.context().0.lock().unwrap();
+                    let event=message.payload().and_then(|p| serde_json::from_slice::<FinalReplay>(p).ok());
+                    let valid=match event {
+                        Some(event)=>tokio::time::timeout(Duration::from_secs(20),jobs::dispatch(&dispatch_pool,&event)).await??,
+                        None=>false,
+                    };
+                    if !valid {
+                        tracing::warn!(topic=message.topic(),partition=message.partition(),offset=message.offset(),"Dropping invalid final replay descriptor");
+                    }
+                    let current=consumer.context().0.lock().unwrap();
+                    anyhow::ensure!(*current==epoch,"Kafka ownership changed during dispatch; redelivery is safe");
+                    consumer.commit_message(&message,CommitMode::Async)?;
                 }
             }
-            message = consumer.recv() => {
-                let message = message?;
-                let event: FinalReplay = serde_json::from_slice(message.payload().context("missing final replay payload")?)?;
-                attempt(&pool, &objects, &event, config.max_decoded_bytes).await?;
-                consumer.commit_message(&message, CommitMode::Sync)?;
-            }
-            result = tokio::signal::ctrl_c() => { result?; return Ok(()); }
         }
+    });
+    let observation_pool = pool.clone();
+    let mut observation_stop = shutdown.subscribe();
+    let observer = tokio::spawn(async move {
+        let mut timer = tokio::time::interval(Duration::from_secs(30));
+        loop {
+            tokio::select! {
+                _=observation_stop.changed()=>return,
+                _=timer.tick()=>if let Err(error)=tokio::time::timeout(Duration::from_secs(20), jobs::observe_queue(&observation_pool)).await.unwrap_or_else(|e|Err(e.into())) {
+                    tracing::warn!(%error,"Cannot observe replay queue");
+                }
+            }
+        }
+    });
+    let mut worker = tokio::spawn(worker(pool, config.max_decoded_bytes, shutdown.subscribe()));
+    tracing::info!(
+        profile = jobs::PROFILE,
+        "Replay summarizer started: independent Kafka dispatch and leased rendering"
+    );
+    let result = tokio::select! {
+        result=&mut dispatcher=>result.context("dispatcher panicked")?,
+        result=&mut worker=>result.context("render supervisor panicked")?,
+        result=shutdown_signal()=>result,
+    };
+    let _ = shutdown.send(true);
+    // Only await tasks that have not already yielded their result.
+    if !worker.is_finished() {
+        let _ = tokio::time::timeout(Duration::from_secs(15), &mut worker).await;
     }
+    worker.abort();
+    dispatcher.abort();
+    observer.abort();
+    result
 }
-
-// Failed jobs are durable and retried after one minute; malformed recordings do
-// not block an entire Kafka partition. Three failures remain inspectable in SQL.
-async fn attempt(
-    pool: &sqlx::PgPool,
-    objects: &object_store::ObjectStore,
-    event: &FinalReplay,
-    max_decoded_bytes: usize,
-) -> Result<()> {
-    if let Err(error) = process(pool, objects, event, max_decoded_bytes).await {
-        let error = format!("{error:#}");
-        tracing::error!(job_id = %event.job_id, %error, "Replay processing failed");
-        sqlx::query("UPDATE replay_summary_jobs SET attempts = attempts + 1, last_error = $2, next_attempt_at = NOW() + interval '1 minute', processed = attempts >= 2, processed_at = CASE WHEN attempts >= 2 THEN NOW() ELSE NULL END WHERE id = $1 AND NOT processed")
-            .bind(event.job_id).bind(error).execute(pool).await?;
-    }
+async fn shutdown_signal() -> Result<()> {
+    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    tokio::select! { r=tokio::signal::ctrl_c()=>r?, _=term.recv()=>{} }
     Ok(())
 }
 
-async fn process(
+async fn worker(pool: sqlx::PgPool, limit: usize, mut stop: watch::Receiver<bool>) -> Result<()> {
+    let mut child: Option<renderer::Child> = None;
+    let idle_delay = Duration::from_millis(3000 + (uuid::Uuid::new_v4().as_u128() % 2000) as u64);
+    loop {
+        if *stop.borrow() {
+            if let Some(c) = child.as_mut() {
+                c.stop().await;
+            }
+            return Ok(());
+        }
+        let claim = match tokio::time::timeout(Duration::from_secs(20), jobs::claim(&pool))
+            .await
+            .context("claim timed out")?
+        {
+            Ok(Some(claim)) => claim,
+            result => {
+                if let Err(error) = result {
+                    tracing::warn!(%error,"Cannot claim replay job");
+                }
+                // Replica-specific jitter avoids synchronized idle polling.
+                tokio::select! { _=tokio::time::sleep(idle_delay)=>{}, _=stop.changed()=>{} }
+                continue;
+            }
+        };
+        tracing::info!(job_id=%claim.event.job_id, token=claim.token,"Claimed replay job");
+        let outcome = run_job(&pool, &claim, limit, &mut child, &mut stop).await;
+        if let Err(error) = outcome {
+            tracing::error!(job_id=%claim.event.job_id,error=%format!("{error:#}"),"Replay attempt failed");
+            if let Some(mut c) = child.take() {
+                c.stop().await;
+            }
+            if let Err(error) = jobs::fail(&pool, &claim, &format!("{error:#}"), true).await {
+                tracing::warn!(%error,"Could not record failure; lease expiry will recover job");
+            }
+        }
+    }
+}
+async fn run_job(
     pool: &sqlx::PgPool,
-    objects: &object_store::ObjectStore,
-    event: &FinalReplay,
-    max_decoded_bytes: usize,
+    claim: &jobs::Claim,
+    limit: usize,
+    child: &mut Option<renderer::Child>,
+    stop: &mut watch::Receiver<bool>,
 ) -> Result<()> {
-    let started = Instant::now();
-    let mut tx = pool.begin().await?;
-    let job = sqlx::query("SELECT *, next_attempt_at > NOW() AS waiting FROM replay_summary_jobs WHERE id = $1 AND kafka_triggered FOR UPDATE")
-        .bind(event.job_id).fetch_optional(&mut *tx).await?;
-    let Some(job) = job else {
+    let Some(input) =
+        tokio::time::timeout(Duration::from_secs(20), jobs::prepare(pool, claim, limit)).await??
+    else {
+        jobs::finish(pool, claim, "skipped", None).await?;
         return Ok(());
     };
-    // Never trust topic payloads to redirect an existing job to another recording.
-    ensure!(
-        job.get::<uuid::Uuid, _>("project_id") == event.project_id
-            && job.get::<String, _>("session_id") == event.session_id
-            && job.get::<String, _>("window_id") == event.window_id
-            && job.get::<i32, _>("storage_generation") == event.storage_generation
-            && job.get::<i32, _>("chunk_count") == event.chunk_count,
-        "final replay identity mismatch"
-    );
-    if job.get::<bool, _>("processed") || job.get::<bool, _>("waiting") {
-        return Ok(());
+    if child.is_none() {
+        *child = Some(renderer::Child::spawn()?);
     }
-    let session = sqlx::query(
-        r#"
-        SELECT to_jsonb(s) AS attributes, cfg.settings
-        FROM replay_sessions s JOIN project p ON p.id = s.project_id
-        JOIN replay_summary_settings cfg ON cfg.project_id = s.project_id
-        WHERE s.project_id = $1 AND s.session_id = $2 AND s.window_id = $3
-          AND s.deleted_at IS NULL AND p.replay_storage_state = 'active'
-          AND p.replay_storage_generation = $4 AND s.chunk_count = $5
-          AND s.is_complete
-    "#,
-    )
-    .bind(event.project_id)
-    .bind(&event.session_id)
-    .bind(&event.window_id)
-    .bind(event.storage_generation)
-    .bind(event.chunk_count)
-    .fetch_optional(&mut *tx)
-    .await?;
-    let selected = session.as_ref().is_some_and(|row| {
-        matches_settings(
-            &row.get::<Value, _>("settings"),
-            &row.get::<Value, _>("attributes"),
-        )
-    });
-    if selected {
-        tracing::info!(job_id = %event.job_id, chunks = event.chunk_count, "Loading replay");
-        let rows = sqlx::query(r#"
-            SELECT s3_key, content_encoding
-            FROM replay_snapshots WHERE project_id = $1 AND session_id = $2 AND window_id = $3 AND storage_generation = $4
-            ORDER BY COALESCE(first_sequence, sequence), first_event_timestamp_ms, created_at, id
-        "#).bind(event.project_id).bind(&event.session_id).bind(&event.window_id).bind(event.storage_generation)
-            .fetch_all(&mut *tx).await?;
-        ensure!(
-            rows.len() == event.chunk_count as usize,
-            "snapshot revision changed; retry after ingestion settles"
-        );
-        let mut events = Vec::new();
-        let mut decoded_bytes = 0;
-        for row in rows {
-            let key: String = row.get("s3_key");
-            let bytes = objects
-                .get(&objects.bucket(event.project_id), &key, max_decoded_bytes)
-                .await
-                .map_err(|e| anyhow!(e))?;
-            let encoding: String = row.get("content_encoding");
-            let remaining = max_decoded_bytes - decoded_bytes;
-            let (mut chunk, size) = tokio::task::spawn_blocking(move || {
-                replay_loader::decode_chunk(&bytes, &encoding, remaining)
-            })
-            .await??;
-            decoded_bytes += size;
-            events.append(&mut chunk);
+    let renderer = child.as_mut().unwrap();
+    tokio::time::timeout(Duration::from_secs(30), renderer.start(&input)).await??;
+    let started = Instant::now();
+    let mut progress = Instant::now();
+    let mut last_renewal = Instant::now();
+    let mut stage = "download".to_string();
+    let mut heartbeat = tokio::time::interval(Duration::from_secs(5));
+    loop {
+        tokio::select! {
+            _=stop.changed()=>anyhow::bail!("worker shutting down"),
+            _=heartbeat.tick()=> {
+                anyhow::ensure!(started.elapsed()<Duration::from_secs(1800),"render attempt exceeded 30 minutes");
+                anyhow::ensure!(progress.elapsed()<Duration::from_secs(60),"renderer made no progress for 60 seconds");
+                if last_renewal.elapsed()>=Duration::from_secs(30) {
+                    // On uncertain renewal stop immediately; never knowingly work
+                    // beyond ownership. Recovery is safe even if this update landed.
+                    if !tokio::time::timeout(Duration::from_secs(20), jobs::renew(pool,claim,&stage)).await?? {
+                        renderer.stop().await;
+                        *child=None;
+                        jobs::finish(pool,claim,"superseded",None).await?;
+                        return Ok(());
+                    }
+                    last_renewal=Instant::now();
+                }
+            }
+            output=renderer.next()=>match output? {
+                renderer::Output::Progress {stage:next,completed,total}=> {
+                    stage=next;progress=Instant::now();
+                    tracing::debug!(job_id=%claim.event.job_id,%stage,completed,total,"Replay progress");
+                }
+                renderer::Output::Complete {report,replay_time_ms,download_seconds}=> {
+                    let report=serde_json::json!({"render":report,"replay_time_ms":replay_time_ms,"download_seconds":download_seconds,"processing_seconds":started.elapsed().as_secs_f64()});
+                    let committed=jobs::finish(pool,claim,"succeeded",Some(report.clone())).await?;
+                    tracing::info!(job_id=%claim.event.job_id,committed,report=%report,"Replay encoded and discarded");
+                    return Ok(());
+                }
+                renderer::Output::Failed {code,message,retryable}=> {
+                    jobs::fail(pool,claim,&format!("{code}: {message}"),retryable).await?;
+                    tracing::warn!(job_id=%claim.event.job_id,%code,%message,retryable,"Replay attempt failed");
+                    return Ok(());
+                }
+            }
         }
-        // Sequence provides a stable tie-breaker across chunks with equal timestamps.
-        events.sort_by_key(|event| event.order);
-        let download_seconds = started.elapsed().as_secs_f64();
-        tracing::info!(job_id = %event.job_id, events = events.len(), decoded_bytes, "Rendering replay");
-        let report = tokio::task::spawn_blocking(move || -> Result<_> {
-            let replay = rrweb2video::Replay::from_events(
-                events.into_iter().map(|event| event.raw).collect(),
-            )?;
-            let duration_ms = replay.duration_ms;
-            let options = rrweb2video::RenderOptions {
-                chromium: env_path("RRWEB2VIDEO_CHROMIUM", "/usr/local/bin/chromium-headless"),
-                ffmpeg: env_path("RRWEB2VIDEO_FFMPEG", "ffmpeg"),
-                rrweb_js: env_path(
-                    "RRWEB2VIDEO_JS",
-                    "/opt/player/node_modules/rrweb/dist/rrweb.umd.min.cjs",
-                ),
-                rrweb_css: env_path(
-                    "RRWEB2VIDEO_CSS",
-                    "/opt/player/node_modules/rrweb/dist/style.css",
-                ),
-                output: "/dev/null".into(),
-                fps: 10,
-                speed: 8.0,
-                max_duration_ms: None,
-            };
-            let report = rrweb2video::render_discard_owned(replay, &options)?;
-            Ok((duration_ms, report))
-        })
-        .await??;
-        tracing::info!(job_id = %event.job_id, replay_time_ms = report.0,
-            download_seconds, render_seconds = report.1.stats.total,
-            processing_seconds = started.elapsed().as_secs_f64(), frames = report.1.frames,
-            video_seconds = report.1.video_duration_seconds, "Replay encoded and discarded");
-    } else {
-        tracing::debug!(job_id = %event.job_id, "Replay skipped by settings or stale storage revision");
     }
-    sqlx::query("UPDATE replay_summary_jobs SET processed = true, processed_at = NOW(), last_error = NULL WHERE id = $1")
-        .bind(event.job_id).execute(&mut *tx).await?;
-    tx.commit().await?;
-    Ok(())
-}
-
-fn env_path(name: &str, default: &str) -> PathBuf {
-    std::env::var(name)
-        .unwrap_or_else(|_| default.into())
-        .into()
 }
 
 fn matches_settings(settings: &Value, attributes: &Value) -> bool {

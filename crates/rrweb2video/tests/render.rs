@@ -73,3 +73,49 @@ fn discard_encodes_without_creating_a_video_file() {
     assert_eq!(report.output, std::path::Path::new("/dev/null"));
     assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
 }
+
+#[test]
+#[ignore = "requires chrome-headless-shell, FFmpeg, and local npm assets"]
+fn warm_session_handles_separate_recordings_and_recovers_after_failure() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut options = RenderOptions {
+        chromium: std::env::var_os("RRWEB2VIDEO_CHROMIUM").unwrap().into(),
+        ffmpeg: "ffmpeg".into(),
+        rrweb_js: root.join("player/node_modules/rrweb/dist/rrweb.umd.min.cjs"),
+        rrweb_css: root.join("player/node_modules/rrweb/dist/style.css"),
+        output: "/dev/null".into(),
+        fps: 3,
+        speed: 8.0,
+        max_duration_ms: None,
+    };
+    let mut session = rrweb2video::RenderSession::default();
+    for attempt in 0..3 {
+        let replay = Replay::from_slice(&common::recording()).unwrap();
+        let mut stages = vec![];
+        let report = session
+            .render_owned(replay, &options, |stage, _, _| {
+                stages.push(stage.to_string())
+            })
+            .unwrap();
+        assert_eq!(report.frames, 3);
+        assert!(stages.iter().any(|s| s == "capture"));
+        assert!(stages.iter().any(|s| s == "encoding"));
+        eprintln!(
+            "warm session attempt {attempt}: {} seconds",
+            report.stats.total
+        );
+        if attempt == 1 {
+            options.ffmpeg = "/missing/ffmpeg".into();
+            assert!(
+                session
+                    .render_owned(
+                        Replay::from_slice(&common::recording()).unwrap(),
+                        &options,
+                        |_, _, _| {}
+                    )
+                    .is_err()
+            );
+            options.ffmpeg = "ffmpeg".into();
+        }
+    }
+}

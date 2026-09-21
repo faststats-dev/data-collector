@@ -1,7 +1,9 @@
 # replay-consumer
 
-Consumes typed replay commands from Kafka. Each record is persisted and then explicitly
-committed. Storage operations are idempotent, so a crash between persistence and the offset
+Consumes typed replay commands from Kafka in bounded batches (100 records / 32 MiB,
+plus at most one oversized record). Four independent recording keys can persist
+concurrently; each key remains ordered. Only fully persisted batches advance
+stored offsets, and a rebalance invalidates the batch acknowledgement. Storage operations are idempotent, so a crash between persistence and the offset
 commit safely replays the record. A persistence or Kafka error stops the process, leaving the
 record uncommitted for the supervisor to retry.
 
@@ -17,9 +19,7 @@ in `crates/replay-message/src/lib.rs`; both producer and consumer depend on that
 topic setting is shared there too: `REPLAY_KAFKA_TOPIC`, defaulting to `replay-snapshot`.
 
 For local development, `docker-compose.yml` creates that topic with three partitions.
-Production topic partitioning, replication, retention, compression, and message-size limits
-are declared in `northflank/production.template.json` and reconciled with Aiven by a
-Northflank OpenTofu template.
+Production topics and permissions are managed in the sibling infra repository.
 
 The collector uses Kafka's native Zstandard record-batch compression with a short batching
 window. Kafka handles decompression transparently, so messages remain readable in Kafka UI.
@@ -67,13 +67,23 @@ Large replay commands use `KAFKA_MAX_MESSAGE_BYTES` (default 17 MiB) consistentl
 collector and replay consumer. The broker must allow the same size; the local Compose broker
 is configured accordingly.
 
-Session patches received before their replay snapshot are held without advancing that Kafka
-partition's committed offset. Once the snapshot creates the session, the patch is applied and
-the offset advances. A restart therefore replays, rather than loses, unresolved patches.
+Session patches and terminal markers are persisted in `replay_recording_controls`,
+even before the first snapshot. They no longer pin Kafka offsets waiting for a
+session that may never arrive. New patches carry the storage generation so stale
+signals cannot affect a reset project. Duplicate signals do not extend deadlines.
+
+Explicit finals use a 10-second grace period (`REPLAY_FINAL_GRACE_SECONDS`);
+missing finals retain the 35-minute inactivity fallback (`REPLAY_FINAL_IDLE_SECONDS`).
+The five-second finalizer atomically creates an outbox job and marks the revision
+complete. A separate publisher leases outbox rows, releases database locks, then
+publishes `final-replay-v1`. Kafka delays do not hold a database transaction.
+
+Malformed commands are dropped with a warning containing their topic, partition
+and offset. Their offsets advance with the completed batch; payloads are not retained.
 
 ## Click analysis
 
-Deploy the monorepo migration `20260907063318_free_venus` before this consumer.
+Deploy the monorepo migration `20260921092354_replay_worker_leases` before this consumer.
 The consumer stores click/boundary signals per chunk and computes session click
 and rage-burst counts under the existing transaction and stream lock. Sorting
 and event-ID deduplication handle late chunks and retries. Unanalyzed recordings
@@ -85,5 +95,10 @@ Navigation, scrolling, resizing and full snapshots reset detection. Keep the
 player's `rage-clicks.ts` in sync. This is a heuristic; intentional repeated
 clicks can qualify and unrecorded interactions cannot be recovered.
 
-Totals are recomputed from the compact session index on each accepted chunk;
-profile this path before scaling to very long, interaction-heavy recordings.
+Append-only chunks update a bounded checkpoint containing the current rage-click
+episode and at most two pending clicks. They do not reread historical chunks.
+Overlapping timestamps, late chunks and incompatible checkpoints use the canonical
+rebuild path so totals remain exact. Checkpoint, snapshot and totals commit together.
+
+See the summarizer README for coordinated deployment order. No migration belongs
+in this Rust repository.

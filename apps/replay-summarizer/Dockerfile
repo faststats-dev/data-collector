@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 FROM rust:1-bookworm AS builder
 WORKDIR /app
-RUN apt-get update && apt-get install -y --no-install-recommends clang cmake g++ libclang-dev libcurl4-openssl-dev libsasl2-dev libssl-dev libzstd-dev pkg-config && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends g++ && rm -rf /var/lib/apt/lists/*
 COPY . .
 RUN cargo build --release --locked --package replay-summarizer && strip target/release/replay-summarizer
 
@@ -12,7 +12,7 @@ WORKDIR /opt/player
 COPY crates/rrweb2video/player/package.json crates/rrweb2video/player/package-lock.json ./
 RUN npm ci --ignore-scripts --no-audit --no-fund && \
     npx --yes playwright@${PLAYWRIGHT_VERSION} install --with-deps --only-shell chromium && \
-    apt-get update && apt-get install -y --no-install-recommends ffmpeg libsasl2-2 libssl3 libzstd1 && \
+    apt-get update && apt-get install -y --no-install-recommends ffmpeg && \
     rm -rf /var/lib/apt/lists/* && \
     find /opt/browsers -type f \( -name chrome-headless-shell -o -name headless_shell \) -exec ln -sf '{}' /usr/local/bin/chromium-headless-real \; && \
     test -x /usr/local/bin/chromium-headless-real

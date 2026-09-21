@@ -3340,8 +3340,6 @@ dependencies = [
  "dotenvy",
  "futures-util",
  "libc",
- "rdkafka",
- "replay-message",
  "rrweb2video",
  "serde",
  "serde_json",

@@ -1,14 +1,22 @@
-//! PostgreSQL is the sole execution ledger. Kafka only makes an outbox job ready.
+//! PostgreSQL is the durable queue and execution ledger.
 use anyhow::{Result, ensure};
-use replay_message::FinalReplay;
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 pub const PROFILE: &str = "h264-3fps-8x-v1";
 #[derive(Debug)]
+pub struct RecordingRevision {
+    pub job_id: Uuid,
+    pub project_id: Uuid,
+    pub session_id: String,
+    pub window_id: String,
+    pub storage_generation: i32,
+    pub chunk_count: i32,
+}
+#[derive(Debug)]
 pub struct Claim {
-    pub event: FinalReplay,
+    pub event: RecordingRevision,
     pub token: i32,
 }
 #[derive(Debug, Serialize, Deserialize)]
@@ -26,29 +34,10 @@ pub struct Input {
     pub max_decoded_bytes: usize,
 }
 
-pub async fn dispatch(pool: &PgPool, event: &FinalReplay) -> Result<bool> {
-    let row=sqlx::query("SELECT project_id,session_id,window_id,storage_generation,chunk_count FROM replay_summary_jobs WHERE id=$1 AND kafka_triggered")
-        .bind(event.job_id).fetch_optional(pool).await?;
-    let Some(row) = row else {
-        return Ok(true);
-    }; // Deleted jobs are harmless redeliveries.
-    let valid = row.get::<Uuid, _>("project_id") == event.project_id
-        && row.get::<String, _>("session_id") == event.session_id
-        && row.get::<String, _>("window_id") == event.window_id
-        && row.get::<i32, _>("storage_generation") == event.storage_generation
-        && row.get::<i32, _>("chunk_count") == event.chunk_count;
-    if !valid {
-        return Ok(false);
-    }
-    sqlx::query("UPDATE replay_summary_jobs SET state=CASE WHEN attempts>=3 THEN 'failed' ELSE 'ready' END, processed=attempts>=3, processed_at=CASE WHEN attempts>=3 THEN NOW() ELSE processed_at END, dispatched_at=COALESCE(dispatched_at,NOW()) WHERE id=$1 AND kafka_triggered AND NOT processed AND state='awaiting_dispatch'")
-        .bind(event.job_id).execute(pool).await?;
-    Ok(true)
-}
-
 pub async fn claim(pool: &PgPool) -> Result<Option<Claim>> {
     // Indexed, bounded reclamation. Expiry fences the old owner even before this runs.
     sqlx::query(r#"
-        WITH expired AS (SELECT id FROM replay_summary_jobs WHERE kafka_triggered AND NOT processed
+        WITH expired AS (SELECT id FROM replay_summary_jobs WHERE NOT processed
             AND state='running' AND lease_until <= NOW() ORDER BY lease_until LIMIT 100 FOR UPDATE SKIP LOCKED)
         UPDATE replay_summary_jobs j SET state=CASE WHEN attempts>=3 THEN 'failed' ELSE 'ready' END,
             processed=attempts>=3, processed_at=CASE WHEN attempts>=3 THEN NOW() END,
@@ -58,7 +47,7 @@ pub async fn claim(pool: &PgPool) -> Result<Option<Claim>> {
     "#).execute(pool).await?;
     let row=sqlx::query(r#"
         WITH candidate AS (
-            SELECT id FROM replay_summary_jobs WHERE kafka_triggered AND NOT processed AND state='ready'
+            SELECT id FROM replay_summary_jobs WHERE NOT processed AND state='ready'
                 AND next_attempt_at<=NOW() AND attempts<3 AND render_profile=$1 ORDER BY next_attempt_at,created_at
             LIMIT 1 FOR UPDATE SKIP LOCKED
         ) UPDATE replay_summary_jobs j SET state='running', execution_token=execution_token+1,
@@ -70,7 +59,7 @@ pub async fn claim(pool: &PgPool) -> Result<Option<Claim>> {
     };
     Ok(Some(Claim {
         token: row.get("execution_token"),
-        event: FinalReplay {
+        event: RecordingRevision {
             job_id: row.get("id"),
             project_id: row.get("project_id"),
             session_id: row.get("session_id"),
@@ -203,10 +192,10 @@ pub async fn observe_queue(pool: &PgPool) -> Result<()> {
         r#"
         SELECT
           (SELECT EXTRACT(EPOCH FROM NOW()-next_attempt_at)::float8 FROM replay_summary_jobs
-           WHERE kafka_triggered AND NOT processed AND state='ready' AND next_attempt_at<=NOW()
+           WHERE NOT processed AND state='ready' AND next_attempt_at<=NOW()
            ORDER BY next_attempt_at,created_at LIMIT 1) AS ready_age,
           (SELECT EXTRACT(EPOCH FROM NOW()-lease_until)::float8 FROM replay_summary_jobs
-           WHERE kafka_triggered AND NOT processed AND state='running' AND lease_until<=NOW()
+           WHERE NOT processed AND state='running' AND lease_until<=NOW()
            ORDER BY lease_until LIMIT 1) AS expired_age
     "#,
     )

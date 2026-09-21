@@ -74,16 +74,17 @@ signals cannot affect a reset project. Duplicate signals do not extend deadlines
 
 Explicit finals use a 10-second grace period (`REPLAY_FINAL_GRACE_SECONDS`);
 missing finals retain the 35-minute inactivity fallback (`REPLAY_FINAL_IDLE_SECONDS`).
-The five-second finalizer atomically creates an outbox job and marks the revision
-complete. A separate publisher leases outbox rows, releases database locks, then
-publishes `final-replay-v1`. Kafka delays do not hold a database transaction.
+The five-second finalizer atomically creates a ready PostgreSQL job and marks the
+revision complete. The summarizer claims that job directly from PostgreSQL; there
+is no completion Kafka topic or publication loop.
 
 Malformed commands are dropped with a warning containing their topic, partition
 and offset. Their offsets advance with the completed batch; payloads are not retained.
 
 ## Click analysis
 
-Deploy the monorepo migration `20260921092354_replay_worker_leases` before this consumer.
+Deploy the monorepo migrations `20260921092354_replay_worker_leases` and the later
+`_replay_postgres_queue` migration before this consumer.
 The consumer stores click/boundary signals per chunk and computes session click
 and rage-burst counts under the existing transaction and stream lock. Sorting
 and event-ID deduplication handle late chunks and retries. Unanalyzed recordings

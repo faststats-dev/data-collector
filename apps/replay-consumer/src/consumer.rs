@@ -32,14 +32,9 @@ pub async fn run(config: Config) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     let storage = ReplayStorage::from_env()?.ok_or("Replay S3 configuration must be set")?;
     let consumer = create_consumer(&config)?;
-    let producer = crate::finalizer::producer(&config)?;
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .map_err(|e| e.to_string())?;
-    let mut finalizer = tokio::spawn(crate::finalizer::run(
-        pool.clone(),
-        producer,
-        config.final_topic.clone(),
-    ));
+    let mut finalizer = tokio::spawn(crate::finalizer::run(pool.clone()));
     info!(topic = config.topic, "Replay consumer started");
     loop {
         tokio::select! {

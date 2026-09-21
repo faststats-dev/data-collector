@@ -1,16 +1,10 @@
 mod config;
 mod jobs;
-mod kafka;
 mod object_store;
 mod renderer;
 mod replay_loader;
 
 use anyhow::{Context, Result};
-use rdkafka::{
-    Message,
-    consumer::{CommitMode, Consumer},
-};
-use replay_message::FinalReplay;
 use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
 use std::time::{Duration, Instant};
@@ -35,32 +29,7 @@ async fn main() -> Result<()> {
         .acquire_timeout(Duration::from_secs(10))
         .connect(&config.database_url)
         .await?;
-    let consumer = kafka::create_consumer(&config).map_err(anyhow::Error::msg)?;
-    let (shutdown, stop) = watch::channel(false);
-    let dispatch_pool = pool.clone();
-    let mut dispatcher = tokio::spawn(async move {
-        let mut stop = stop;
-        loop {
-            tokio::select! {
-                _=stop.changed()=>return Ok::<_,anyhow::Error>(()),
-                message=consumer.recv()=> {
-                    let message=message?;
-                    let epoch=*consumer.context().0.lock().unwrap();
-                    let event=message.payload().and_then(|p| serde_json::from_slice::<FinalReplay>(p).ok());
-                    let valid=match event {
-                        Some(event)=>tokio::time::timeout(Duration::from_secs(20),jobs::dispatch(&dispatch_pool,&event)).await??,
-                        None=>false,
-                    };
-                    if !valid {
-                        tracing::warn!(topic=message.topic(),partition=message.partition(),offset=message.offset(),"Dropping invalid final replay descriptor");
-                    }
-                    let current=consumer.context().0.lock().unwrap();
-                    anyhow::ensure!(*current==epoch,"Kafka ownership changed during dispatch; redelivery is safe");
-                    consumer.commit_message(&message,CommitMode::Async)?;
-                }
-            }
-        }
-    });
+    let (shutdown, _) = watch::channel(false);
     let observation_pool = pool.clone();
     let mut observation_stop = shutdown.subscribe();
     let observer = tokio::spawn(async move {
@@ -77,10 +46,9 @@ async fn main() -> Result<()> {
     let mut worker = tokio::spawn(worker(pool, config.max_decoded_bytes, shutdown.subscribe()));
     tracing::info!(
         profile = jobs::PROFILE,
-        "Replay summarizer started: independent Kafka dispatch and leased rendering"
+        "Replay summarizer started: PostgreSQL queue and leased rendering"
     );
     let result = tokio::select! {
-        result=&mut dispatcher=>result.context("dispatcher panicked")?,
         result=&mut worker=>result.context("render supervisor panicked")?,
         result=shutdown_signal()=>result,
     };
@@ -90,7 +58,6 @@ async fn main() -> Result<()> {
         let _ = tokio::time::timeout(Duration::from_secs(15), &mut worker).await;
     }
     worker.abort();
-    dispatcher.abort();
     observer.abort();
     result
 }

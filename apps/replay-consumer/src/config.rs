@@ -4,7 +4,6 @@ pub struct Config {
     pub brokers: String,
     pub topic: String,
     pub group_id: String,
-    pub final_topic: String,
     pub final_idle_seconds: i32,
     pub final_grace_seconds: i32,
     pub max_message_bytes: usize,
@@ -31,8 +30,6 @@ impl Config {
         Ok(Self {
             final_grace_seconds,
             final_idle_seconds,
-            final_topic: std::env::var(replay_message::FINAL_TOPIC_ENV)
-                .unwrap_or_else(|_| replay_message::FINAL_TOPIC.into()),
             database_url: required("DATABASE_URL")?,
             database_max_connections: optional("DATABASE_MAX_CONNECTIONS", 10)?,
             brokers: std::env::var("KAFKA_BROKERS").unwrap_or_else(|_| "localhost:9092".into()),

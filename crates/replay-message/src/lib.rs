@@ -49,17 +49,3 @@ pub struct ReplaySessionPatch {
     #[serde(default)]
     pub has_poor_vitals: bool,
 }
-
-/// Completed, durably stored recording revision. Delivery is at least once.
-pub const FINAL_TOPIC: &str = "final-replay-v1";
-pub const FINAL_TOPIC_ENV: &str = "FINAL_REPLAY_KAFKA_TOPIC";
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct FinalReplay {
-    pub job_id: Uuid,
-    pub project_id: Uuid,
-    pub session_id: String,
-    pub window_id: String,
-    pub storage_generation: i32,
-    pub chunk_count: i32,
-}

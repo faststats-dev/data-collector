@@ -1,9 +1,9 @@
 # replay-summarizer
 
-One deployed summarizer runs two independent loops: Kafka dispatch and one render
-worker. `final-replay-v1` remains the durable notification stream. Dispatch marks
-the existing outbox job ready in PostgreSQL before acknowledging Kafka; rendering
-never occupies a Kafka partition. No additional service is needed.
+One deployed summarizer runs one render worker and a queue-health observer.
+The replay consumer atomically creates ready jobs in PostgreSQL when a recording
+revision is finalized. PostgreSQL is the durable queue and execution ledger; the
+summarizer has no Kafka dependency or credentials.
 
 The worker claims a job using `FOR UPDATE SKIP LOCKED`, then releases the database
 connection before downloading or rendering. Each claim has a 120-second lease and
@@ -31,35 +31,35 @@ seconds. Without a terminal signal the consumer retains the 35-minute inactivity
 fallback, longer than the SDK's 30-minute session timeout. Late data can create a
 new recording revision. Browser exit delivery remains best effort.
 
-Publication and consumption are at least once; duplicate descriptors do not
-restart jobs. The outbox republishes jobs still awaiting dispatch after five
-minutes. Rendering retries after one minute, then five minutes, up to three
-attempts. Invalid input is terminal. Errors remain in `last_error`.
+The unique recording revision prevents duplicate jobs. Rendering retries after
+one minute, then five minutes, up to three attempts. Invalid input is terminal.
+Errors remain in `last_error`. Expired execution leases recover interrupted work.
 
 To intentionally retry an inspected failed job, set `state='ready'`,
 `processed=false`, `processed_at=NULL`, `attempts=0`, and
-`next_attempt_at=NOW()` on that specific job. Do not reset running jobs or Kafka
-offsets. Old jobs without `kafka_triggered` are never discovered or retried.
+`next_attempt_at=NOW()` on that specific job. Do not reset running jobs.
+Historical scanner jobs are marked terminal by the queue migration and are not
+automatically retried.
 
 Structured logs report the job ID, stage, frame/capture counts, download time,
 render stage timings and total processing time. Every 30 seconds an index-backed
 probe reports `ready_due_age_seconds` and `expired_lease_age_seconds`.
-Kafka lag measures dispatch backlog; it no longer measures unfinished renders.
-Use queue age and the per-job timings to diagnose capacity or stalls.
+Use PostgreSQL queue age and the per-job timings to diagnose capacity or stalls.
+Kafka lag on the upstream replay-snapshot topic measures ingestion only.
 
 ## Deployment order
 
-1. Apply `20260921092354_replay_worker_leases` through the **monorepo database
-   package**. There are no migrations in this Rust repository.
-2. Stop the old summarizer before starting the new one: the old implementation
-   does not honor execution leases. Deploy the consumer and summarizer images,
-   then the collector's generation-aware patch messages. Existing messages remain
-   compatible. Pending outbox jobs recover through republication.
-3. Keep the existing database, S3 and Kafka credentials. `DATABASE_URL` is required;
-   `DATABASE_MAX_CONNECTIONS` remains bounded. Topic and group overrides are
-   `FINAL_REPLAY_KAFKA_TOPIC` and `REPLAY_SUMMARIZER_KAFKA_GROUP_ID`.
-4. Check successful dispatch, queue age and a completed render report. Invalid
-   descriptors are dropped with a topic/partition/offset warning and acknowledged.
+1. Stop the old replay consumer and summarizer before applying the schema change.
+   The collector can continue queuing upstream replay commands during this pause.
+2. Apply the monorepo database migration ending in `_replay_postgres_queue` (after
+   `20260921092354_replay_worker_leases`). It promotes pending dispatch jobs to
+   ready, preserves historical exclusions, and removes obsolete publication fields.
+3. Deploy the updated consumer and summarizer. Do not restart old binaries against
+   the new schema. Interrupted running jobs recover through lease expiry.
+4. Apply the sibling infra changes to remove the completion topic and the
+   summarizer's Kafka credentials/ACLs. It only needs the existing database and S3
+   credentials. `DATABASE_URL` is required; `DATABASE_MAX_CONNECTIONS` is bounded.
+5. Check queue age and a completed render report.
 
 Keep one instance of each existing service. No infrastructure changes are required.
 

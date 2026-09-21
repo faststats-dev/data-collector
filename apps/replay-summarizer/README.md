@@ -6,6 +6,33 @@ and discard the encoded MP4 stream. No video file or complete-video buffer is
 created. One recording runs at a time per worker; replay data, frame buffers,
 Chromium and FFmpeg are released after processing.
 
+## Memory budget
+
+The worker handles one recording at a time. It streams decompression into raw
+JSON events, sorts only their timestamp/sequence keys, and transfers events to
+Chromium in batches (normally at most 256 KiB; an individual event can be larger).
+Rust releases each raw event after transfer. This avoids building a second DOM
+in Rust and serializing/copying the entire recording during renderer setup.
+
+FFmpeg decoder, filter, and encoder thread budgets follow the container's
+available CPU parallelism, re-evaluated for every recording. CPU quota/affinity
+changes therefore take effect without changing code (one thread is the fallback
+if capacity cannot be queried). x264 uses `zerolatency` tuning.
+Disabling lookahead, B-frames, and frame-thread buffering
+reduces peak memory at the cost of compression efficiency. Capture resolution,
+10 fps, 8× playback speed, and CRF 23 remain unchanged. Kafka prefetch targets
+ten job descriptors with a 1 MiB queue budget (a fetched batch can overshoot it).
+
+`REPLAY_MAX_DECODED_BYTES` defaults to 33554432 (32 MiB) across all decompressed
+chunks of one recording. Individual S3 objects are also capped at this size
+before/during download. Oversized recordings produce a logged, durable job error
+instead of continuing to allocate without a bound. Increase the limit only with
+sufficient container headroom. This is an input limit, not a total memory cap:
+Chromium's DOM and large viewports can still exceed a 512 MiB container budget.
+
+Logs identify the job before loading and report decoded bytes/event count before
+rendering, so an abrupt process termination can be associated with its stage.
+
 ## Deployment
 
 1. Apply the new monorepo Drizzle migration before starting either replay worker.

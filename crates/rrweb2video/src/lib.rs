@@ -50,15 +50,26 @@ pub struct RenderStats {
 /// Synchronously stream JPEG frames to FFmpeg, publishing the MP4 only on success.
 /// Existing output files are never overwritten.
 pub fn render(replay: &Replay, options: &RenderOptions) -> Result<RenderReport> {
-    render_inner(replay, options, false)
+    render_inner(replay, options, false, &replay.events)
 }
 
 /// Encode the complete MP4 stream into the null sink without saving a video.
 pub fn render_discard(replay: &Replay, options: &RenderOptions) -> Result<RenderReport> {
-    render_inner(replay, options, true)
+    render_inner(replay, options, true, &replay.events)
 }
 
-fn render_inner(replay: &Replay, options: &RenderOptions, discard: bool) -> Result<RenderReport> {
+/// Release Rust event payloads as they are transferred to Chromium.
+pub fn render_discard_owned(mut replay: Replay, options: &RenderOptions) -> Result<RenderReport> {
+    let events = std::mem::take(&mut replay.events);
+    render_inner(&replay, options, true, events)
+}
+
+fn render_inner(
+    replay: &Replay,
+    options: &RenderOptions,
+    discard: bool,
+    events: impl IntoIterator<Item = impl AsRef<serde_json::value::RawValue>>,
+) -> Result<RenderReport> {
     let start = std::time::Instant::now();
     let mut stats = RenderStats::default();
     let plan = FramePlan::new(
@@ -104,10 +115,8 @@ fn render_inner(replay: &Replay, options: &RenderOptions, discard: bool) -> Resu
             "{css}\nhtml,body{{margin:0;overflow:hidden;background:white}}\n.replayer-mouse,.replayer-mouse::after{{transition:none!important;animation:none!important}}"
         ))?
     ))?;
-    // CDP evaluates JSON directly: recorded </script> strings never enter HTML parsing.
-    browser.eval(
-        include_str!("player.js").replace("__EVENTS__", &serde_json::to_string(&replay.events)?),
-    )?;
+    browser.load_events(events)?;
+    browser.eval(include_str!("player.js").into())?;
     browser.eval(include_str!("visuals.js").into())?;
     // Fail before starting FFmpeg if this Chromium build lacks beginFrame support.
     browser.call(

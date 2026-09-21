@@ -24,7 +24,8 @@ DOM reconstruction. The largest recorded metadata dimensions define the capture
 viewport.
 
 Each render launches Linux `chrome-headless-shell` with a fresh temporary
-profile and loads local rrweb assets. The event stream is transferred once.
+profile and loads local rrweb assets. The event stream is transferred once in
+batches using `JSON.parse`, avoiding one large JavaScript object-literal program.
 rrweb rebuilds the initial DOM, then applies mutations, scrolls, and pointer
 movement as playback advances.
 
@@ -59,7 +60,13 @@ memory throughout the pipeline.
 FFmpeg decodes incoming JPEGs, pads odd dimensions, and converts to `yuv420p`.
 Its frame-rate filter fills unchanged intervals before H.264 encoding, preserving
 the complete output frame sequence without repeatedly decoding the same JPEG.
-Encoding uses x264 with the `veryfast` preset, CRF 23, and two encoder threads.
+Encoding uses x264 with the `veryfast` preset, CRF 23, and
+`zerolatency` tuning to avoid lookahead/B-frame and frame-thread buffering. This
+trades compression efficiency for lower memory usage without changing capture
+dimensions or frame count. Decoder, filter, and encoder thread budgets are
+computed from the container's available CPU parallelism for each recording,
+including CPU quota/affinity where supported. They scale with the deployment;
+one thread is the fallback if the platform cannot report capacity.
 
 The MP4 is written to a temporary file and published only after FFmpeg succeeds.
 Existing output files are never overwritten. Completion or failure releases the
@@ -76,3 +83,5 @@ versions are outside the current guarantees.
 `render_discard` performs the same capture and H.264 encoding but streams a
 fragmented MP4 to `/dev/null`. It creates no video file or full-video buffer.
 The replay-summarizer service uses this path for infrastructure measurements.
+`render_discard_owned` additionally releases Rust event payloads as Chromium
+receives them; `Replay::from_events` accepts raw events without a JSON round trip.

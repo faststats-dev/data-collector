@@ -14,6 +14,11 @@ pub struct Replay {
 
 impl Replay {
     pub fn from_slice(bytes: &[u8]) -> Result<Self> {
+        Self::from_events(serde_json::from_slice(bytes).context("expected an rrweb event array")?)
+    }
+
+    /// Take ownership of raw events without serializing and reparsing the recording.
+    pub fn from_events(events: Vec<Box<RawValue>>) -> Result<Self> {
         #[derive(Deserialize)]
         struct Event<'a> {
             #[serde(rename = "type")]
@@ -27,8 +32,6 @@ impl Replay {
             width: u32,
             height: u32,
         }
-        let events: Vec<Box<RawValue>> =
-            serde_json::from_slice(bytes).context("expected an rrweb event array")?;
         ensure!(events.len() >= 2, "at least two events are required");
         let (mut first, mut last, mut width, mut height, mut snapshot) = (0, 0, 0, 0, false);
         for (index, raw) in events.iter().enumerate() {

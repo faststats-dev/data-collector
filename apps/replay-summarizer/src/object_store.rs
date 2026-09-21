@@ -54,8 +54,8 @@ impl ObjectStore {
         format!("{}-{}", self.bucket_prefix, project_id)
     }
 
-    pub async fn get(&self, bucket: &str, key: &str) -> Result<Vec<u8>, String> {
-        let response = self
+    pub async fn get(&self, bucket: &str, key: &str, max_bytes: usize) -> Result<Vec<u8>, String> {
+        let mut response = self
             .client
             .get_object()
             .bucket(bucket)
@@ -63,12 +63,25 @@ impl ObjectStore {
             .send()
             .await
             .map_err(|error| format!("GetObject failed: {}", DisplayErrorContext(error)))?;
-        response
+        if response
+            .content_length()
+            .is_some_and(|size| size > max_bytes as i64)
+        {
+            return Err("Replay object exceeds REPLAY_MAX_DECODED_BYTES".into());
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response
             .body
-            .collect()
+            .try_next()
             .await
-            .map(|body| body.into_bytes().to_vec())
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?
+        {
+            if chunk.len() > max_bytes - bytes.len() {
+                return Err("Replay object exceeds REPLAY_MAX_DECODED_BYTES".into());
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok(bytes)
     }
 }
 

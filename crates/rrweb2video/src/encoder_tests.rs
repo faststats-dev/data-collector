@@ -54,6 +54,7 @@ fn write_error_disconnects_producer_and_is_preserved() {
 #[test]
 #[ignore = "requires FFmpeg; checks sparse/dense encoding at multiple frame rates"]
 fn sparse_transport_matches_dense_pixels_and_frame_counts() {
+    let threads = thread::available_parallelism().unwrap().get().to_string();
     fn jpeg(color: &str) -> Vec<u8> {
         let output = Command::new("ffmpeg")
             .args([
@@ -118,8 +119,10 @@ fn sparse_transport_matches_dense_pixels_and_frame_counts() {
                         "veryfast",
                         "-crf",
                         "23",
+                        "-tune",
+                        "zerolatency",
                         "-threads",
-                        "2",
+                        &threads,
                         "-vf",
                         "pad=ceil(iw/2)*2:ceil(ih/2)*2",
                         "-pix_fmt",

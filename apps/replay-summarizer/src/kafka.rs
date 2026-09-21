@@ -10,6 +10,9 @@ pub fn create_consumer(config: &Config) -> Result<StreamConsumer, String> {
         .set("bootstrap.servers", &config.brokers)
         .set("enable.auto.commit", "false")
         .set("enable.auto.offset.store", "false")
+        // Only small job descriptors are needed while one recording is rendered.
+        .set("queued.max.messages.kbytes", "1024")
+        .set("queued.min.messages", "10")
         .set("auto.offset.reset", "latest")
         .set("max.poll.interval.ms", "86400000")
         .set(

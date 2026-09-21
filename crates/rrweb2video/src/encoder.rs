@@ -51,6 +51,12 @@ impl Encoder {
         width: u32,
         height: u32,
     ) -> Result<Self> {
+        // Re-evaluate for each recording so container CPU quota/affinity changes
+        // take effect without a code change. FFmpeg's own auto mode can see host CPUs.
+        let threads = thread::available_parallelism()
+            .map(|count| count.get())
+            .unwrap_or(1)
+            .to_string();
         let mut process = Process(
             Command::new(executable)
                 .args([
@@ -65,10 +71,27 @@ impl Encoder {
                     "32",
                     "-analyzeduration",
                     "0",
+                    "-threads",
+                    &threads,
+                    "-filter_threads",
+                    &threads,
                 ])
                 .args([
-                    "-i", "pipe:0", "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-                    "-threads", "2", "-vf",
+                    "-i",
+                    "pipe:0",
+                    "-an",
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "veryfast",
+                    "-crf",
+                    "23",
+                    // Avoid retaining lookahead/B-frame and frame-thread buffers.
+                    "-tune",
+                    "zerolatency",
+                    "-threads",
+                    &threads,
+                    "-vf",
                 ])
                 .arg(format!(
                     "pad=ceil(iw/2)*2:ceil(ih/2)*2,format=yuv420p,fps={fps}"

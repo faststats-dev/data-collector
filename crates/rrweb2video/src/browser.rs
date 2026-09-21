@@ -25,6 +25,44 @@ pub(crate) struct Browser {
     _profile: TempDir,
 }
 impl Browser {
+    pub fn load_events(
+        &mut self,
+        events: impl IntoIterator<Item = impl AsRef<serde_json::value::RawValue>>,
+    ) -> Result<()> {
+        self.eval("window.__replayEvents = []; void 0".into())?;
+        let mut batch = String::from("[");
+        for event in events {
+            let raw = event.as_ref().get();
+            if batch.len() > 1 && batch.len() + raw.len() > 256 * 1024 {
+                self.load_event_batch(&mut batch)?;
+            }
+            if batch.len() > 1 {
+                batch.push(',');
+            }
+            batch.push_str(raw);
+        }
+        if batch.len() > 1 {
+            self.load_event_batch(&mut batch)?;
+        }
+        Ok(())
+    }
+
+    fn load_event_batch(&mut self, batch: &mut String) -> Result<()> {
+        batch.push(']');
+        // JSON.parse avoids compiling the recording as a giant JS object literal.
+        // No spread operator: large batches can exceed V8's argument limit.
+        self.eval(format!(
+            "for (const event of JSON.parse({})) window.__replayEvents.push(event); void 0",
+            serde_json::to_string(batch)?
+        ))?;
+        batch.clear();
+        if batch.capacity() > 512 * 1024 {
+            *batch = String::with_capacity(256 * 1024);
+        }
+        batch.push('[');
+        Ok(())
+    }
+
     pub fn launch(executable: &Path, width: u32, height: u32) -> Result<Self> {
         let profile = tempfile::tempdir()?;
         let browser_log_path = profile.path().join("chromium.log");

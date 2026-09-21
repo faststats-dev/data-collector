@@ -1,6 +1,7 @@
 pub struct Config {
     pub database_url: String,
     pub database_max_connections: u32,
+    pub max_decoded_bytes: usize,
     pub brokers: String,
     pub topic: String,
     pub group_id: String,
@@ -17,9 +18,16 @@ impl Config {
         let security_protocol =
             std::env::var("KAFKA_SECURITY_PROTOCOL").unwrap_or_else(|_| "PLAINTEXT".into());
         let uses_sasl = security_protocol.to_ascii_uppercase().contains("SASL");
+        let max_decoded_bytes = optional("REPLAY_MAX_DECODED_BYTES", 32 * 1024 * 1024_usize)?;
+        if max_decoded_bytes == 0 || max_decoded_bytes >= isize::MAX as usize {
+            return Err(
+                "REPLAY_MAX_DECODED_BYTES must be a positive byte limit below isize::MAX".into(),
+            );
+        }
         Ok(Self {
             database_url: required("DATABASE_URL")?,
             database_max_connections: optional("DATABASE_MAX_CONNECTIONS", 10)?,
+            max_decoded_bytes,
             brokers: std::env::var("KAFKA_BROKERS").unwrap_or_else(|_| "localhost:9092".into()),
             topic: std::env::var(replay_message::FINAL_TOPIC_ENV)
                 .unwrap_or_else(|_| replay_message::FINAL_TOPIC.into()),

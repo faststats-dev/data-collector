@@ -46,7 +46,15 @@ fn fixture_renders_to_h264_with_expected_frames() {
 #[ignore = "requires chrome-headless-shell, FFmpeg, and local npm assets"]
 fn discard_encodes_without_creating_a_video_file() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let replay = Replay::from_slice(&common::recording()).unwrap();
+    let mut events: Vec<serde_json::Value> = serde_json::from_slice(&common::recording()).unwrap();
+    // Exercise multiple CDP batches, an oversized single event, and JSON escaping.
+    for size in [300_000, 100_000, 100_000, 100_000] {
+        events.push(serde_json::json!({
+            "type": 5, "timestamp": 4200,
+            "data": {"tag": "test", "payload": "</script>\"\\\n".repeat(size / 12)}
+        }));
+    }
+    let replay = Replay::from_slice(&serde_json::to_vec(&events).unwrap()).unwrap();
     let temp = tempfile::tempdir().unwrap();
     let options = RenderOptions {
         chromium: std::env::var_os("RRWEB2VIDEO_CHROMIUM")
@@ -60,7 +68,7 @@ fn discard_encodes_without_creating_a_video_file() {
         speed: 8.0,
         max_duration_ms: None,
     };
-    let report = rrweb2video::render_discard(&replay, &options).unwrap();
+    let report = rrweb2video::render_discard_owned(replay, &options).unwrap();
     assert_eq!(report.frames, 3);
     assert_eq!(report.output, std::path::Path::new("/dev/null"));
     assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);

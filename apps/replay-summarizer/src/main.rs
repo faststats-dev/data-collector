@@ -1,6 +1,7 @@
 mod config;
 mod kafka;
 mod object_store;
+mod replay_loader;
 
 use anyhow::{Context, Result, anyhow, ensure};
 use rdkafka::{
@@ -41,13 +42,13 @@ async fn main() -> Result<()> {
                 let rows = sqlx::query("SELECT * FROM replay_summary_jobs WHERE kafka_triggered AND NOT processed AND last_error IS NOT NULL AND next_attempt_at <= NOW() ORDER BY next_attempt_at LIMIT 10").fetch_all(&pool).await?;
                 for row in rows {
                     let event = FinalReplay { job_id: row.get("id"), project_id: row.get("project_id"), session_id: row.get("session_id"), window_id: row.get("window_id"), storage_generation: row.get("storage_generation"), chunk_count: row.get("chunk_count") };
-                    attempt(&pool, &objects, &event).await?;
+                    attempt(&pool, &objects, &event, config.max_decoded_bytes).await?;
                 }
             }
             message = consumer.recv() => {
                 let message = message?;
                 let event: FinalReplay = serde_json::from_slice(message.payload().context("missing final replay payload")?)?;
-                attempt(&pool, &objects, &event).await?;
+                attempt(&pool, &objects, &event, config.max_decoded_bytes).await?;
                 consumer.commit_message(&message, CommitMode::Sync)?;
             }
             result = tokio::signal::ctrl_c() => { result?; return Ok(()); }
@@ -61,8 +62,9 @@ async fn attempt(
     pool: &sqlx::PgPool,
     objects: &object_store::ObjectStore,
     event: &FinalReplay,
+    max_decoded_bytes: usize,
 ) -> Result<()> {
-    if let Err(error) = process(pool, objects, event).await {
+    if let Err(error) = process(pool, objects, event, max_decoded_bytes).await {
         let error = format!("{error:#}");
         tracing::error!(job_id = %event.job_id, %error, "Replay processing failed");
         sqlx::query("UPDATE replay_summary_jobs SET attempts = attempts + 1, last_error = $2, next_attempt_at = NOW() + interval '1 minute', processed = attempts >= 2, processed_at = CASE WHEN attempts >= 2 THEN NOW() ELSE NULL END WHERE id = $1 AND NOT processed")
@@ -75,6 +77,7 @@ async fn process(
     pool: &sqlx::PgPool,
     objects: &object_store::ObjectStore,
     event: &FinalReplay,
+    max_decoded_bytes: usize,
 ) -> Result<()> {
     let started = Instant::now();
     let mut tx = pool.begin().await?;
@@ -120,6 +123,7 @@ async fn process(
         )
     });
     if selected {
+        tracing::info!(job_id = %event.job_id, chunks = event.chunk_count, "Loading replay");
         let rows = sqlx::query(r#"
             SELECT s3_key, content_encoding
             FROM replay_snapshots WHERE project_id = $1 AND session_id = $2 AND window_id = $3 AND storage_generation = $4
@@ -130,36 +134,32 @@ async fn process(
             rows.len() == event.chunk_count as usize,
             "snapshot revision changed; retry after ingestion settles"
         );
-        let mut events = Vec::<Value>::new();
+        let mut events = Vec::new();
+        let mut decoded_bytes = 0;
         for row in rows {
             let key: String = row.get("s3_key");
             let bytes = objects
-                .get(&objects.bucket(event.project_id), &key)
+                .get(&objects.bucket(event.project_id), &key, max_decoded_bytes)
                 .await
                 .map_err(|e| anyhow!(e))?;
             let encoding: String = row.get("content_encoding");
-            let mut chunk = tokio::task::spawn_blocking(move || -> Result<Vec<Value>> {
-                let decoded = match encoding.as_str() {
-                    "zstd" => zstd::stream::decode_all(bytes.as_slice())?,
-                    "identity" | "" => bytes,
-                    _ => return Err(anyhow!("Unsupported replay encoding: {encoding}")),
-                };
-                Ok(serde_json::from_slice(&decoded)?)
+            let remaining = max_decoded_bytes - decoded_bytes;
+            let (mut chunk, size) = tokio::task::spawn_blocking(move || {
+                replay_loader::decode_chunk(&bytes, &encoding, remaining)
             })
             .await??;
+            decoded_bytes += size;
             events.append(&mut chunk);
         }
         // Sequence provides a stable tie-breaker across chunks with equal timestamps.
-        events.sort_by_key(|event| {
-            (
-                event["timestamp"].as_u64().unwrap_or(0),
-                event["_faststatsSeqId"].as_u64().unwrap_or(0),
-            )
-        });
+        events.sort_by_key(|event| event.order);
         let download_seconds = started.elapsed().as_secs_f64();
+        tracing::info!(job_id = %event.job_id, events = events.len(), decoded_bytes, "Rendering replay");
         let report = tokio::task::spawn_blocking(move || -> Result<_> {
-            let replay = rrweb2video::Replay::from_slice(&serde_json::to_vec(&events)?)?;
-            drop(events);
+            let replay = rrweb2video::Replay::from_events(
+                events.into_iter().map(|event| event.raw).collect(),
+            )?;
+            let duration_ms = replay.duration_ms;
             let options = rrweb2video::RenderOptions {
                 chromium: env_path("RRWEB2VIDEO_CHROMIUM", "/usr/local/bin/chromium-headless"),
                 ffmpeg: env_path("RRWEB2VIDEO_FFMPEG", "ffmpeg"),
@@ -176,8 +176,8 @@ async fn process(
                 speed: 8.0,
                 max_duration_ms: None,
             };
-            let report = rrweb2video::render_discard(&replay, &options)?;
-            Ok((replay.duration_ms, report))
+            let report = rrweb2video::render_discard_owned(replay, &options)?;
+            Ok((duration_ms, report))
         })
         .await??;
         tracing::info!(job_id = %event.job_id, replay_time_ms = report.0,

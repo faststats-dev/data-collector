@@ -82,6 +82,8 @@ versions are outside the current guarantees.
 
 `render_discard` performs the same capture and H.264 encoding but streams a
 fragmented MP4 to `/dev/null`. It creates no video file or full-video buffer.
-The replay-summarizer service uses this path for infrastructure measurements.
+The replay-summarizer uses `RenderSession::render_owned` with a temporary output
+path and `timestamp_overlay: true`. The footer is applied after sparse-frame
+expansion, so reused frames still show the correct original replay time.
 `render_discard_owned` additionally releases Rust event payloads as Chromium
 receives them; `Replay::from_events` accepts raw events without a JSON round trip.

@@ -49,6 +49,7 @@ fn main() -> Result<()> {
             fps: args.fps,
             speed: args.speed,
             max_duration_ms: args.max_duration_ms,
+            timestamp_overlay: false,
         },
     )?;
     eprintln!(

@@ -50,6 +50,7 @@ impl Encoder {
         fps: u32,
         width: u32,
         height: u32,
+        timestamp: Option<(f64, u64)>,
     ) -> Result<Self> {
         // Re-evaluate for each recording so container CPU quota/affinity changes
         // take effect without a code change. FFmpeg's own auto mode can see host CPUs.
@@ -57,6 +58,11 @@ impl Encoder {
             .map(|count| count.get())
             .unwrap_or(1)
             .to_string();
+        let mut filter = format!("pad=ceil(iw/2)*2:ceil(ih/2)*2,format=yuv420p,fps={fps}");
+        if let Some((speed, duration)) = timestamp {
+            // Apply after CFR expansion so even reused pixels carry the right time.
+            filter.push_str(&format!(r",pad=iw:ih+36:0:0:black,drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf:fontsize=20:fontcolor=white:x=8:y=h-28:text='Replay ms %{{eif\:min(n*1000*{speed}/{fps}\,{duration})\:d}}'"));
+        }
         let mut process = Process(
             Command::new(executable)
                 .args([
@@ -93,9 +99,7 @@ impl Encoder {
                     &threads,
                     "-vf",
                 ])
-                .arg(format!(
-                    "pad=ceil(iw/2)*2:ceil(ih/2)*2,format=yuv420p,fps={fps}"
-                ))
+                .arg(filter)
                 .args([
                     "-pix_fmt",
                     "yuv420p",

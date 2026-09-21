@@ -12,7 +12,7 @@ WORKDIR /opt/player
 COPY crates/rrweb2video/player/package.json crates/rrweb2video/player/package-lock.json ./
 RUN npm ci --ignore-scripts --no-audit --no-fund && \
     npx --yes playwright@${PLAYWRIGHT_VERSION} install --with-deps --only-shell chromium && \
-    apt-get update && apt-get install -y --no-install-recommends ffmpeg && \
+    apt-get update && apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core && \
     rm -rf /var/lib/apt/lists/* && \
     find /opt/browsers -type f \( -name chrome-headless-shell -o -name headless_shell \) -exec ln -sf '{}' /usr/local/bin/chromium-headless-real \; && \
     test -x /usr/local/bin/chromium-headless-real

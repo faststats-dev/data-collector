@@ -24,6 +24,8 @@ pub struct RenderOptions {
     pub speed: f64,
     /// Optional replay-time limit, useful for previews.
     pub max_duration_ms: Option<u64>,
+    /// Burn original replay milliseconds into a footer after frame reuse/encoding.
+    pub timestamp_overlay: bool,
 }
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct RenderReport {
@@ -65,7 +67,14 @@ impl RenderSession {
             self.uses = 0;
         }
         let events = std::mem::take(&mut replay.events);
-        let result = render_inner(&replay, options, true, events, self, &mut progress);
+        let result = render_inner(
+            &replay,
+            options,
+            options.output == std::path::Path::new("/dev/null"),
+            events,
+            self,
+            &mut progress,
+        );
         if result.is_err() {
             self.browser = None;
             self.uses = 0;
@@ -189,6 +198,9 @@ fn render_inner(
         options.fps,
         replay.width,
         replay.height,
+        options
+            .timestamp_overlay
+            .then_some((options.speed, plan.duration_ms)),
     )?;
     let mut jpeg = Vec::new();
     let mut next_jpeg = Vec::new();

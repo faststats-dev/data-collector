@@ -22,6 +22,8 @@ pub enum Output {
         report: rrweb2video::RenderReport,
         replay_time_ms: u64,
         download_seconds: f64,
+        summary: crate::summarize::ReplaySummary,
+        replay_start_ms: u64,
     },
     Failed {
         code: String,
@@ -148,6 +150,8 @@ pub async fn child_main() -> Result<()> {
         };
         let download_seconds = started.elapsed().as_secs_f64();
         let replay_time_ms = replay.duration_ms;
+        let replay_start_ms = replay.start_ms;
+        let temporary = tempfile::tempdir()?;
         let options = rrweb2video::RenderOptions {
             chromium: env_path("RRWEB2VIDEO_CHROMIUM", "/usr/local/bin/chromium-headless"),
             ffmpeg: env_path("RRWEB2VIDEO_FFMPEG", "ffmpeg"),
@@ -159,10 +163,11 @@ pub async fn child_main() -> Result<()> {
                 "RRWEB2VIDEO_CSS",
                 "/opt/player/node_modules/rrweb/dist/style.css",
             ),
-            output: "/dev/null".into(),
+            output: temporary.path().join("replay.mp4"),
             fps: 3,
             speed: 8.0,
             max_duration_ms: None,
+            timestamp_overlay: true,
         };
         let (next, result) = tokio::task::spawn_blocking(move || {
             let result = session.render_owned(replay, &options, progress);
@@ -171,11 +176,33 @@ pub async fn child_main() -> Result<()> {
         .await?;
         session = next;
         match result {
-            Ok(report) => emit(&Output::Complete {
-                report,
-                replay_time_ms,
-                download_seconds,
-            }),
+            Ok(report) => {
+                let video_path = report.output.clone();
+                let request =
+                    crate::summarize::summarize(&video_path, replay_start_ms, replay_time_ms);
+                tokio::pin!(request);
+                let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(5));
+                let result = loop {
+                    tokio::select! {
+                        result = &mut request => break result,
+                        _ = heartbeat.tick() => progress("summarizing", 0, 1),
+                    }
+                };
+                match result {
+                    Ok(summary) => emit(&Output::Complete {
+                        report,
+                        replay_time_ms,
+                        download_seconds,
+                        summary,
+                        replay_start_ms,
+                    }),
+                    Err(error) => emit(&Output::Failed {
+                        code: "openrouter".into(),
+                        message: format!("{error:#}"),
+                        retryable: true,
+                    }),
+                }
+            }
             Err(error) => emit(&Output::Failed {
                 code: "renderer".into(),
                 message: format!("{error:#}"),

@@ -137,7 +137,7 @@ fn sparse_transport_matches_dense_pixels_and_frame_counts() {
                     .unwrap(),
             );
             let mut input = reference.0.stdin.take().unwrap();
-            let encoder = Encoder::spawn(Path::new("ffmpeg"), &sparse, fps, 64, 48).unwrap();
+            let encoder = Encoder::spawn(Path::new("ffmpeg"), &sparse, fps, 64, 48, None).unwrap();
             let mut previous = None;
             for index in 0..count {
                 let current = usize::from(index >= count / 2);

@@ -6,6 +6,7 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> Result<Self, String> {
+        required("OPENROUTER_API_KEY")?;
         let max_decoded_bytes = optional("REPLAY_MAX_DECODED_BYTES", 32 * 1024 * 1024_usize)?;
         if max_decoded_bytes == 0 || max_decoded_bytes >= isize::MAX as usize {
             return Err(
@@ -21,7 +22,10 @@ impl Config {
 }
 
 fn required(name: &str) -> Result<String, String> {
-    std::env::var(name).map_err(|_| format!("{name} must be set"))
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| format!("{name} must be set"))
 }
 
 fn optional<T>(name: &str, default: T) -> Result<T, String>

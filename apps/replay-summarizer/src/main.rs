@@ -3,6 +3,7 @@ mod jobs;
 mod object_store;
 mod renderer;
 mod replay_loader;
+mod summarize;
 
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -150,10 +151,10 @@ async fn run_job(
                     stage=next;progress=Instant::now();
                     tracing::debug!(job_id=%claim.event.job_id,%stage,completed,total,"Replay progress");
                 }
-                renderer::Output::Complete {report,replay_time_ms,download_seconds}=> {
-                    let report=serde_json::json!({"render":report,"replay_time_ms":replay_time_ms,"download_seconds":download_seconds,"processing_seconds":started.elapsed().as_secs_f64()});
-                    let committed=jobs::finish(pool,claim,"succeeded",Some(report.clone())).await?;
-                    tracing::info!(job_id=%claim.event.job_id,committed,report=%report,"Replay encoded and discarded");
+                renderer::Output::Complete {report,replay_time_ms,download_seconds,summary,replay_start_ms}=> {
+                    let report=serde_json::json!({"render":report,"replay_time_ms":replay_time_ms,"download_seconds":download_seconds,"processing_seconds":started.elapsed().as_secs_f64(),"summary":summary,"replay_start_ms":replay_start_ms,"model":summarize::MODEL});
+                    let committed=jobs::finish(pool,claim,"succeeded",Some(report)).await?;
+                    tracing::info!(job_id=%claim.event.job_id,committed,"Replay summary processed");
                     return Ok(());
                 }
                 renderer::Output::Failed {code,message,retryable}=> {

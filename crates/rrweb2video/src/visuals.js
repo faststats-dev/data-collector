@@ -1,5 +1,4 @@
-// Reuse pixels only after the Rust side has seen two identical captures. This
-// observer also requires static, fully loaded resources and stops on any change.
+// Reuse identical captures only while the page and its resources remain static.
 (() => {
   let dirty = true, safePreviously = false, initialized = false, safetyDirty = true;
   let sheets = new WeakMap();
@@ -15,8 +14,7 @@
     if (!staticImages.has(src)) {
       let safe = /^data:image\/jpe?g[;,]/i.test(src);
       if (/^data:image\/png;base64,/i.test(src)) {
-        // APNG declares animation using an acTL chunk. False positives merely
-        // disable reuse; malformed or unfamiliar formats take the capture path.
+        // APNG has an acTL chunk; uncertain formats disable frame reuse.
         try { safe = !atob(src.slice(src.indexOf(',') + 1)).includes('acTL'); } catch {}
       }
       if (/^data:image\/svg\+xml[;,]/i.test(src)) {
@@ -39,8 +37,7 @@
       if (/^data:/i.test(url)) { dataUrls++; if (!staticImage(url)) return false; }
       // HTTP(S)/file URLs are blocked by CDP before replay starts.
     }
-    const safe = !/data:/i.test(value) || dataUrls > 0;
-    return safe;
+    return !/data:/i.test(value) || dataUrls > 0;
   };
   const rulesSafe = rules => {
     for (const rule of rules) {
@@ -83,8 +80,7 @@
     for (const sheet of [...(doc.styleSheets || []), ...(doc.adoptedStyleSheets || [])]) {
       if (!sheets.has(sheet)) {
         try { sheets.set(sheet, rulesSafe(sheet.cssRules)); } catch {
-          // These schemes are blocked before any replay DOM is built. An opaque
-          // stylesheet object for such a URL cannot later deliver new pixels.
+          // Blocked or failed stylesheets cannot later change pixels.
           sheets.set(sheet, /^(https?|file|ftp|wss?):/i.test(sheet.href || '') || (!!sheet.ownerNode && failedLinks.has(sheet.ownerNode)));
         }
       }
@@ -96,9 +92,8 @@
     return safe;
   };
   window.__captureNeeded = () => {
-    // A dirty frame must be captured regardless of resource safety. Defer the
-    // expensive tree inspection until the first clean tick that might reuse it.
-    // Always inspect initially to register observers before any reuse is possible.
+    // Register observers immediately, then inspect resources only before reuse.
+    // Dirty frames always need a capture.
     if (!initialized || (!dirty && safetyDirty)) {
       safePreviously = inspect(document);
       initialized = true;

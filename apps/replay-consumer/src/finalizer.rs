@@ -1,7 +1,6 @@
 use std::time::Duration;
 
-// Lock only the selected recordings, so replicas can scan concurrently. Enqueuing
-// and marking complete are one atomic statement; no global lock or second scan.
+// Lock selected recordings and atomically enqueue them and mark them complete.
 const ENQUEUE: &str = r#"
     WITH candidates AS MATERIALIZED (
         SELECT s.project_id, s.session_id, s.window_id, p.replay_storage_generation, s.chunk_count
@@ -23,8 +22,7 @@ const ENQUEUE: &str = r#"
       AND s.window_id = j.window_id AND s.chunk_count = j.chunk_count
 "#;
 
-/// Inactivity covers lost/canceled browser exits. PostgreSQL durably queues work.
-/// Finalization runs independently of snapshot ingestion.
+/// Finalize recordings independently of ingestion, including those missing an exit event.
 pub async fn run(pool: sqlx::PgPool) {
     let scan = async {
         let mut timer = tokio::time::interval(Duration::from_secs(5));
@@ -39,8 +37,7 @@ pub async fn run(pool: sqlx::PgPool) {
         let mut timer = tokio::time::interval(Duration::from_secs(3600));
         loop {
             timer.tick().await;
-            // Only bounded control rows, never recording discovery. Snapshot-backed
-            // controls are deleted by the existing metadata retention service.
+            // Metadata retention handles controls that have snapshots.
             if let Err(error)=sqlx::query(r#"
                 WITH expired AS (
                     SELECT c.project_id,c.storage_generation,c.session_id,c.window_id

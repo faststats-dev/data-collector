@@ -3,12 +3,15 @@
 //! Each changed image carries its original output-frame timestamp. FFmpeg's fps
 //! filter expands the gaps by sharing decoded frames rather than decoding copies.
 
+fn size_bytes(value: usize) -> usize {
+    (1..=8)
+        .find(|n| (value as u64) < (1_u64 << (7 * n)) - 1)
+        .expect("element fits EBML size")
+}
+
 fn size(out: &mut Vec<u8>, value: usize) {
-    let value = value as u64;
-    let bytes = (1..=8)
-        .find(|n| value < (1_u64 << (7 * n)) - 1)
-        .expect("element fits EBML size");
-    let encoded = (1_u64 << (7 * bytes)) | value;
+    let bytes = size_bytes(value);
+    let encoded = (1_u64 << (7 * bytes)) | value as u64;
     out.extend_from_slice(&encoded.to_be_bytes()[8 - bytes..]);
 }
 fn id(out: &mut Vec<u8>, value: u32) {
@@ -66,21 +69,18 @@ pub(crate) fn header(width: u32, height: u32, fps: u32) -> Vec<u8> {
 }
 
 /// Prefix for a Cluster containing one keyframe. The JPEG bytes follow directly.
-pub(crate) fn frame_prefix(index: u64, fps: u32, jpeg_bytes: usize) -> Vec<u8> {
-    let mut cluster = Vec::with_capacity(32);
-    uint(
-        &mut cluster,
-        0xe7,
-        (index * 1_000_000 + fps as u64 / 2) / fps as u64,
-    );
-    id(&mut cluster, 0xa3);
-    size(&mut cluster, jpeg_bytes + 4);
-    cluster.extend_from_slice(&[0x81, 0, 0, 0x80]); // Track 1, relative timestamp 0, keyframe.
-    let mut prefix = Vec::with_capacity(48);
-    id(&mut prefix, 0x1f43b675);
-    size(&mut prefix, cluster.len() + jpeg_bytes);
-    prefix.extend_from_slice(&cluster);
-    prefix
+pub(crate) fn frame_prefix(out: &mut Vec<u8>, index: u64, fps: u32, jpeg_bytes: usize) {
+    let timestamp = (index * 1_000_000 + fps as u64 / 2) / fps as u64;
+    let timestamp_bytes = (8 - timestamp.leading_zeros() as usize / 8).max(1);
+    let block_bytes = jpeg_bytes + 4;
+    // Timestamp tag (ID + size + value), followed by the SimpleBlock tag.
+    let cluster_bytes = 2 + timestamp_bytes + 1 + size_bytes(block_bytes) + block_bytes;
+    id(out, 0x1f43b675);
+    size(out, cluster_bytes);
+    uint(out, 0xe7, timestamp);
+    id(out, 0xa3);
+    size(out, block_bytes);
+    out.extend_from_slice(&[0x81, 0, 0, 0x80]); // Track 1, relative timestamp 0, keyframe.
 }
 
 #[cfg(test)]
@@ -102,17 +102,54 @@ mod tests {
     }
     #[test]
     fn packet_keeps_original_frame_timestamp_and_declares_jpeg_length() {
+        let mut packet = Vec::new();
+        frame_prefix(&mut packet, 0, 10, 3);
         assert_eq!(
-            frame_prefix(0, 10, 3),
+            packet,
             [
                 0x1f, 0x43, 0xb6, 0x75, 0x8c, 0xe7, 0x81, 0, 0xa3, 0x87, 0x81, 0, 0, 0x80
             ]
         );
-        let later = frame_prefix(394, 10, 3);
+        packet.clear();
+        frame_prefix(&mut packet, 394, 10, 3);
         assert!(
-            later
+            packet
                 .windows(4)
                 .any(|bytes| bytes == 39_400_000_u32.to_be_bytes())
         );
+    }
+
+    #[test]
+    fn reused_packet_matches_nested_encoding_at_size_boundaries() {
+        let mut packet = Vec::with_capacity(128);
+        for fps in [1, 3, 30, 120] {
+            for index in [0, 1, 255, 256, 65_535, 65_536, 10_368_000] {
+                for jpeg_bytes in [0, 115, 116, 117, 122, 123, 16_378, 16_379, 2_097_147] {
+                    // Build nested elements independently, as the old encoder did.
+                    let mut cluster = Vec::new();
+                    uint(
+                        &mut cluster,
+                        0xe7,
+                        (index * 1_000_000 + fps as u64 / 2) / fps as u64,
+                    );
+                    id(&mut cluster, 0xa3);
+                    size(&mut cluster, jpeg_bytes + 4);
+                    cluster.extend_from_slice(&[0x81, 0, 0, 0x80]);
+                    let mut expected = vec![0xaa];
+                    id(&mut expected, 0x1f43b675);
+                    size(&mut expected, cluster.len() + jpeg_bytes);
+                    expected.extend_from_slice(&cluster);
+
+                    packet.clear();
+                    packet.push(0xaa);
+                    frame_prefix(&mut packet, index, fps, jpeg_bytes);
+                    assert_eq!(
+                        packet, expected,
+                        "fps={fps}, index={index}, bytes={jpeg_bytes}"
+                    );
+                    assert_eq!(packet.capacity(), 128);
+                }
+            }
+        }
     }
 }

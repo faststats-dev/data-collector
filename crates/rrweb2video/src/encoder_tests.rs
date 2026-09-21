@@ -144,11 +144,7 @@ fn sparse_transport_matches_dense_pixels_and_frame_counts() {
                 input.write_all(&images[current]).unwrap();
                 if previous != Some(current) || index + 1 == count {
                     let mut packet = encoder.buffer().unwrap();
-                    packet.extend(crate::matroska::frame_prefix(
-                        index,
-                        fps,
-                        images[current].len(),
-                    ));
+                    crate::matroska::frame_prefix(&mut packet, index, fps, images[current].len());
                     packet.extend_from_slice(&images[current]);
                     encoder.submit(packet).unwrap();
                 }

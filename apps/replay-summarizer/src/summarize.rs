@@ -1,4 +1,4 @@
-//! Real video inference with an explicit, validated structured-output contract.
+//! Summarize replay video and validate the model response.
 use anyhow::{Context, Result, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
@@ -96,10 +96,8 @@ pub async fn summarize(path: &Path, start_ms: u64, duration_ms: u64) -> Result<R
         size > 0 && size <= MAX_VIDEO_BYTES,
         "rendered video exceeds the 64 MiB model input limit"
     );
-    let video = format!(
-        "data:video/mp4;base64,{}",
-        STANDARD.encode(std::fs::read(path)?)
-    );
+    let mut video = String::from("data:video/mp4;base64,");
+    STANDARD.encode_string(std::fs::read(path)?, &mut video);
     let response = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(15))
         .timeout(Duration::from_secs(300))

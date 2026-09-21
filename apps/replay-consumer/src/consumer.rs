@@ -1,5 +1,5 @@
-use crate::{config::Config, storage::ReplayStorage};
-use futures_util::{StreamExt, TryStreamExt, stream};
+use crate::{config::Config, object_store::ObjectStore, storage};
+use futures_util::{TryStreamExt, stream};
 use rdkafka::{
     ClientConfig, Message,
     client::ClientContext,
@@ -30,7 +30,7 @@ pub async fn run(config: Config) -> Result<(), String> {
         .connect(&config.database_url)
         .await
         .map_err(|e| e.to_string())?;
-    let storage = ReplayStorage::from_env()?.ok_or("Replay S3 configuration must be set")?;
+    let objects = ObjectStore::from_env()?;
     let consumer = create_consumer(&config)?;
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .map_err(|e| e.to_string())?;
@@ -52,21 +52,21 @@ pub async fn run(config: Config) -> Result<(), String> {
                         Err(_) => break,
                     }
                 }
-                // Whole-batch completion is a bounded contiguous-offset barrier.
-                // Independent keys overlap I/O; each recording remains ordered.
-                let mut groups = HashMap::<(i32, Vec<u8>), Vec<&OwnedMessage>>::new();
+                // Process keys concurrently, preserving order within each recording.
+                // Store offsets only after the entire batch succeeds.
+                let mut groups = HashMap::<(i32, &[u8]), Vec<&OwnedMessage>>::new();
                 for message in &messages {
-                    groups.entry((message.partition(), message.key().unwrap_or_default().to_vec())).or_default().push(message);
+                    groups.entry((message.partition(), message.key().unwrap_or_default())).or_default().push(message);
                 }
-                stream::iter(groups.into_values().map(|group| {
-                    let (storage,pool,config)=(&storage,&pool,&config);
-                    async move {
-                        for message in group { handle_message(storage,pool,message,config).await?; }
-                        Ok::<_,String>(())
-                    }
-                })).buffer_unordered(4).try_collect::<Vec<_>>().await?;
-                // A rebalance invalidates this batch's ownership. Its idempotent
-                // writes may finish, but its offsets must be replayed by the new owner.
+                stream::iter(groups.into_values().map(Ok::<_, String>))
+                    .try_for_each_concurrent(4, |group| async {
+                        for message in group {
+                            handle_message(&objects, &pool, message, &config).await?;
+                        }
+                        Ok::<_, String>(())
+                    })
+                    .await?;
+                // After a rebalance, leave this batch for the new owner to replay.
                 let current = consumer.context().0.lock().unwrap();
                 if *current != epoch { return Err("Kafka ownership changed during persistence; restarting for safe redelivery".into()); }
                 store_processed(&consumer, &messages).map_err(|e| e.to_string())?;
@@ -87,8 +87,7 @@ fn store_processed(
     consumer: &StreamConsumer<EpochContext>,
     messages: &[OwnedMessage],
 ) -> rdkafka::error::KafkaResult<()> {
-    // The list API stores explicit next offsets. Unlike legacy store_offset it
-    // does not construct a native topic handle or implicitly add one.
+    // Store the next offset for each partition without creating topic handles.
     let mut completed = std::collections::BTreeMap::new();
     for message in messages {
         completed
@@ -141,7 +140,7 @@ fn create_consumer(config: &Config) -> Result<StreamConsumer<EpochContext>, Stri
 }
 
 async fn handle_message(
-    storage: &ReplayStorage,
+    objects: &ObjectStore,
     pool: &sqlx::PgPool,
     message: &OwnedMessage,
     config: &Config,
@@ -165,7 +164,7 @@ async fn handle_message(
         ReplayCommand::Snapshot(chunk) => {
             if chunk.events.is_empty() {
                 if chunk.is_final {
-                    ReplayStorage::record_terminal_hint(
+                    storage::record_terminal_hint(
                         pool,
                         chunk.project_id,
                         &chunk.session_id,
@@ -177,15 +176,15 @@ async fn handle_message(
                     .await
                     .map_err(|e| e.to_string())?;
                 }
-            } else if storage
-                .store_replay_chunk(
-                    pool,
-                    *chunk,
-                    config.final_idle_seconds,
-                    config.final_grace_seconds,
-                )
-                .await
-                .map_err(|e| e.to_string())?
+            } else if storage::store_replay_chunk(
+                objects,
+                pool,
+                *chunk,
+                config.final_idle_seconds,
+                config.final_grace_seconds,
+            )
+            .await
+            .map_err(|e| e.to_string())?
             {
                 metrics::counter!("replay_first_sessions_total").increment(1);
             }

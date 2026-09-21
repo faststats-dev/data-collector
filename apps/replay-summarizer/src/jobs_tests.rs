@@ -51,7 +51,7 @@ async fn priority_manual_selection_and_fenced_summary_commit() -> Result<()> {
     }
     let manual = claim(&pool).await?.unwrap();
     assert_eq!(
-        manual.event.session_id, "manual",
+        manual.session_id, "manual",
         "manual beats older automatic job"
     );
     assert!(
@@ -62,14 +62,12 @@ async fn priority_manual_selection_and_fenced_summary_commit() -> Result<()> {
     let stale = Claim {
         token: manual.token - 1,
         manual: true,
-        event: RecordingRevision {
-            job_id: manual.event.job_id,
-            project_id: project,
-            session_id: "manual".into(),
-            window_id: "window".into(),
-            storage_generation: 1,
-            chunk_count: 1,
-        },
+        job_id: manual.job_id,
+        project_id: project,
+        session_id: "manual".into(),
+        window_id: "window".into(),
+        storage_generation: 1,
+        chunk_count: 1,
     };
     assert!(!finish(&pool, &stale, "succeeded", Some(report.clone())).await?);
     assert!(finish(&pool, &manual, "succeeded", Some(report.clone())).await?);
@@ -89,7 +87,7 @@ async fn priority_manual_selection_and_fenced_summary_commit() -> Result<()> {
     );
     // Simulate the manual API promoting an already running automatic claim.
     sqlx::query("UPDATE replay_summary_jobs SET manual=true,priority=100 WHERE id=$1")
-        .bind(automatic.event.job_id)
+        .bind(automatic.job_id)
         .execute(&pool)
         .await?;
     assert!(
@@ -105,7 +103,7 @@ async fn priority_manual_selection_and_fenced_summary_commit() -> Result<()> {
         .await?;
     assert!(finish(&pool, &promoted, "succeeded", Some(report)).await?);
     let state: String = sqlx::query_scalar("SELECT state FROM replay_summary_jobs WHERE id=$1")
-        .bind(promoted.event.job_id)
+        .bind(promoted.job_id)
         .fetch_one(&pool)
         .await?;
     assert_eq!(state, "superseded");

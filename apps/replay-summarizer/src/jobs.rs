@@ -6,17 +6,13 @@ use uuid::Uuid;
 
 pub const PROFILE: &str = "h264-3fps-8x-v1";
 #[derive(Debug)]
-pub struct RecordingRevision {
+pub struct Claim {
     pub job_id: Uuid,
     pub project_id: Uuid,
     pub session_id: String,
     pub window_id: String,
     pub storage_generation: i32,
     pub chunk_count: i32,
-}
-#[derive(Debug)]
-pub struct Claim {
-    pub event: RecordingRevision,
     pub token: i32,
     pub manual: bool,
 }
@@ -36,7 +32,7 @@ pub struct Input {
 }
 
 pub async fn claim(pool: &PgPool) -> Result<Option<Claim>> {
-    // Indexed, bounded reclamation. Expiry fences the old owner even before this runs.
+    // Expired leases cannot publish results, even before reclamation runs.
     sqlx::query(r#"
         WITH expired AS (SELECT id FROM replay_summary_jobs WHERE NOT processed
             AND state='running' AND lease_until <= NOW() ORDER BY lease_until LIMIT 100 FOR UPDATE SKIP LOCKED)
@@ -61,19 +57,16 @@ pub async fn claim(pool: &PgPool) -> Result<Option<Claim>> {
     Ok(Some(Claim {
         token: row.get("execution_token"),
         manual: row.get("manual"),
-        event: RecordingRevision {
-            job_id: row.get("id"),
-            project_id: row.get("project_id"),
-            session_id: row.get("session_id"),
-            window_id: row.get("window_id"),
-            storage_generation: row.get("storage_generation"),
-            chunk_count: row.get("chunk_count"),
-        },
+        job_id: row.get("id"),
+        project_id: row.get("project_id"),
+        session_id: row.get("session_id"),
+        window_id: row.get("window_id"),
+        storage_generation: row.get("storage_generation"),
+        chunk_count: row.get("chunk_count"),
     }))
 }
 
 pub async fn prepare(pool: &PgPool, claim: &Claim, limit: usize) -> Result<Option<Input>> {
-    let e = &claim.event;
     let mut tx = pool.begin().await?;
     sqlx::query("SET LOCAL statement_timeout = '15s'")
         .execute(&mut *tx)
@@ -86,7 +79,7 @@ pub async fn prepare(pool: &PgPool, claim: &Claim, limit: usize) -> Result<Optio
         JOIN project p ON p.id=s.project_id LEFT JOIN replay_summary_settings cfg ON cfg.project_id=s.project_id
         WHERE s.project_id=$1 AND s.session_id=$2 AND s.window_id=$3 AND s.deleted_at IS NULL
           AND p.replay_storage_state='active' AND p.replay_storage_generation=$4 AND s.chunk_count=$5 AND s.is_complete
-    "#).bind(e.project_id).bind(&e.session_id).bind(&e.window_id).bind(e.storage_generation).bind(e.chunk_count)
+    "#).bind(claim.project_id).bind(&claim.session_id).bind(&claim.window_id).bind(claim.storage_generation).bind(claim.chunk_count)
         .fetch_optional(&mut *tx).await?;
     let selected = row.as_ref().is_some_and(|r| {
         claim.manual || crate::matches_settings(&r.get("settings"), &r.get("attributes"))
@@ -101,14 +94,14 @@ pub async fn prepare(pool: &PgPool, claim: &Claim, limit: usize) -> Result<Optio
         ORDER BY COALESCE(first_sequence,sequence),first_event_timestamp_ms,created_at,id
     "#,
     )
-    .bind(e.project_id)
-    .bind(&e.session_id)
-    .bind(&e.window_id)
-    .bind(e.storage_generation)
+    .bind(claim.project_id)
+    .bind(&claim.session_id)
+    .bind(&claim.window_id)
+    .bind(claim.storage_generation)
     .fetch_all(&mut *tx)
     .await?;
     ensure!(
-        rows.len() == e.chunk_count as usize,
+        rows.len() == claim.chunk_count as usize,
         "snapshot revision changed"
     );
     let chunks = rows
@@ -122,8 +115,8 @@ pub async fn prepare(pool: &PgPool, claim: &Claim, limit: usize) -> Result<Optio
     tx.commit().await?;
     Ok(Some(Input {
         protocol: 1,
-        job_id: e.job_id,
-        project_id: e.project_id,
+        job_id: claim.job_id,
+        project_id: claim.project_id,
         chunks,
         max_decoded_bytes: limit,
     }))
@@ -137,7 +130,7 @@ pub async fn renew(pool: &PgPool, claim: &Claim, stage: &str) -> Result<bool> {
           AND s.project_id=j.project_id AND s.session_id=j.session_id AND s.window_id=j.window_id
           AND s.chunk_count=j.chunk_count AND s.deleted_at IS NULL
           AND p.id=j.project_id AND p.replay_storage_state='active' AND p.replay_storage_generation=j.storage_generation
-    "#).bind(claim.event.job_id).bind(claim.token).bind(stage).execute(pool).await?.rows_affected()==1)
+    "#).bind(claim.job_id).bind(claim.token).bind(stage).execute(pool).await?.rows_affected()==1)
 }
 
 pub async fn finish(
@@ -146,33 +139,30 @@ pub async fn finish(
     state: &str,
     report: Option<serde_json::Value>,
 ) -> Result<bool> {
-    // Lock project/session before the result update. Deletion and ingestion cannot
-    // race between validation and publishing success. No external I/O in this tx.
+    // Lock the project and session so deletion or ingestion cannot race publication.
     let mut tx = pool.begin().await?;
     sqlx::query("SET LOCAL statement_timeout = '15s'")
         .execute(&mut *tx)
         .await?;
-    let e = &claim.event;
     let active=sqlx::query_scalar::<_,bool>("SELECT replay_storage_state='active' AND replay_storage_generation=$2 FROM project WHERE id=$1 FOR SHARE")
-        .bind(e.project_id).bind(e.storage_generation).fetch_optional(&mut *tx).await?.unwrap_or(false);
+        .bind(claim.project_id).bind(claim.storage_generation).fetch_optional(&mut *tx).await?.unwrap_or(false);
     let current=sqlx::query_scalar::<_,bool>("SELECT chunk_count=$4 AND deleted_at IS NULL FROM replay_sessions WHERE project_id=$1 AND session_id=$2 AND window_id=$3 FOR UPDATE")
-        .bind(e.project_id).bind(&e.session_id).bind(&e.window_id).bind(e.chunk_count).fetch_optional(&mut *tx).await?.unwrap_or(false);
+        .bind(claim.project_id).bind(&claim.session_id).bind(&claim.window_id).bind(claim.chunk_count).fetch_optional(&mut *tx).await?.unwrap_or(false);
     let manual = sqlx::query_scalar::<_,bool>("SELECT manual FROM replay_summary_jobs WHERE id=$1 AND execution_token=$2 AND state='running' AND lease_until>NOW() FOR UPDATE")
-        .bind(e.job_id).bind(claim.token).fetch_optional(&mut *tx).await?;
+        .bind(claim.job_id).bind(claim.token).fetch_optional(&mut *tx).await?;
     let Some(manual) = manual else {
         return Ok(false);
     };
-    // A button click can promote an automatic job while prepare is deciding to skip it.
-    // Preserve that request instead of publishing the earlier automatic decision.
+    // Requeue a manual request that arrived while prepare was deciding to skip.
     if state == "skipped" && manual && !claim.manual && active && current {
         sqlx::query("UPDATE replay_summary_jobs SET state='ready', stage='ready', lease_until=NULL, next_attempt_at=NOW(), attempts=GREATEST(attempts-1,0), execution_token=execution_token+1 WHERE id=$1 AND execution_token=$2")
-            .bind(e.job_id).bind(claim.token).execute(&mut *tx).await?;
+            .bind(claim.job_id).bind(claim.token).execute(&mut *tx).await?;
         tx.commit().await?;
         return Ok(false);
     }
     let selected = if state == "succeeded" && active && current && !manual {
         let row=sqlx::query("SELECT to_jsonb(s) AS attributes,cfg.settings FROM replay_sessions s JOIN replay_summary_settings cfg ON cfg.project_id=s.project_id WHERE s.project_id=$1 AND s.session_id=$2 AND s.window_id=$3 FOR SHARE OF cfg")
-            .bind(e.project_id).bind(&e.session_id).bind(&e.window_id).fetch_optional(&mut *tx).await?;
+            .bind(claim.project_id).bind(&claim.session_id).bind(&claim.window_id).fetch_optional(&mut *tx).await?;
         row.is_some_and(|r| crate::matches_settings(&r.get("settings"), &r.get("attributes")))
     } else {
         true
@@ -185,14 +175,14 @@ pub async fn finish(
         state
     };
     let updated=sqlx::query("UPDATE replay_summary_jobs SET state=$3,processed=true,processed_at=NOW(),lease_until=NULL,stage=$3,report=$4,last_error=NULL WHERE id=$1 AND execution_token=$2 AND state='running' AND lease_until>NOW()")
-        .bind(e.job_id).bind(claim.token).bind(state).bind(&report).execute(&mut *tx).await?.rows_affected()==1;
+        .bind(claim.job_id).bind(claim.token).bind(state).bind(&report).execute(&mut *tx).await?.rows_affected()==1;
     if updated && state == "succeeded" {
         let report = report.as_ref().context("missing summary report")?;
         let summary = report.get("summary").context("missing summary")?;
         // Commit summary and job success atomically, only for the owned revision.
         sqlx::query("UPDATE replay_sessions SET summary=$4, summary_chunk_count=$5, summary_model=$6, summary_created_at=NOW(), summary_replay_start_ms=$7 WHERE project_id=$1 AND session_id=$2 AND window_id=$3")
-            .bind(e.project_id).bind(&e.session_id).bind(&e.window_id)
-            .bind(summary).bind(e.chunk_count).bind(crate::summarize::MODEL)
+            .bind(claim.project_id).bind(&claim.session_id).bind(&claim.window_id)
+            .bind(summary).bind(claim.chunk_count).bind(crate::summarize::MODEL)
             .bind(report["replay_start_ms"].as_i64().context("missing replay start")?)
             .execute(&mut *tx).await?;
     }
@@ -207,11 +197,11 @@ pub async fn fail(pool: &PgPool, claim: &Claim, error: &str, retryable: bool) ->
             next_attempt_at=NOW()+CASE WHEN attempts=1 THEN interval '1 minute' ELSE interval '5 minutes' END,
             last_error=$3,lease_until=NULL
         WHERE id=$1 AND execution_token=$2 AND state='running' AND lease_until>NOW()
-    "#).bind(claim.event.job_id).bind(claim.token).bind(error).bind(retryable).execute(pool).await?;
+    "#).bind(claim.job_id).bind(claim.token).bind(error).bind(retryable).execute(pool).await?;
     Ok(())
 }
 
-/// Index-backed probes; do not repeatedly COUNT or scan the completed ledger.
+/// Read queue age from indexes without scanning completed jobs.
 pub async fn observe_queue(pool: &PgPool) -> Result<()> {
     let row = sqlx::query(
         r#"

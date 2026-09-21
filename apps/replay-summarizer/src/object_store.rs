@@ -9,7 +9,7 @@ pub struct ObjectStore {
 }
 
 impl ObjectStore {
-    pub fn from_env() -> Result<Option<Self>, String> {
+    pub fn from_env() -> Result<Self, String> {
         let bucket_prefix = std::env::var("REPLAY_S3_BUCKET_PREFIX")
             .ok()
             .or_else(|| std::env::var("REPLAY_S3_BUCKET").ok());
@@ -23,7 +23,7 @@ impl ObjectStore {
             && access_key.is_none()
             && secret_key.is_none()
         {
-            return Ok(None);
+            return Err("Replay S3 configuration must be set".into());
         }
 
         let bucket_prefix =
@@ -44,10 +44,10 @@ impl ObjectStore {
         if let Some(endpoint) = endpoint {
             config = config.endpoint_url(endpoint);
         }
-        Ok(Some(Self {
+        Ok(Self {
             client: Client::from_conf(config.build()),
             bucket_prefix,
-        }))
+        })
     }
 
     pub fn bucket(&self, project_id: Uuid) -> String {

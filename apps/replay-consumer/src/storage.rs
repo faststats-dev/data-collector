@@ -1,9 +1,8 @@
 use crate::object_store::ObjectStore;
-use replay_message::ReplayChunk as ReplayChunkInput;
+use replay_message::ReplayChunk;
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::time::Duration;
 use uuid::Uuid;
@@ -11,10 +10,6 @@ use uuid::Uuid;
 const REPLAY_CONTENT_ENCODING: &str = "zstd";
 const ZSTD_COMPRESSION_LEVEL: i32 = 3;
 const REPLAY_COMPRESSION_TIMEOUT: Duration = Duration::from_secs(10);
-
-pub struct ReplayStorage {
-    objects: ObjectStore,
-}
 
 enum PersistOutcome {
     Stored { first_for_billing: bool },
@@ -50,31 +45,110 @@ struct ReplayRouteMetadata {
     primary_route: String,
     routes: Vec<String>,
     route_spans: Vec<ReplayRouteSpan>,
-    entry_route: Option<String>,
-    exit_route: Option<String>,
 }
 
-impl ReplayStorage {
-    pub fn from_env() -> Result<Option<Self>, String> {
-        Ok(ObjectStore::from_env()?.map(|objects| Self { objects }))
+pub async fn store_replay_chunk(
+    objects: &ObjectStore,
+    pool: &sqlx::PgPool,
+    mut input: ReplayChunk,
+    quiet_seconds: i32,
+    grace_seconds: i32,
+) -> Result<bool, ReplayStorageError> {
+    if !replay_storage_generation_is_active(pool, input.project_id, input.storage_generation)
+        .await?
+    {
+        return Ok(false);
     }
 
-    pub async fn store_replay_chunk(
-        &self,
-        pool: &sqlx::PgPool,
-        mut input: ReplayChunkInput,
-        quiet_seconds: i32,
-        grace_seconds: i32,
-    ) -> Result<bool, ReplayStorageError> {
-        if !replay_storage_generation_is_active(pool, input.project_id, input.storage_generation)
-            .await?
+    // Skip uploads for retries and legacy coalesced chunks; recheck under the lock.
+    let already_stored: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1 FROM replay_snapshots
+            WHERE project_id = $1
+              AND session_id = $2
+              AND window_id = $3
+              AND storage_generation = $6
+              AND (
+                  ($4::text IS NOT NULL AND batch_id = $4)
+                  OR ($4::text IS NULL AND sequence = $5)
+                  OR ($5 BETWEEN first_sequence AND last_sequence)
+              )
+        )
+        "#,
+    )
+    .bind(input.project_id)
+    .bind(&input.session_id)
+    .bind(&input.window_id)
+    .bind(&input.batch_id)
+    .bind(input.sequence)
+    .bind(input.storage_generation)
+    .fetch_one(pool)
+    .await?;
+    if already_stored {
+        return Ok(false);
+    }
+    if !input.events.is_sorted_by_key(replay_event_order) {
+        input.events.sort_by_cached_key(replay_event_order);
+    }
+    let snapshot_id = Uuid::new_v4();
+    let first_event_timestamp_ms = input.events.iter().find_map(replay_timestamp_ms);
+    let last_event_timestamp_ms = input.events.iter().rev().find_map(replay_timestamp_ms);
+    let has_full_snapshot = input
+        .events
+        .iter()
+        .any(|event| event["type"].as_u64() == Some(2));
+    let event_count = i32::try_from(input.events.len()).unwrap_or(i32::MAX);
+    let first_sequence = input.first_sequence.unwrap_or(input.sequence);
+    let last_sequence = input.last_sequence.unwrap_or(input.sequence);
+    let client_batch_count = input.client_batch_count.max(1);
+
+    let click_analysis = crate::clicks::extract(&input.events);
+    let route_metadata = replay_route_metadata(&input.events, input.url.as_deref());
+    let object_key = replay_object_key(
+        input.storage_generation,
+        &input.session_id,
+        &input.window_id,
+        input.batch_id.as_deref(),
+        input.sequence,
+        first_event_timestamp_ms.unwrap_or(0),
+    );
+    let compressed = compress_replay_events(input.events).await?;
+    let compressed_bytes = i64::try_from(compressed.len()).unwrap_or(i64::MAX);
+
+    // This column historically stores compressed size; keep existing accounting.
+    let uncompressed_bytes = compressed_bytes;
+
+    let bucket = objects.bucket(input.project_id);
+    objects
+        .put(&bucket, &object_key, compressed)
+        .await
+        .map_err(ReplayStorageError::Upload)?;
+
+    let result = async {
+        let mut tx = pool.begin().await?;
+
+        if !replay_storage_generation_is_active(
+            &mut *tx,
+            input.project_id,
+            input.storage_generation,
+        )
+        .await?
         {
-            return Ok(false);
+            tx.commit().await?;
+            return Ok::<PersistOutcome, sqlx::Error>(PersistOutcome::Inactive);
         }
 
-        // Avoid object-store work for retries and for sequences already covered by a
-        // legacy coalesced row. The INSERT below remains the final race-safe guard.
-        let already_stored: bool = sqlx::query_scalar(
+        crate::controls::lock_stream(
+            &mut tx,
+            input.project_id,
+            input.storage_generation,
+            &input.session_id,
+            &input.window_id,
+        )
+        .await?;
+
+        let overlap_exists: bool = sqlx::query_scalar(
             r#"
             SELECT EXISTS (
                 SELECT 1 FROM replay_snapshots
@@ -96,381 +170,288 @@ impl ReplayStorage {
         .bind(&input.batch_id)
         .bind(input.sequence)
         .bind(input.storage_generation)
-        .fetch_one(pool)
+        .fetch_one(&mut *tx)
         .await?;
-        if already_stored {
-            return Ok(false);
-        }
-        if !replay_events_are_ordered(&input.events) {
-            input.events.sort_by(replay_event_order_cmp);
-        }
-        let snapshot_id = Uuid::new_v4();
-        let first_event_timestamp_ms = input.events.iter().find_map(replay_timestamp_ms);
-        let last_event_timestamp_ms = input.events.iter().rev().find_map(replay_timestamp_ms);
-        let has_full_snapshot = input
-            .events
-            .iter()
-            .any(|event| event["type"].as_u64() == Some(2));
-        let event_count = i32::try_from(input.events.len()).unwrap_or(i32::MAX);
-        let first_sequence = input.first_sequence.unwrap_or(input.sequence);
-        let last_sequence = input.last_sequence.unwrap_or(input.sequence);
-        let client_batch_count = input.client_batch_count.max(1);
-
-        let click_analysis = crate::clicks::extract(&input.events);
-        let route_metadata = replay_route_metadata(&input.events, input.url.as_deref());
-        let object_key = replay_object_key(
-            input.storage_generation,
-            &input.session_id,
-            &input.window_id,
-            input.batch_id.as_deref(),
-            input.sequence,
-            first_event_timestamp_ms.unwrap_or(0),
-        );
-        let compressed = compress_replay_events(input.events).await?;
-        let compressed_bytes = i64::try_from(compressed.len()).unwrap_or(i64::MAX);
-
-        // This column historically stores compressed size; keep existing accounting.
-        let uncompressed_bytes = compressed_bytes;
-
-        let bucket = self.objects.bucket(input.project_id);
-        self.objects
-            .put(&bucket, &object_key, compressed)
-            .await
-            .map_err(ReplayStorageError::Upload)?;
-
-        let result = async {
-            let mut tx = pool.begin().await?;
-
-            if !replay_storage_generation_is_active(
-                &mut *tx,
-                input.project_id,
-                input.storage_generation,
-            )
-            .await?
-            {
-                tx.commit().await?;
-                return Ok::<PersistOutcome, sqlx::Error>(PersistOutcome::Inactive);
-            }
-
-            let stream_key = format!(
-                "{}:{}:{}:{}",
-                input.project_id,
-                input.session_id,
-                input.window_id,
-                input.storage_generation
-            );
-            sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-                .bind(stream_key)
-                .execute(&mut *tx)
-                .await?;
-
-            let overlap_exists: bool = sqlx::query_scalar(
-                r#"
-                SELECT EXISTS (
-                    SELECT 1 FROM replay_snapshots
-                    WHERE project_id = $1
-                      AND session_id = $2
-                      AND window_id = $3
-                      AND storage_generation = $6
-                      AND (
-                          ($4::text IS NOT NULL AND batch_id = $4)
-                          OR ($4::text IS NULL AND sequence = $5)
-                          OR ($5 BETWEEN first_sequence AND last_sequence)
-                      )
-                )
-                "#,
-            )
-            .bind(input.project_id)
-            .bind(&input.session_id)
-            .bind(&input.window_id)
-            .bind(&input.batch_id)
-            .bind(input.sequence)
-            .bind(input.storage_generation)
-            .fetch_one(&mut *tx)
-            .await?;
-            if overlap_exists {
-                tx.commit().await?;
-                return Ok::<PersistOutcome, sqlx::Error>(PersistOutcome::Duplicate);
-            }
-
-            let insert_result = sqlx::query(
-                r#"
-                INSERT INTO replay_snapshots (
-                    id,
-                    project_id,
-                    session_id,
-                    window_id,
-                    view_id,
-                    session_start_ms,
-                    is_final,
-                    batch_id,
-                    sequence,
-                    first_sequence,
-                    last_sequence,
-                    client_batch_count,
-                    identifier,
-                    s3_key,
-                    storage_generation,
-                    content_encoding,
-                    compressed_bytes,
-                    uncompressed_bytes,
-                    event_count,
-                    first_event_timestamp_ms,
-                    last_event_timestamp_ms,
-                    has_full_snapshot,
-                    source_url,
-                    normalized_route,
-                    routes,
-                    route_count,
-                    route_spans,
-                    click_analysis
-                )
-                VALUES (
-                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-                    $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24,
-                    $25, $26, $27, $28
-                )
-                ON CONFLICT DO NOTHING
-                "#,
-            )
-            .bind(snapshot_id)
-            .bind(input.project_id)
-            .bind(&input.session_id)
-            .bind(&input.window_id)
-            .bind(&input.view_id)
-            .bind(input.session_start_ms)
-            .bind(input.is_final)
-            .bind(&input.batch_id)
-            .bind(input.sequence)
-            .bind(first_sequence)
-            .bind(last_sequence)
-            .bind(client_batch_count)
-            .bind(&input.identifier)
-            .bind(&object_key)
-            .bind(input.storage_generation)
-            .bind(REPLAY_CONTENT_ENCODING)
-            .bind(compressed_bytes)
-            .bind(uncompressed_bytes)
-            .bind(event_count)
-            .bind(first_event_timestamp_ms)
-            .bind(last_event_timestamp_ms)
-            .bind(has_full_snapshot)
-            .bind(&input.url)
-            .bind(&route_metadata.primary_route)
-            .bind(&route_metadata.routes)
-            .bind(i32::try_from(route_metadata.routes.len()).unwrap_or(i32::MAX))
-            .bind(sqlx::types::Json(&route_metadata.route_spans))
-            .bind(sqlx::types::Json(&click_analysis))
-            .execute(&mut *tx)
-            .await?;
-
-            if insert_result.rows_affected() == 0 {
-                tx.commit().await?;
-                return Ok::<PersistOutcome, sqlx::Error>(PersistOutcome::Duplicate);
-            }
-
-            let initial_actual_duration_ms = match (first_event_timestamp_ms, last_event_timestamp_ms)
-            {
-                (Some(started_at_ms), Some(ended_at_ms)) if ended_at_ms >= started_at_ms => {
-                    Some(ended_at_ms - started_at_ms)
-                }
-                _ => None,
-            };
-
-            sqlx::query(
-                r#"
-                INSERT INTO replay_sessions (
-                    id,
-                    project_id,
-                    session_id,
-                    window_id,
-                    identifier,
-                    started_at,
-                    ended_at,
-                    session_start_ms,
-                    actual_started_at_ms,
-                    actual_ended_at_ms,
-                    actual_duration_ms,
-                    event_count,
-                    chunk_count,
-                    total_bytes,
-                    has_full_snapshot,
-                    routes,
-                    route_count,
-                    entry_route,
-                    exit_route,
-                    browser,
-                    country,
-                    os,
-                    has_errors,
-                    has_poor_vitals,
-                    is_complete,
-                    finalized_at,
-                    finalize_after
-                ) VALUES (
-                    $1, $2, $3, $4, $5,
-                    COALESCE(timezone('UTC', to_timestamp($7::double precision / 1000.0)), timezone('UTC', to_timestamp($6::double precision / 1000.0))),
-                    COALESCE(timezone('UTC', to_timestamp($8::double precision / 1000.0)), timezone('UTC', to_timestamp($7::double precision / 1000.0)), timezone('UTC', to_timestamp($6::double precision / 1000.0))),
-                    $6, $7, $8, $9, $10, 1, $11, $12, $13, $14, $15, $16, $17, $18, $19, false, false,
-                    false, NULL, NOW() + make_interval(secs => $20::integer)
-                )
-                ON CONFLICT (project_id, session_id, window_id) DO UPDATE
-                SET
-                    identifier = COALESCE(EXCLUDED.identifier, replay_sessions.identifier),
-                    started_at = LEAST(replay_sessions.started_at, EXCLUDED.started_at),
-                    ended_at = GREATEST(replay_sessions.ended_at, EXCLUDED.ended_at),
-                    session_start_ms = COALESCE(
-                        LEAST(replay_sessions.session_start_ms, EXCLUDED.session_start_ms),
-                        replay_sessions.session_start_ms,
-                        EXCLUDED.session_start_ms
-                    ),
-                    (actual_started_at_ms, actual_ended_at_ms, actual_duration_ms) = (
-                        SELECT first_ms, last_ms,
-                            CASE WHEN last_ms >= first_ms THEN last_ms - first_ms END
-                        FROM (
-                            SELECT
-                                COALESCE(LEAST(replay_sessions.actual_started_at_ms, EXCLUDED.actual_started_at_ms), replay_sessions.actual_started_at_ms, EXCLUDED.actual_started_at_ms) AS first_ms,
-                                COALESCE(GREATEST(replay_sessions.actual_ended_at_ms, EXCLUDED.actual_ended_at_ms), replay_sessions.actual_ended_at_ms, EXCLUDED.actual_ended_at_ms) AS last_ms
-                        ) AS bounds
-                    ),
-                    event_count = replay_sessions.event_count + EXCLUDED.event_count,
-                    chunk_count = replay_sessions.chunk_count + EXCLUDED.chunk_count,
-                    total_bytes = replay_sessions.total_bytes + EXCLUDED.total_bytes,
-                    has_full_snapshot = replay_sessions.has_full_snapshot OR EXCLUDED.has_full_snapshot,
-                    (routes, route_count) = (
-                        SELECT merged_routes, cardinality(merged_routes)
-                        FROM (
-                            SELECT ARRAY(
-                                SELECT DISTINCT replay_route.route
-                                FROM unnest(replay_sessions.routes || EXCLUDED.routes) AS replay_route(route)
-                            ) AS merged_routes
-                        ) AS route_merge
-                    ),
-                    entry_route = COALESCE(replay_sessions.entry_route, EXCLUDED.entry_route),
-                    exit_route = COALESCE(EXCLUDED.exit_route, replay_sessions.exit_route),
-                    browser = COALESCE(EXCLUDED.browser, replay_sessions.browser),
-                    country = COALESCE(EXCLUDED.country, replay_sessions.country),
-                    os = COALESCE(EXCLUDED.os, replay_sessions.os),
-                    is_complete = false,
-                    finalized_at = NULL,
-                    finalize_after = EXCLUDED.finalize_after,
-                    updated_at = NOW()
-                "#,
-            )
-            .bind(Uuid::new_v4())
-            .bind(input.project_id)
-            .bind(&input.session_id)
-            .bind(&input.window_id)
-            .bind(&input.identifier)
-            .bind(input.session_start_ms)
-            .bind(first_event_timestamp_ms)
-            .bind(last_event_timestamp_ms)
-            .bind(initial_actual_duration_ms)
-            .bind(event_count)
-            .bind(compressed_bytes)
-            .bind(has_full_snapshot)
-            .bind(&route_metadata.routes)
-            .bind(i32::try_from(route_metadata.routes.len()).unwrap_or(i32::MAX))
-            .bind(route_metadata.entry_route.as_deref())
-            .bind(route_metadata.exit_route.as_deref())
-            .bind(input.browser.as_deref())
-            .bind(input.country.as_deref())
-            .bind(input.os.as_deref())
-            .bind(quiet_seconds)
-            .execute(&mut *tx)
-            .await?;
-
-            crate::controls::record_chunk(&mut tx, input.project_id, input.storage_generation, &input.session_id, &input.window_id, last_sequence, input.is_final, true, grace_seconds).await?;
-
-            crate::clicks::refresh(&mut tx, input.project_id, &input.session_id, &input.window_id, input.storage_generation, Some(&click_analysis)).await?;
-
-            let first_for_billing = sqlx::query_scalar::<_, Uuid>(
-                r#"
-                INSERT INTO replay_usage_sessions (id, project_id, session_id)
-                VALUES ($1, $2, $3)
-                ON CONFLICT (project_id, session_id) DO NOTHING
-                RETURNING id
-                "#,
-            )
-            .bind(Uuid::new_v4())
-            .bind(input.project_id)
-            .bind(&input.session_id)
-            .fetch_optional(&mut *tx)
-            .await?
-            .is_some();
-
+        if overlap_exists {
             tx.commit().await?;
-            Ok::<PersistOutcome, sqlx::Error>(PersistOutcome::Stored { first_for_billing })
+            return Ok::<PersistOutcome, sqlx::Error>(PersistOutcome::Duplicate);
         }
-        .await;
 
-        match result {
-            Ok(PersistOutcome::Stored { first_for_billing }) => {
-                record_replay_chunk_metrics(
-                    input.flush_reason.as_deref(),
-                    input.is_final,
-                    event_count,
-                    compressed_bytes,
-                    uncompressed_bytes,
-                );
-                Ok(first_for_billing)
-            }
-            Ok(PersistOutcome::Duplicate) => {
-                // Idempotent retries use the same deterministic object key. Deleting it here
-                // would remove the object referenced by the transaction that won the race.
-                Ok(false)
-            }
-            Ok(PersistOutcome::Inactive) => {
-                self.objects
-                    .delete(&bucket, &object_key)
-                    .await
-                    .map_err(ReplayStorageError::Upload)?;
-                Ok(false)
-            }
-            Err(error) => {
-                // Keep deterministic objects on database failure. A concurrent transaction may
-                // already reference the same key, and the backed-up retry can safely reuse it.
-                Err(ReplayStorageError::Database(error))
-            }
-        }
-    }
+        let insert_result = sqlx::query(
+            r#"
+            INSERT INTO replay_snapshots (
+                id,
+                project_id,
+                session_id,
+                window_id,
+                view_id,
+                session_start_ms,
+                is_final,
+                batch_id,
+                sequence,
+                first_sequence,
+                last_sequence,
+                client_batch_count,
+                identifier,
+                s3_key,
+                storage_generation,
+                content_encoding,
+                compressed_bytes,
+                uncompressed_bytes,
+                event_count,
+                first_event_timestamp_ms,
+                last_event_timestamp_ms,
+                has_full_snapshot,
+                source_url,
+                normalized_route,
+                routes,
+                route_count,
+                route_spans,
+                click_analysis
+            )
+            VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+                $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24,
+                $25, $26, $27, $28
+            )
+            ON CONFLICT DO NOTHING
+            "#,
+        )
+        .bind(snapshot_id)
+        .bind(input.project_id)
+        .bind(&input.session_id)
+        .bind(&input.window_id)
+        .bind(&input.view_id)
+        .bind(input.session_start_ms)
+        .bind(input.is_final)
+        .bind(&input.batch_id)
+        .bind(input.sequence)
+        .bind(first_sequence)
+        .bind(last_sequence)
+        .bind(client_batch_count)
+        .bind(&input.identifier)
+        .bind(&object_key)
+        .bind(input.storage_generation)
+        .bind(REPLAY_CONTENT_ENCODING)
+        .bind(compressed_bytes)
+        .bind(uncompressed_bytes)
+        .bind(event_count)
+        .bind(first_event_timestamp_ms)
+        .bind(last_event_timestamp_ms)
+        .bind(has_full_snapshot)
+        .bind(&input.url)
+        .bind(&route_metadata.primary_route)
+        .bind(&route_metadata.routes)
+        .bind(i32::try_from(route_metadata.routes.len()).unwrap_or(i32::MAX))
+        .bind(sqlx::types::Json(&route_metadata.route_spans))
+        .bind(sqlx::types::Json(&click_analysis))
+        .execute(&mut *tx)
+        .await?;
 
-    pub async fn record_terminal_hint(
-        pool: &sqlx::PgPool,
-        project_id: Uuid,
-        session_id: &str,
-        window_id: &str,
-        storage_generation: i32,
-        sequence: i64,
-        grace_seconds: i32,
-    ) -> Result<(), ReplayStorageError> {
-        let mut tx = pool.begin().await?;
-        if !replay_storage_generation_is_active(&mut *tx, project_id, storage_generation).await? {
-            return Ok(());
+        if insert_result.rows_affected() == 0 {
+            tx.commit().await?;
+            return Ok::<PersistOutcome, sqlx::Error>(PersistOutcome::Duplicate);
         }
-        crate::controls::lock_stream(
-            &mut tx,
-            project_id,
-            storage_generation,
-            session_id,
-            window_id,
+
+        let initial_actual_duration_ms = match (first_event_timestamp_ms, last_event_timestamp_ms)
+        {
+            (Some(started_at_ms), Some(ended_at_ms)) if ended_at_ms >= started_at_ms => {
+                Some(ended_at_ms - started_at_ms)
+            }
+            _ => None,
+        };
+
+        sqlx::query(
+            r#"
+            INSERT INTO replay_sessions (
+                id,
+                project_id,
+                session_id,
+                window_id,
+                identifier,
+                started_at,
+                ended_at,
+                session_start_ms,
+                actual_started_at_ms,
+                actual_ended_at_ms,
+                actual_duration_ms,
+                event_count,
+                chunk_count,
+                total_bytes,
+                has_full_snapshot,
+                routes,
+                route_count,
+                entry_route,
+                exit_route,
+                browser,
+                country,
+                os,
+                has_errors,
+                has_poor_vitals,
+                is_complete,
+                finalized_at,
+                finalize_after
+            ) VALUES (
+                $1, $2, $3, $4, $5,
+                COALESCE(timezone('UTC', to_timestamp($7::double precision / 1000.0)), timezone('UTC', to_timestamp($6::double precision / 1000.0))),
+                COALESCE(timezone('UTC', to_timestamp($8::double precision / 1000.0)), timezone('UTC', to_timestamp($7::double precision / 1000.0)), timezone('UTC', to_timestamp($6::double precision / 1000.0))),
+                $6, $7, $8, $9, $10, 1, $11, $12, $13, $14, $15, $16, $17, $18, $19, false, false,
+                false, NULL, NOW() + make_interval(secs => $20::integer)
+            )
+            ON CONFLICT (project_id, session_id, window_id) DO UPDATE
+            SET
+                identifier = COALESCE(EXCLUDED.identifier, replay_sessions.identifier),
+                started_at = LEAST(replay_sessions.started_at, EXCLUDED.started_at),
+                ended_at = GREATEST(replay_sessions.ended_at, EXCLUDED.ended_at),
+                session_start_ms = COALESCE(
+                    LEAST(replay_sessions.session_start_ms, EXCLUDED.session_start_ms),
+                    replay_sessions.session_start_ms,
+                    EXCLUDED.session_start_ms
+                ),
+                (actual_started_at_ms, actual_ended_at_ms, actual_duration_ms) = (
+                    SELECT first_ms, last_ms,
+                        CASE WHEN last_ms >= first_ms THEN last_ms - first_ms END
+                    FROM (
+                        SELECT
+                            COALESCE(LEAST(replay_sessions.actual_started_at_ms, EXCLUDED.actual_started_at_ms), replay_sessions.actual_started_at_ms, EXCLUDED.actual_started_at_ms) AS first_ms,
+                            COALESCE(GREATEST(replay_sessions.actual_ended_at_ms, EXCLUDED.actual_ended_at_ms), replay_sessions.actual_ended_at_ms, EXCLUDED.actual_ended_at_ms) AS last_ms
+                    ) AS bounds
+                ),
+                event_count = replay_sessions.event_count + EXCLUDED.event_count,
+                chunk_count = replay_sessions.chunk_count + EXCLUDED.chunk_count,
+                total_bytes = replay_sessions.total_bytes + EXCLUDED.total_bytes,
+                has_full_snapshot = replay_sessions.has_full_snapshot OR EXCLUDED.has_full_snapshot,
+                (routes, route_count) = (
+                    SELECT merged_routes, cardinality(merged_routes)
+                    FROM (
+                        SELECT ARRAY(
+                            SELECT DISTINCT replay_route.route
+                            FROM unnest(replay_sessions.routes || EXCLUDED.routes) AS replay_route(route)
+                        ) AS merged_routes
+                    ) AS route_merge
+                ),
+                entry_route = COALESCE(replay_sessions.entry_route, EXCLUDED.entry_route),
+                exit_route = COALESCE(EXCLUDED.exit_route, replay_sessions.exit_route),
+                browser = COALESCE(EXCLUDED.browser, replay_sessions.browser),
+                country = COALESCE(EXCLUDED.country, replay_sessions.country),
+                os = COALESCE(EXCLUDED.os, replay_sessions.os),
+                is_complete = false,
+                finalized_at = NULL,
+                finalize_after = EXCLUDED.finalize_after,
+                updated_at = NOW()
+            "#,
         )
+        .bind(Uuid::new_v4())
+        .bind(input.project_id)
+        .bind(&input.session_id)
+        .bind(&input.window_id)
+        .bind(&input.identifier)
+        .bind(input.session_start_ms)
+        .bind(first_event_timestamp_ms)
+        .bind(last_event_timestamp_ms)
+        .bind(initial_actual_duration_ms)
+        .bind(event_count)
+        .bind(compressed_bytes)
+        .bind(has_full_snapshot)
+        .bind(&route_metadata.routes)
+        .bind(i32::try_from(route_metadata.routes.len()).unwrap_or(i32::MAX))
+        .bind(route_metadata.route_spans.first().map(|span| span.route.as_str()))
+        .bind(route_metadata.route_spans.last().map(|span| span.route.as_str()))
+        .bind(input.browser.as_deref())
+        .bind(input.country.as_deref())
+        .bind(input.os.as_deref())
+        .bind(quiet_seconds)
+        .execute(&mut *tx)
         .await?;
-        crate::controls::record_chunk(
-            &mut tx,
-            project_id,
-            storage_generation,
-            session_id,
-            window_id,
-            sequence,
-            true,
-            false,
-            grace_seconds,
+
+        crate::controls::record_chunk(&mut tx, input.project_id, input.storage_generation, &input.session_id, &input.window_id, last_sequence, input.is_final, true, grace_seconds).await?;
+
+        crate::clicks::refresh(&mut tx, input.project_id, &input.session_id, &input.window_id, input.storage_generation, click_analysis).await?;
+
+        let first_for_billing = sqlx::query_scalar::<_, Uuid>(
+            r#"
+            INSERT INTO replay_usage_sessions (id, project_id, session_id)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (project_id, session_id) DO NOTHING
+            RETURNING id
+            "#,
         )
-        .await?;
+        .bind(Uuid::new_v4())
+        .bind(input.project_id)
+        .bind(&input.session_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .is_some();
+
         tx.commit().await?;
-        Ok(())
+        Ok::<PersistOutcome, sqlx::Error>(PersistOutcome::Stored { first_for_billing })
     }
+    .await;
+
+    match result {
+        Ok(PersistOutcome::Stored { first_for_billing }) => {
+            record_replay_chunk_metrics(
+                input.flush_reason.as_deref(),
+                input.is_final,
+                event_count,
+                compressed_bytes,
+                uncompressed_bytes,
+            );
+            Ok(first_for_billing)
+        }
+        Ok(PersistOutcome::Duplicate) => {
+            // The winning transaction references the same object; keep it.
+            Ok(false)
+        }
+        Ok(PersistOutcome::Inactive) => {
+            objects
+                .delete(&bucket, &object_key)
+                .await
+                .map_err(ReplayStorageError::Upload)?;
+            Ok(false)
+        }
+        Err(error) => {
+            // Keep the object: another transaction may reference it, or a retry may reuse it.
+            Err(ReplayStorageError::Database(error))
+        }
+    }
+}
+
+pub async fn record_terminal_hint(
+    pool: &sqlx::PgPool,
+    project_id: Uuid,
+    session_id: &str,
+    window_id: &str,
+    storage_generation: i32,
+    sequence: i64,
+    grace_seconds: i32,
+) -> Result<(), ReplayStorageError> {
+    let mut tx = pool.begin().await?;
+    if !replay_storage_generation_is_active(&mut *tx, project_id, storage_generation).await? {
+        return Ok(());
+    }
+    crate::controls::lock_stream(
+        &mut tx,
+        project_id,
+        storage_generation,
+        session_id,
+        window_id,
+    )
+    .await?;
+    crate::controls::record_chunk(
+        &mut tx,
+        project_id,
+        storage_generation,
+        session_id,
+        window_id,
+        sequence,
+        true,
+        false,
+        grace_seconds,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(())
 }
 
 /// Inside a transaction, the share lock prevents generation changes until commit.
@@ -520,8 +501,7 @@ fn replay_object_key(
     )
 }
 
-/// Allowed `flush_reason` metric labels. Anything else is bucketed into
-/// `unknown` to keep metric cardinality bounded.
+// Bound metric label cardinality; unrecognized reasons become "unknown".
 const KNOWN_FLUSH_REASONS: &[&str] = &[
     "interval",
     "maxEvents",
@@ -588,10 +568,6 @@ fn replay_timestamp_ms(event: &Value) -> Option<i64> {
     event.get("timestamp").and_then(event_integer)
 }
 
-fn replay_sequential_id(event: &Value) -> Option<i64> {
-    event.get("_faststatsSeqId").and_then(event_integer)
-}
-
 fn event_integer(value: &Value) -> Option<i64> {
     if let Some(value) = value.as_i64() {
         return Some(value);
@@ -605,16 +581,11 @@ fn event_integer(value: &Value) -> Option<i64> {
         .map(|value| value.round() as i64)
 }
 
-fn replay_event_order_cmp(left: &Value, right: &Value) -> Ordering {
-    replay_timestamp_ms(left)
-        .cmp(&replay_timestamp_ms(right))
-        .then_with(|| replay_sequential_id(left).cmp(&replay_sequential_id(right)))
-}
-
-fn replay_events_are_ordered(events: &[Value]) -> bool {
-    events
-        .windows(2)
-        .all(|pair| !replay_event_order_cmp(&pair[0], &pair[1]).is_gt())
+fn replay_event_order(event: &Value) -> (Option<i64>, Option<i64>) {
+    (
+        replay_timestamp_ms(event),
+        event.get("_faststatsSeqId").and_then(event_integer),
+    )
 }
 
 fn replay_route_metadata(events: &[Value], fallback_url: Option<&str>) -> ReplayRouteMetadata {
@@ -667,18 +638,10 @@ fn replay_route_metadata(events: &[Value], fallback_url: Option<&str>) -> Replay
         });
     }
 
-    let entry_route = route_spans.first().map(|span| span.route.clone());
-    let exit_route = route_spans.last().map(|span| span.route.clone());
-
     ReplayRouteMetadata {
-        primary_route: routes
-            .first()
-            .cloned()
-            .unwrap_or_else(|| fallback_route.clone()),
+        primary_route: routes.first().cloned().unwrap_or(fallback_route),
         routes,
         route_spans,
-        entry_route,
-        exit_route,
     }
 }
 
@@ -712,10 +675,6 @@ fn normalize_route(url: Option<&str>) -> String {
 }
 
 fn normalize_path(path: &str) -> String {
-    if path.is_empty() || path == "/" {
-        return "/".to_string();
-    }
-
     let trimmed = path.trim_end_matches('/');
     if trimmed.is_empty() {
         "/".to_string()
@@ -773,26 +732,61 @@ mod tests {
             json!({"timestamp": -1.5}),
             json!({"timestamp": "100"}),
         ];
-        events.sort_by(replay_event_order_cmp);
+        events.sort_by_cached_key(replay_event_order);
         assert_eq!(events.iter().find_map(replay_timestamp_ms), Some(-2));
         assert_eq!(events.iter().rev().find_map(replay_timestamp_ms), Some(13));
     }
 
     #[test]
     fn replay_event_order_uses_sequential_id_for_matching_timestamps() {
-        let mut events = vec![
+        let mut events = [
             json!({ "type": 3, "timestamp": 1000, "_faststatsSeqId": 2, "data": {} }),
             json!({ "type": 3, "timestamp": 1000, "_faststatsSeqId": 1, "data": {} }),
             json!({ "type": 3, "timestamp": 1001, "_faststatsSeqId": 3, "data": {} }),
         ];
 
-        assert!(!replay_events_are_ordered(&events));
-        events.sort_by(replay_event_order_cmp);
+        assert!(!events.is_sorted_by_key(replay_event_order));
+        events.sort_by_cached_key(replay_event_order);
 
-        assert_eq!(replay_sequential_id(&events[0]), Some(1));
-        assert_eq!(replay_sequential_id(&events[1]), Some(2));
-        assert_eq!(replay_sequential_id(&events[2]), Some(3));
-        assert!(replay_events_are_ordered(&events));
+        assert_eq!(replay_event_order(&events[0]).1, Some(1));
+        assert_eq!(replay_event_order(&events[1]).1, Some(2));
+        assert_eq!(replay_event_order(&events[2]).1, Some(3));
+        assert!(events.is_sorted_by_key(replay_event_order));
+    }
+
+    #[test]
+    fn cached_event_order_preserves_ties_and_invalid_numbers() {
+        let timestamps = [
+            Value::Null,
+            json!(-1),
+            json!(-0.5),
+            json!(0),
+            json!(1.4),
+            json!(1.49),
+            json!(u64::MAX),
+        ];
+        let sequences = [Value::Null, json!(0), json!(1), json!(1.4), json!(u64::MAX)];
+        let mut events = Vec::new();
+        for timestamp in timestamps {
+            for sequence in &sequences {
+                for _ in 0..2 {
+                    events.push(json!({"timestamp": timestamp, "_faststatsSeqId": sequence, "id": events.len()}));
+                }
+            }
+        }
+        events.reverse();
+        let mut expected = events.clone();
+        expected.sort_by(|left, right| {
+            replay_timestamp_ms(left)
+                .cmp(&replay_timestamp_ms(right))
+                .then_with(|| {
+                    left.get("_faststatsSeqId")
+                        .and_then(event_integer)
+                        .cmp(&right.get("_faststatsSeqId").and_then(event_integer))
+                })
+        });
+        events.sort_by_cached_key(replay_event_order);
+        assert_eq!(events, expected);
     }
 
     #[test]
@@ -806,8 +800,14 @@ mod tests {
 
         assert_eq!(metadata.primary_route, "/docs");
         assert_eq!(metadata.routes, vec!["/docs"]);
-        assert_eq!(metadata.entry_route.as_deref(), Some("/docs"));
-        assert_eq!(metadata.exit_route.as_deref(), Some("/docs"));
+        assert_eq!(
+            metadata.route_spans.first().map(|span| span.route.as_str()),
+            Some("/docs")
+        );
+        assert_eq!(
+            metadata.route_spans.last().map(|span| span.route.as_str()),
+            Some("/docs")
+        );
         assert_eq!(metadata.route_spans.len(), 1);
         assert_eq!(metadata.route_spans[0].from, Some(1000));
         assert_eq!(metadata.route_spans[0].to, Some(1100));
@@ -834,8 +834,14 @@ mod tests {
 
         assert_eq!(metadata.primary_route, "/pricing");
         assert_eq!(metadata.routes, vec!["/pricing", "/checkout"]);
-        assert_eq!(metadata.entry_route.as_deref(), Some("/pricing"));
-        assert_eq!(metadata.exit_route.as_deref(), Some("/checkout"));
+        assert_eq!(
+            metadata.route_spans.first().map(|span| span.route.as_str()),
+            Some("/pricing")
+        );
+        assert_eq!(
+            metadata.route_spans.last().map(|span| span.route.as_str()),
+            Some("/checkout")
+        );
         assert_eq!(metadata.route_spans.len(), 2);
         assert_eq!(metadata.route_spans[0].route, "/pricing");
         assert_eq!(metadata.route_spans[0].from, Some(1000));

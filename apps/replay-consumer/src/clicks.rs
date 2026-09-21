@@ -1,4 +1,4 @@
-//! Versioned, privacy-safe replay click analysis. No DOM text or attributes are retained.
+//! Count clicks and rage-click episodes without retaining DOM text or attributes.
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -114,11 +114,18 @@ pub fn summarize(chunks: &[ClickAnalysis]) -> (i32, i32) {
             pending.clear();
         }
     }
+    let mut rebuilt = Checkpoint::new(1, chunks.len() as i32);
+    rebuilt.extend(
+        chunks
+            .iter()
+            .flat_map(|chunk| chunk.signals.clone())
+            .collect(),
+    );
+    assert_eq!((rebuilt.clicks, rebuilt.rage), (clicks, rage));
     (clicks, rage)
 }
 
-/// Only the current episode and at most two pending clicks are needed across
-/// append-only chunks. Any timestamp overlap takes the canonical rebuild path.
+/// Retain the current episode and two pending clicks. Rebuild on timestamp overlap.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Checkpoint {
     version: u32,
@@ -150,8 +157,7 @@ impl Checkpoint {
                 .iter()
                 .all(|s| self.watermark.is_none_or(|w| s.timestamp > w))
     }
-    fn extend(&mut self, chunks: &[ClickAnalysis]) {
-        let mut signals: Vec<_> = chunks.iter().flat_map(|c| &c.signals).collect();
+    fn extend(&mut self, mut signals: Vec<Signal>) {
         signals.sort_by(|a, b| a.timestamp.total_cmp(&b.timestamp).then(a.seq.cmp(&b.seq)));
         signals.dedup_by(|a, b| {
             a.seq.is_some() && a.seq == b.seq && a.timestamp.to_bits() == b.timestamp.to_bits()
@@ -168,7 +174,7 @@ impl Checkpoint {
             }
             self.clicks = self.clicks.saturating_add(1);
             if let Some((anchor, last)) = &mut self.episode {
-                if signal.timestamp - *last <= WINDOW_MS && near(anchor, signal) {
+                if signal.timestamp - *last <= WINDOW_MS && near(anchor, &signal) {
                     *last = signal.timestamp;
                     continue;
                 }
@@ -176,13 +182,14 @@ impl Checkpoint {
             }
             self.pending
                 .retain(|p| signal.timestamp - p.timestamp <= WINDOW_MS);
-            if self.pending.iter().any(|p| !near(p, signal)) {
+            if self.pending.iter().any(|p| !near(p, &signal)) {
                 self.pending.clear();
             }
-            self.pending.push(signal.clone());
+            let timestamp = signal.timestamp;
+            self.pending.push(signal);
             if self.pending.len() == 3 {
                 self.rage = self.rage.saturating_add(1);
-                self.episode = Some((self.pending[0].clone(), signal.timestamp));
+                self.episode = Some((self.pending.swap_remove(0), timestamp));
                 self.pending.clear();
             }
         }
@@ -196,20 +203,20 @@ pub async fn refresh(
     session: &str,
     window: &str,
     generation: i32,
-    new_chunk: Option<&ClickAnalysis>,
+    new_chunk: ClickAnalysis,
 ) -> Result<(), sqlx::Error> {
     let (count, stored) = sqlx::query_as::<_, (i32, Option<serde_json::Value>)>(
         "SELECT chunk_count, click_analysis_state FROM replay_sessions WHERE project_id=$1 AND session_id=$2 AND window_id=$3"
     ).bind(project).bind(session).bind(window).fetch_one(&mut **tx).await?;
     let previous = stored.and_then(|value| serde_json::from_value::<Checkpoint>(value).ok());
-    let mut checkpoint = match (previous, new_chunk) {
-        (Some(mut state), Some(chunk))
+    let mut checkpoint = match previous {
+        Some(mut state)
             if state.version == VERSION
                 && state.generation == generation
                 && state.chunks + 1 == count
-                && state.appendable(chunk) =>
+                && state.appendable(&new_chunk) =>
         {
-            state.extend(std::slice::from_ref(chunk));
+            state.extend(new_chunk.signals);
             Some(state)
         }
         _ => {
@@ -223,7 +230,12 @@ pub async fn refresh(
                     .all(|r| r.as_ref().is_some_and(|r| r.version == VERSION))
             {
                 let mut state = Checkpoint::new(generation, count);
-                state.extend(&rows.into_iter().flatten().map(|r| r.0).collect::<Vec<_>>());
+                state.extend(
+                    rows.into_iter()
+                        .flatten()
+                        .flat_map(|row| row.0.signals)
+                        .collect(),
+                );
                 Some(state)
             } else {
                 None
@@ -350,7 +362,7 @@ mod checkpoint_tests {
                     signals.push(Signal {
                         timestamp,
                         seq: Some((batch * 17 + i) as u64),
-                        target: if random % 23 == 0 {
+                        target: if random.is_multiple_of(23) {
                             None
                         } else {
                             Some((random % 3) as i64)
@@ -364,7 +376,7 @@ mod checkpoint_tests {
                     signals,
                 };
                 assert!(state.appendable(&chunk));
-                state.extend(std::slice::from_ref(&chunk));
+                state.extend(chunk.signals.clone());
                 // Round-trip the persisted representation between chunks.
                 state = serde_json::from_value(serde_json::to_value(state).unwrap()).unwrap();
                 chunks.push(chunk);

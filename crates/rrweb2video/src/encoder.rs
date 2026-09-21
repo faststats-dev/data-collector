@@ -8,8 +8,7 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-// Three recycled packet buffers bound memory: one being filled, one queued,
-// and one being written. The channel transfers ownership without another copy.
+// One buffer being filled, one queued, and one being written.
 const BUFFER_COUNT: usize = 3;
 type Worker = JoinHandle<io::Result<()>>;
 
@@ -52,8 +51,7 @@ impl Encoder {
         height: u32,
         timestamp: Option<(f64, u64)>,
     ) -> Result<Self> {
-        // Re-evaluate for each recording so container CPU quota/affinity changes
-        // take effect without a code change. FFmpeg's own auto mode can see host CPUs.
+        // Respect container CPU limits; FFmpeg's auto mode may see all host CPUs.
         let threads = thread::available_parallelism()
             .map(|count| count.get())
             .unwrap_or(1)

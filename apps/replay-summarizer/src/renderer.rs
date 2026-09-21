@@ -1,13 +1,9 @@
-//! A persistent render child isolates browser/FFmpeg failure from Kafka and leases.
-use crate::{
-    jobs::{Input, PROFILE},
-    object_store::ObjectStore,
-    replay_loader,
-};
-use anyhow::{Context, Result, ensure};
+//! Keep browser and FFmpeg failures in a child process, separate from job leases.
+use crate::{jobs::Input, object_store::ObjectStore, replay_loader};
+use anyhow::{Context, Result};
 use futures_util::future::try_join_all;
 use serde::{Deserialize, Serialize};
-use std::{io::Write, path::PathBuf};
+use std::{io::Write, os::unix::process::CommandExt, path::PathBuf};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -83,8 +79,7 @@ async fn load(
     let mut decoded = 0;
     let mut completed = 0;
     while chunks.peek().is_some() {
-        // A wave never retains more compressed bytes than the recording input
-        // budget. Response bodies are also checked against their declared budgets.
+        // Limit concurrent downloads by both chunk count and compressed size.
         let mut wave = vec![];
         let mut bytes = 0;
         while let Some(chunk) = chunks.peek() {
@@ -114,7 +109,7 @@ async fn load(
                 replay_loader::decode_chunk(&body, &chunk.encoding, remaining)
             })
             .await
-            .map_err(|e| Failure::input(anyhow::anyhow!(e)))?
+            .map_err(Failure::input)?
             .map_err(Failure::input)?;
             decoded += size;
             events.append(&mut part);
@@ -128,9 +123,7 @@ async fn load(
 }
 
 pub async fn child_main() -> Result<()> {
-    let objects = ObjectStore::from_env()
-        .map_err(anyhow::Error::msg)?
-        .context("Replay S3 configuration must be set")?;
+    let objects = ObjectStore::from_env().map_err(anyhow::Error::msg)?;
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     let mut session = rrweb2video::RenderSession::default();
     while let Some(line) = lines.next_line().await? {
@@ -262,10 +255,6 @@ impl Child {
         })
     }
     pub async fn start(&mut self, input: &Input) -> Result<()> {
-        ensure!(
-            PROFILE == "h264-3fps-8x-v1",
-            "invalid worker render profile"
-        );
         let mut bytes = serde_json::to_vec(input)?;
         bytes.push(b'\n');
         self.input.write_all(&bytes).await?;
@@ -306,4 +295,3 @@ impl Drop for Child {
         let _ = self.process.start_kill();
     }
 }
-use std::os::unix::process::CommandExt;

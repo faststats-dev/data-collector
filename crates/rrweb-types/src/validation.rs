@@ -9,14 +9,7 @@ use crate::schema::{
     StyleSheetRuleData, ViewportResizeData,
 };
 
-/// Validates an already parsed JSON value as one rrweb event.
-///
-/// Validation borrows the existing JSON tree and does not construct an owned
-/// top-level event.
-///
-/// # Errors
-///
-/// Returns an error when the value does not match the rrweb event schema.
+/// Validate an rrweb event by borrowing its JSON tree.
 pub fn validate_event(value: &Value) -> serde_json::Result<()> {
     let event = value
         .as_object()

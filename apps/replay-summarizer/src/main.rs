@@ -92,10 +92,10 @@ async fn worker(pool: sqlx::PgPool, limit: usize, mut stop: watch::Receiver<bool
                 continue;
             }
         };
-        tracing::info!(job_id=%claim.event.job_id, token=claim.token,"Claimed replay job");
+        tracing::info!(job_id=%claim.job_id, token=claim.token,"Claimed replay job");
         let outcome = run_job(&pool, &claim, limit, &mut child, &mut stop).await;
         if let Err(error) = outcome {
-            tracing::error!(job_id=%claim.event.job_id,error=%format!("{error:#}"),"Replay attempt failed");
+            tracing::error!(job_id=%claim.job_id,error=%format!("{error:#}"),"Replay attempt failed");
             if let Some(mut c) = child.take() {
                 c.stop().await;
             }
@@ -135,8 +135,7 @@ async fn run_job(
                 anyhow::ensure!(started.elapsed()<Duration::from_secs(1800),"render attempt exceeded 30 minutes");
                 anyhow::ensure!(progress.elapsed()<Duration::from_secs(60),"renderer made no progress for 60 seconds");
                 if last_renewal.elapsed()>=Duration::from_secs(30) {
-                    // On uncertain renewal stop immediately; never knowingly work
-                    // beyond ownership. Recovery is safe even if this update landed.
+                    // Stop if renewal fails or ownership has changed.
                     if !tokio::time::timeout(Duration::from_secs(20), jobs::renew(pool,claim,&stage)).await?? {
                         renderer.stop().await;
                         *child=None;
@@ -149,17 +148,17 @@ async fn run_job(
             output=renderer.next()=>match output? {
                 renderer::Output::Progress {stage:next,completed,total}=> {
                     stage=next;progress=Instant::now();
-                    tracing::debug!(job_id=%claim.event.job_id,%stage,completed,total,"Replay progress");
+                    tracing::debug!(job_id=%claim.job_id,%stage,completed,total,"Replay progress");
                 }
                 renderer::Output::Complete {report,replay_time_ms,download_seconds,summary,replay_start_ms}=> {
                     let report=serde_json::json!({"render":report,"replay_time_ms":replay_time_ms,"download_seconds":download_seconds,"processing_seconds":started.elapsed().as_secs_f64(),"summary":summary,"replay_start_ms":replay_start_ms,"model":summarize::MODEL});
                     let committed=jobs::finish(pool,claim,"succeeded",Some(report)).await?;
-                    tracing::info!(job_id=%claim.event.job_id,committed,"Replay summary processed");
+                    tracing::info!(job_id=%claim.job_id,committed,"Replay summary processed");
                     return Ok(());
                 }
                 renderer::Output::Failed {code,message,retryable}=> {
                     jobs::fail(pool,claim,&format!("{code}: {message}"),retryable).await?;
-                    tracing::warn!(job_id=%claim.event.job_id,%code,%message,retryable,"Replay attempt failed");
+                    tracing::warn!(job_id=%claim.job_id,%code,%message,retryable,"Replay attempt failed");
                     return Ok(());
                 }
             }

@@ -3,7 +3,6 @@ use super::{
     error_response, get_client_ip, get_country, get_request_origin, success_response,
     validate_hostname,
 };
-use crate::batch_queue::TrackingContext;
 use crate::models::AppState;
 use axum::body::Bytes;
 use axum::extract::{Query, State};
@@ -13,7 +12,6 @@ use axum::response::IntoResponse;
 use replay_message::{ReplayChunk, ReplayCommand, ReplaySessionPatch};
 use serde::Deserialize;
 use serde_json::Value;
-use sqlx::types::Uuid as SqlxUuid;
 use std::collections::HashMap;
 use tracing::{error, warn};
 use uuid::Uuid;
@@ -44,14 +42,14 @@ impl ReplayPublisher {
         session_id: &str,
         window_id: &str,
     ) -> Result<(), String> {
-        self.publish(ReplayCommand::SessionPatch(session_patch(
+        self.publish(ReplayCommand::SessionPatch(ReplaySessionPatch {
             project_id,
-            Some(storage_generation),
-            session_id,
-            window_id,
-            true,
-            false,
-        )))
+            storage_generation: Some(storage_generation),
+            session_id: session_id.into(),
+            window_id: window_id.into(),
+            has_errors: true,
+            has_poor_vitals: false,
+        }))
         .await
     }
 
@@ -62,33 +60,15 @@ impl ReplayPublisher {
         session_id: &str,
         window_id: &str,
     ) -> Result<(), String> {
-        self.publish(ReplayCommand::SessionPatch(session_patch(
+        self.publish(ReplayCommand::SessionPatch(ReplaySessionPatch {
             project_id,
-            Some(storage_generation),
-            session_id,
-            window_id,
-            false,
-            true,
-        )))
+            storage_generation: Some(storage_generation),
+            session_id: session_id.into(),
+            window_id: window_id.into(),
+            has_errors: false,
+            has_poor_vitals: true,
+        }))
         .await
-    }
-}
-
-fn session_patch(
-    project_id: Uuid,
-    storage_generation: Option<i32>,
-    session_id: &str,
-    window_id: &str,
-    has_errors: bool,
-    has_poor_vitals: bool,
-) -> ReplaySessionPatch {
-    ReplaySessionPatch {
-        storage_generation,
-        project_id,
-        session_id: session_id.into(),
-        window_id: window_id.into(),
-        has_errors,
-        has_poor_vitals,
     }
 }
 
@@ -105,7 +85,7 @@ fn command_key(command: &ReplayCommand) -> String {
     }
 }
 
-pub(crate) fn normalize_window_id(window_id: Option<String>, session_id: &str) -> String {
+fn normalize_window_id(window_id: Option<String>, session_id: &str) -> String {
     window_id
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
@@ -114,39 +94,31 @@ pub(crate) fn normalize_window_id(window_id: Option<String>, session_id: &str) -
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct ReplayRequest {
-    pub(crate) token: String,
-    pub(crate) session_id: String,
-    pub(crate) window_id: Option<String>,
+struct ReplayRequest {
+    token: String,
+    session_id: String,
+    window_id: Option<String>,
     #[serde(alias = "pageId")]
-    pub(crate) view_id: Option<String>,
-    pub(crate) session_start: Option<u64>,
+    view_id: Option<String>,
+    session_start: Option<u64>,
     #[serde(default)]
-    pub(crate) is_final: bool,
-    pub(crate) flush_reason: Option<String>,
-    pub(crate) batch_id: Option<String>,
-    pub(crate) sequence: u64,
-    pub(crate) url: String,
+    is_final: bool,
+    flush_reason: Option<String>,
+    batch_id: Option<String>,
+    sequence: u64,
+    url: String,
     #[serde(alias = "anonymousId")]
-    pub(crate) identifier: Option<SqlxUuid>,
-    pub(crate) events: Vec<Value>,
+    identifier: Option<Uuid>,
+    events: Vec<Value>,
 }
 
-pub(crate) struct BuiltReplayChunk {
-    pub(crate) session_id: String,
-    pub(crate) tracking: TrackingContext,
-    pub(crate) input: ReplayChunk,
-    pub(crate) dropped_event_count: usize,
-}
-
-pub(crate) fn build_replay_chunk_input(
+fn build_replay_chunk(
     context: &ProjectContext,
-    token: &str,
     parsed: ReplayRequest,
     client_ip: &str,
     user_agent: &str,
     country: Option<&str>,
-) -> Result<BuiltReplayChunk, String> {
+) -> Result<(ReplayChunk, usize), String> {
     let ReplayRequest {
         session_id,
         window_id,
@@ -187,13 +159,8 @@ pub(crate) fn build_replay_chunk_input(
         return Err("No valid events".to_string());
     }
 
-    let tracking = context.tracking_context(token);
-
-    Ok(BuiltReplayChunk {
-        session_id: session_id.clone(),
-        tracking,
-        dropped_event_count,
-        input: ReplayChunk {
+    Ok((
+        ReplayChunk {
             project_id: context.project_id,
             storage_generation: context.replay_storage_generation,
             session_id,
@@ -225,7 +192,8 @@ pub(crate) fn build_replay_chunk_input(
             url: Some(url),
             events,
         },
-    })
+        dropped_event_count,
+    ))
 }
 
 pub async fn replay(
@@ -286,28 +254,23 @@ pub async fn replay(
         );
     }
 
-    let built = match build_replay_chunk_input(
-        &context,
-        &token,
-        parsed,
-        client_ip,
-        user_agent,
-        country.as_deref(),
-    ) {
-        Ok(value) => value,
-        Err(message) => return error_response(StatusCode::BAD_REQUEST, &message),
-    };
+    let (chunk, dropped_event_count) =
+        match build_replay_chunk(&context, parsed, client_ip, user_agent, country.as_deref()) {
+            Ok(value) => value,
+            Err(message) => return error_response(StatusCode::BAD_REQUEST, &message),
+        };
 
+    let session_id = chunk.session_id.clone();
     match state
         .replay_publisher
-        .publish(ReplayCommand::Snapshot(Box::new(built.input)))
+        .publish(ReplayCommand::Snapshot(Box::new(chunk)))
         .await
     {
         Ok(()) => {
             // Usage tracking is idempotent by replay session in the billing pipeline.
             state
                 .batch_queue
-                .track_replay_usage(&built.session_id, &built.tracking);
+                .track_replay_usage(&session_id, &context.tracking_context(&token));
         }
         Err(error) => {
             error!("Failed to publish replay: {}", error);
@@ -319,13 +282,10 @@ pub async fn replay(
     }
 
     let mut warnings = HashMap::new();
-    if built.dropped_event_count > 0 {
+    if dropped_event_count > 0 {
         warnings.insert(
             "droppedEvents".to_string(),
-            format!(
-                "{} invalid replay events were dropped",
-                built.dropped_event_count
-            ),
+            format!("{} invalid replay events were dropped", dropped_event_count),
         );
     }
     success_response(warnings)

@@ -257,13 +257,11 @@ fn render_inner(
         }
         stats.capture += tick.elapsed().as_secs_f64();
         let tick = std::time::Instant::now();
-        {
-            let mut buffer = encoder.buffer()?;
-            buffer.extend_from_slice(&matroska::frame_prefix(index, options.fps, jpeg.len()));
-            buffer.extend_from_slice(&jpeg);
-            encoder.submit(buffer)?;
-            stats.packets += 1;
-        }
+        let mut buffer = encoder.buffer()?;
+        matroska::frame_prefix(&mut buffer, index, options.fps, jpeg.len());
+        buffer.extend_from_slice(&jpeg);
+        encoder.submit(buffer)?;
+        stats.packets += 1;
         stats.encoder_wait += tick.elapsed().as_secs_f64();
         index += 1;
         if last_progress.elapsed().as_secs_f64() >= 1.0 {

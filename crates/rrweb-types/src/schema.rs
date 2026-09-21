@@ -27,12 +27,7 @@ pub enum EventData {
     Asset(AssetData),
 }
 
-/// Validates and deserializes one rrweb event from JSON bytes.
-///
-/// # Errors
-///
-/// Returns an error when the input is not valid JSON or does not match the
-/// rrweb event schema.
+/// Deserialize JSON bytes, rejecting events that do not match the rrweb schema.
 pub fn from_slice(input: &[u8]) -> serde_json::Result<Event> {
     serde_json::from_slice(input)
 }
@@ -287,7 +282,7 @@ fn interaction_type<'de, D>(deserializer: D) -> Result<u8, D::Error>
 where
     D: Deserializer<'de>,
 {
-    bounded_u8(deserializer, 0, 10, "mouse interaction type")
+    bounded_u8(deserializer, 10, "mouse interaction type")
 }
 
 fn optional_pointer_type<'de, D>(deserializer: D) -> Result<Option<u8>, D::Error>
@@ -342,15 +337,15 @@ fn media_interaction_type<'de, D>(deserializer: D) -> Result<u8, D::Error>
 where
     D: Deserializer<'de>,
 {
-    bounded_u8(deserializer, 0, 4, "media interaction type")
+    bounded_u8(deserializer, 4, "media interaction type")
 }
 
-fn bounded_u8<'de, D>(deserializer: D, min: u8, max: u8, name: &str) -> Result<u8, D::Error>
+fn bounded_u8<'de, D>(deserializer: D, max: u8, name: &str) -> Result<u8, D::Error>
 where
     D: Deserializer<'de>,
 {
     let value = u8::deserialize(deserializer)?;
-    if (min..=max).contains(&value) {
+    if value <= max {
         Ok(value)
     } else {
         Err(de::Error::custom(format!("unknown {name} {value}")))
@@ -466,7 +461,7 @@ fn canvas_context<'de, D>(deserializer: D) -> Result<u8, D::Error>
 where
     D: Deserializer<'de>,
 {
-    bounded_u8(deserializer, 0, 2, "canvas context")
+    bounded_u8(deserializer, 2, "canvas context")
 }
 
 #[derive(Debug, Deserialize)]
@@ -735,16 +730,6 @@ pub struct SerializedCanvasAsset {
     pub index: Option<u64>,
 }
 
-impl SerializedCanvasAsset {
-    fn has_payload(&self) -> bool {
-        self.base64.is_some()
-            || self.data.is_some()
-            || self.src.is_some()
-            || self.args.is_some()
-            || self.index.is_some()
-    }
-}
-
 fn serialized_canvas_asset<'de, D>(deserializer: D) -> Result<SerializedCanvasAsset, D::Error>
 where
     D: Deserializer<'de>,
@@ -753,7 +738,12 @@ where
     if asset.rr_type.is_empty() {
         return Err(de::Error::custom("canvas asset rr_type must not be empty"));
     }
-    if !asset.has_payload() {
+    if asset.base64.is_none()
+        && asset.data.is_none()
+        && asset.src.is_none()
+        && asset.args.is_none()
+        && asset.index.is_none()
+    {
         return Err(de::Error::custom(
             "serialized canvas asset must contain data",
         ));

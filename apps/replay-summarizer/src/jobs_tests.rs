@@ -118,3 +118,28 @@ async fn priority_manual_selection_and_fenced_summary_commit() -> Result<()> {
     pool.close().await;
     Ok(())
 }
+
+#[test]
+fn selection_is_explicit_and_exact() {
+    let attributes = json!({"country":"DE", "routes":["/checkout"], "has_errors":true});
+    assert!(matches_settings(&json!({"mode":"all"}), &attributes));
+    for settings in [
+        json!({}),
+        json!({"mode":"off"}),
+        json!({"mode":"filter","attribute":"country","value":"FR"}),
+        json!({"mode":"filter","attribute":"unknown","value":"true"}),
+        json!({"mode":"filter","attribute":"has_errors","value":"yes"}),
+    ] {
+        assert!(!matches_settings(&settings, &attributes));
+    }
+    for (attribute, value) in [
+        ("country", "DE"),
+        ("route", "/checkout"),
+        ("has_errors", "true"),
+    ] {
+        assert!(matches_settings(
+            &json!({"mode":"filter","attribute":attribute,"value":value}),
+            &attributes
+        ));
+    }
+}

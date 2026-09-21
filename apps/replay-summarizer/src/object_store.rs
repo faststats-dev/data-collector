@@ -1,6 +1,7 @@
+use anyhow::{Context, Result, ensure};
+
 use aws_sdk_s3::Client;
 use aws_sdk_s3::config::{Builder, Credentials, Region};
-use aws_sdk_s3::error::DisplayErrorContext;
 use uuid::Uuid;
 
 pub struct ObjectStore {
@@ -9,27 +10,18 @@ pub struct ObjectStore {
 }
 
 impl ObjectStore {
-    pub fn from_env() -> Result<Self, String> {
+    pub fn from_env() -> Result<Self> {
         let bucket_prefix = std::env::var("REPLAY_S3_BUCKET_PREFIX")
             .ok()
             .or_else(|| std::env::var("REPLAY_S3_BUCKET").ok());
         let endpoint = std::env::var("REPLAY_S3_ENDPOINT")
             .ok()
             .filter(|value| !value.trim().is_empty());
-        let access_key = std::env::var("REPLAY_S3_ACCESS_KEY_ID").ok();
-        let secret_key = std::env::var("REPLAY_S3_SECRET_ACCESS_KEY").ok();
-        if bucket_prefix.is_none()
-            && endpoint.is_none()
-            && access_key.is_none()
-            && secret_key.is_none()
-        {
-            return Err("Replay S3 configuration must be set".into());
-        }
-
-        let bucket_prefix =
-            normalize_bucket_prefix(&bucket_prefix.ok_or("REPLAY_S3_BUCKET_PREFIX must be set")?)?;
-        let access_key = access_key.ok_or("REPLAY_S3_ACCESS_KEY_ID must be set")?;
-        let secret_key = secret_key.ok_or("REPLAY_S3_SECRET_ACCESS_KEY must be set")?;
+        let bucket_prefix = normalize_bucket_prefix(
+            &bucket_prefix.context("REPLAY_S3_BUCKET_PREFIX must be set")?,
+        )?;
+        let access_key = crate::config::required("REPLAY_S3_ACCESS_KEY_ID")?;
+        let secret_key = crate::config::required("REPLAY_S3_SECRET_ACCESS_KEY")?;
         let region = std::env::var("REPLAY_S3_REGION").unwrap_or_else(|_| "us-east-1".into());
         let mut config = Builder::new()
             .region(Region::new(region))
@@ -54,7 +46,7 @@ impl ObjectStore {
         format!("{}-{}", self.bucket_prefix, project_id)
     }
 
-    pub async fn get(&self, bucket: &str, key: &str, max_bytes: usize) -> Result<Vec<u8>, String> {
+    pub async fn get(&self, bucket: &str, key: &str, max_bytes: usize) -> Result<Vec<u8>> {
         let mut response = self
             .client
             .get_object()
@@ -62,30 +54,31 @@ impl ObjectStore {
             .key(key)
             .send()
             .await
-            .map_err(|error| format!("GetObject failed: {}", DisplayErrorContext(error)))?;
-        if response
-            .content_length()
-            .is_some_and(|size| size > max_bytes as i64)
-        {
-            return Err("Replay object exceeds REPLAY_MAX_DECODED_BYTES".into());
-        }
+            .context("GetObject failed")?;
+        ensure!(
+            !response
+                .content_length()
+                .is_some_and(|size| size > max_bytes as i64),
+            "Replay object exceeds its compressed byte limit"
+        );
         let mut bytes = Vec::new();
         while let Some(chunk) = response
             .body
             .try_next()
             .await
-            .map_err(|error| error.to_string())?
+            .context("read replay object body")?
         {
-            if chunk.len() > max_bytes - bytes.len() {
-                return Err("Replay object exceeds REPLAY_MAX_DECODED_BYTES".into());
-            }
+            ensure!(
+                chunk.len() <= max_bytes - bytes.len(),
+                "Replay object exceeds its compressed byte limit"
+            );
             bytes.extend_from_slice(&chunk);
         }
         Ok(bytes)
     }
 }
 
-fn normalize_bucket_prefix(value: &str) -> Result<String, String> {
+fn normalize_bucket_prefix(value: &str) -> Result<String> {
     let normalized = value
         .trim()
         .to_ascii_lowercase()
@@ -102,9 +95,10 @@ fn normalize_bucket_prefix(value: &str) -> Result<String, String> {
         .chars()
         .take(26)
         .collect::<String>();
-    if normalized.len() < 3 {
-        return Err("REPLAY_S3_BUCKET_PREFIX must contain at least 3 valid characters".into());
-    }
+    ensure!(
+        normalized.len() >= 3,
+        "REPLAY_S3_BUCKET_PREFIX must contain at least 3 valid characters"
+    );
     Ok(normalized)
 }
 

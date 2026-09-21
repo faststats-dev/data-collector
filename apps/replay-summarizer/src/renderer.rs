@@ -56,10 +56,10 @@ impl Failure {
             retryable: false,
         }
     }
-    fn storage(error: String) -> Self {
+    fn storage(error: anyhow::Error) -> Self {
         Self {
             code: "object_store",
-            error: anyhow::anyhow!(error),
+            error,
             retryable: true,
         }
     }
@@ -123,7 +123,9 @@ async fn load(
 }
 
 pub async fn child_main() -> Result<()> {
-    let objects = ObjectStore::from_env().map_err(anyhow::Error::msg)?;
+    let objects = ObjectStore::from_env()?;
+    let summarizer =
+        crate::summarize::Summarizer::new(crate::config::required("OPENROUTER_API_KEY")?)?;
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     let mut session = rrweb2video::RenderSession::default();
     while let Some(line) = lines.next_line().await? {
@@ -171,8 +173,7 @@ pub async fn child_main() -> Result<()> {
         match result {
             Ok(report) => {
                 let video_path = report.output.clone();
-                let request =
-                    crate::summarize::summarize(&video_path, replay_start_ms, replay_time_ms);
+                let request = summarizer.summarize(&video_path, replay_start_ms, replay_time_ms);
                 tokio::pin!(request);
                 let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(5));
                 let result = loop {

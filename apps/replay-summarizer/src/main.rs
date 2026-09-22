@@ -1,4 +1,5 @@
 mod config;
+mod evaluate;
 mod jobs;
 mod object_store;
 mod renderer;
@@ -18,7 +19,14 @@ const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(1800);
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    if let Ok(path) = std::env::var("REPLAY_EVAL_ENV_FILE") {
+        dotenvy::from_path(path)?;
+    }
     dotenvy::dotenv().ok();
+    if args.get(1).map(String::as_str) == Some("--evaluate") {
+        return evaluate::run(&args[2..]).await;
+    }
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(
@@ -182,7 +190,7 @@ async fn run_job(
                     progress = Instant::now();
                     tracing::debug!(job_id = %claim.job_id, %stage, completed, total, "Replay progress");
                 }
-                renderer::Output::Complete { report, replay_time_ms, download_seconds, summary, replay_start_ms } => {
+                renderer::Output::Complete { report, replay_time_ms, download_seconds, summary, metadata, replay_start_ms } => {
                     let report = serde_json::json!({
                         "render": report,
                         "replay_time_ms": replay_time_ms,
@@ -190,7 +198,8 @@ async fn run_job(
                         "processing_seconds": started.elapsed().as_secs_f64(),
                         "summary": summary,
                         "replay_start_ms": replay_start_ms,
-                        "model": summarize::MODEL,
+                        "model": metadata.model,
+                        "metadata": metadata,
                     });
                     let committed = jobs::finish(pool, claim, "succeeded", Some(report)).await?;
                     tracing::info!(job_id = %claim.job_id, committed, "Replay summary processed");

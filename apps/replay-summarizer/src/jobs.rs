@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use serde_json::Value;
 
-pub const PROFILE: &str = "h264-3fps-8x-v1";
+pub const PROFILE: &str = "h264-3fps-1x-v2";
 #[derive(Debug)]
 pub struct Claim {
     pub job_id: Uuid,
@@ -52,9 +52,9 @@ pub async fn claim(pool: &PgPool) -> Result<Option<Claim>> {
         r#"
         WITH candidate AS (
             SELECT id FROM replay_summary_jobs WHERE NOT processed AND state='ready'
-                AND next_attempt_at<=NOW() AND attempts<3 AND render_profile=$1 ORDER BY priority DESC NULLS LAST,next_attempt_at,created_at
+                AND next_attempt_at<=NOW() AND attempts<3 AND render_profile IN ($1,'h264-3fps-8x-v1') ORDER BY priority DESC NULLS LAST,next_attempt_at,created_at
             LIMIT 1 FOR UPDATE SKIP LOCKED
-        ) UPDATE replay_summary_jobs j SET state='running', execution_token=execution_token+1,
+        ) UPDATE replay_summary_jobs j SET state='running', render_profile=$1, execution_token=execution_token+1,
             lease_until=NOW()+interval '120 seconds', attempts=attempts+1, stage='preparing', progress_at=NOW()
         FROM candidate c WHERE j.id=c.id RETURNING j.*
         "#,
@@ -90,7 +90,7 @@ pub async fn prepare(pool: &PgPool, claim: &Claim, limit: usize) -> Result<Optio
         SELECT to_jsonb(s) AS attributes,COALESCE(cfg.settings, '{"mode":"off"}'::jsonb) AS settings FROM replay_sessions s
         JOIN project p ON p.id=s.project_id LEFT JOIN replay_summary_settings cfg ON cfg.project_id=s.project_id
         WHERE s.project_id=$1 AND s.session_id=$2 AND s.window_id=$3 AND s.deleted_at IS NULL
-          AND p.replay_storage_state='active' AND p.replay_storage_generation=$4 AND s.chunk_count=$5 AND s.is_complete
+          AND p.replay_storage_state='active' AND p.replay_storage_generation=$4 AND s.chunk_count=$5 AND s.is_complete AND s.actual_duration_ms >= 2000
         "#,
     )
     .bind(claim.project_id)
@@ -192,7 +192,7 @@ pub async fn finish(
     .unwrap_or(false);
     let current = sqlx::query_scalar::<_, bool>(
         r#"
-        SELECT chunk_count=$4 AND deleted_at IS NULL FROM replay_sessions
+        SELECT chunk_count=$4 AND deleted_at IS NULL AND COALESCE(actual_duration_ms, 0) >= 2000 FROM replay_sessions
         WHERE project_id=$1 AND session_id=$2 AND window_id=$3 FOR UPDATE
         "#,
     )
@@ -261,6 +261,15 @@ pub async fn finish(
     } else {
         state
     };
+    let job_report = report.as_ref().map(|report| {
+        let mut diagnostic = report.clone();
+        if let Some(object) = diagnostic.as_object_mut() {
+            object.remove("summary");
+            object.remove("metadata");
+            object.remove("model");
+        }
+        diagnostic
+    });
     let updated = sqlx::query(
         r#"
         UPDATE replay_summary_jobs SET state=$3,processed=true,processed_at=NOW(),
@@ -271,35 +280,39 @@ pub async fn finish(
     .bind(claim.job_id)
     .bind(claim.token)
     .bind(state)
-    .bind(&report)
+    .bind(&job_report)
     .execute(&mut *tx)
     .await?
     .rows_affected()
         == 1;
     if updated && state == "succeeded" {
         let report = report.as_ref().context("missing summary report")?;
-        let summary = report.get("summary").context("missing summary")?;
-        // Commit summary and job success atomically, only for the owned revision.
-        sqlx::query(
-            r#"
-            UPDATE replay_sessions SET summary=$4, summary_chunk_count=$5, summary_model=$6,
-                summary_created_at=NOW(), summary_replay_start_ms=$7
-            WHERE project_id=$1 AND session_id=$2 AND window_id=$3
-            "#,
-        )
-        .bind(claim.project_id)
-        .bind(&claim.session_id)
-        .bind(&claim.window_id)
-        .bind(summary)
-        .bind(claim.chunk_count)
-        .bind(crate::summarize::MODEL)
-        .bind(
-            report["replay_start_ms"]
-                .as_i64()
-                .context("missing replay start")?,
-        )
-        .execute(&mut *tx)
-        .await?;
+        let summary: crate::summarize::ReplaySummary =
+            serde_json::from_value(report["summary"].clone())?;
+        let metadata: crate::summarize::SummaryMetadata =
+            serde_json::from_value(report["metadata"].clone())?;
+        // Publish the entity and its evidence in the same fenced transaction as job success.
+        let id = Uuid::new_v4();
+        sqlx::query(r#"
+            INSERT INTO replay_summaries (id, project_id, session_id, window_id, storage_generation,
+                chunk_count, summary, confidence, replay_start_ms, model, response_id, prompt_version,
+                schema_version, cost_usd, prompt_tokens, completion_tokens, latency_ms, render_fps, render_speed)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::text::numeric,$15,$16,$17,$18,$19)
+        "#)
+        .bind(id).bind(claim.project_id).bind(&claim.session_id).bind(&claim.window_id)
+        .bind(claim.storage_generation).bind(claim.chunk_count).bind(&summary.summary).bind(summary.confidence)
+        .bind(report["replay_start_ms"].as_i64().context("missing replay start")?)
+        .bind(&metadata.model).bind(&metadata.response_id).bind(&metadata.prompt_version)
+        .bind(metadata.schema_version as i32).bind(metadata.cost_usd.map(|cost| cost.to_string()))
+        .bind(metadata.prompt_tokens.map(|n| n as i64)).bind(metadata.completion_tokens.map(|n| n as i64))
+        .bind(metadata.latency_ms as i64).bind(metadata.render_fps as i32).bind(metadata.render_speed)
+        .execute(&mut *tx).await?;
+        for (position, point) in summary.pain_points.iter().enumerate() {
+            sqlx::query("INSERT INTO replay_summary_pain_points (summary_id,position,timestamp_ms,description,evidence,confidence) VALUES($1,$2,$3,$4,$5,$6)")
+                .bind(id).bind(position as i32).bind(point.timestamp_ms as i64)
+                .bind(&point.description).bind(&point.evidence).bind(point.confidence)
+                .execute(&mut *tx).await?;
+        }
     }
     tx.commit().await?;
     Ok(updated)

@@ -19,9 +19,13 @@ async fn priority_manual_selection_and_fenced_summary_commit() -> Result<()> {
         .await?;
     sqlx::raw_sql(r#"
         CREATE TABLE project(id uuid PRIMARY KEY, replay_storage_state text DEFAULT 'active', replay_storage_generation int DEFAULT 1);
-        CREATE TABLE replay_sessions(project_id uuid, session_id text, window_id text, chunk_count int, is_complete boolean DEFAULT true, deleted_at timestamp,
-            summary jsonb, summary_chunk_count int, summary_model text, summary_created_at timestamp, summary_replay_start_ms bigint,
+        CREATE TABLE replay_sessions(project_id uuid, session_id text, window_id text, chunk_count int, is_complete boolean DEFAULT true, actual_duration_ms bigint DEFAULT 2000, deleted_at timestamp,
             PRIMARY KEY(project_id,session_id,window_id));
+        CREATE TABLE replay_summaries(id uuid PRIMARY KEY, project_id uuid, session_id text, window_id text, storage_generation int, chunk_count int,
+            summary text, confidence double precision, replay_start_ms bigint, model text, response_id text, prompt_version text, schema_version int,
+            cost_usd numeric, prompt_tokens bigint, completion_tokens bigint, latency_ms bigint, render_fps int, render_speed double precision,
+            UNIQUE(project_id,session_id,window_id,storage_generation,chunk_count));
+        CREATE TABLE replay_summary_pain_points(summary_id uuid REFERENCES replay_summaries(id),position int,timestamp_ms bigint,description text,evidence text,confidence double precision);
         CREATE TABLE replay_summary_settings(project_id uuid PRIMARY KEY, settings jsonb);
         CREATE TABLE replay_snapshots(id uuid DEFAULT gen_random_uuid(), project_id uuid, session_id text, window_id text, storage_generation int DEFAULT 1,
             s3_key text DEFAULT 'fixture',content_encoding text DEFAULT 'identity',compressed_bytes bigint DEFAULT 1,
@@ -58,7 +62,40 @@ async fn priority_manual_selection_and_fenced_summary_commit() -> Result<()> {
         prepare(&pool, &manual, 1024).await?.is_some(),
         "manual works without automatic settings"
     );
-    let report = json!({"summary":{"summary":"Checkout failed", "painPoints":[{"timestampMs":10,"description":"Repeated submit"}]}, "replay_start_ms":1700000000000_i64});
+    // The minimum cannot be bypassed by manual requests or automatic settings.
+    for manual_request in [false, true] {
+        sqlx::query("INSERT INTO replay_summary_settings(project_id,settings) VALUES($1,'{\"mode\":\"all\"}') ON CONFLICT(project_id) DO NOTHING")
+            .bind(project).execute(&pool).await?;
+        for duration in [None, Some(0_i64), Some(1999), Some(2000)] {
+            sqlx::query(
+                "UPDATE replay_sessions SET actual_duration_ms=$1 WHERE session_id='manual'",
+            )
+            .bind(duration)
+            .execute(&pool)
+            .await?;
+            let candidate = Claim {
+                manual: manual_request,
+                ..Claim {
+                    job_id: manual.job_id,
+                    project_id: manual.project_id,
+                    session_id: manual.session_id.clone(),
+                    window_id: manual.window_id.clone(),
+                    storage_generation: manual.storage_generation,
+                    chunk_count: manual.chunk_count,
+                    token: manual.token,
+                    manual: manual.manual,
+                }
+            };
+            assert_eq!(
+                prepare(&pool, &candidate, 1024).await?.is_some(),
+                duration == Some(2000)
+            );
+        }
+    }
+    sqlx::query("DELETE FROM replay_summary_settings")
+        .execute(&pool)
+        .await?;
+    let report = json!({"summary":{"summary":"Checkout failed", "confidence":0.8, "painPoints":[{"timestampMs":10,"description":"Repeated submit","evidence":"Error persisted after retry","confidence":0.8}]}, "replay_start_ms":1700000000000_i64, "metadata":{"model":"test-model","responseId":"test-id","promptVersion":"v2","schemaVersion":2,"costUsd":0.0123,"promptTokens":123,"completionTokens":45,"latencyMs":100,"renderFps":3,"renderSpeed":1.0}});
     let stale = Claim {
         token: manual.token - 1,
         manual: true,
@@ -75,11 +112,20 @@ async fn priority_manual_selection_and_fenced_summary_commit() -> Result<()> {
         !finish(&pool, &manual, "succeeded", Some(report.clone())).await?,
         "duplicate completion is fenced"
     );
-    let saved: serde_json::Value =
-        sqlx::query_scalar("SELECT summary FROM replay_sessions WHERE session_id='manual'")
+    let saved: String =
+        sqlx::query_scalar("SELECT summary FROM replay_summaries WHERE session_id='manual'")
             .fetch_one(&pool)
             .await?;
-    assert_eq!(saved, report["summary"]);
+    assert_eq!(saved, "Checkout failed");
+    let cost: String =
+        sqlx::query_scalar("SELECT cost_usd::text FROM replay_summaries WHERE session_id='manual'")
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(cost, "0.0123");
+    let points: i64 = sqlx::query_scalar("SELECT count(*) FROM replay_summary_pain_points")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(points, 1);
     let automatic = claim(&pool).await?.unwrap();
     assert!(
         prepare(&pool, &automatic, 1024).await?.is_none(),
@@ -107,11 +153,11 @@ async fn priority_manual_selection_and_fenced_summary_commit() -> Result<()> {
         .fetch_one(&pool)
         .await?;
     assert_eq!(state, "superseded");
-    let saved: Option<serde_json::Value> =
-        sqlx::query_scalar("SELECT summary FROM replay_sessions WHERE session_id='automatic'")
+    let saved: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM replay_summaries WHERE session_id='automatic'")
             .fetch_one(&pool)
             .await?;
-    assert!(saved.is_none());
+    assert_eq!(saved, 0);
     sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
         .execute(&pool)
         .await?;

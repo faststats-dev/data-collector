@@ -19,6 +19,7 @@ pub enum Output {
         replay_time_ms: u64,
         download_seconds: f64,
         summary: crate::summarize::ReplaySummary,
+        metadata: crate::summarize::SummaryMetadata,
         replay_start_ms: u64,
     },
     Failed {
@@ -68,7 +69,7 @@ impl Failure {
 async fn load(
     objects: &ObjectStore,
     input: Input,
-) -> std::result::Result<rrweb2video::Replay, Failure> {
+) -> std::result::Result<(rrweb2video::Replay, serde_json::Value), Failure> {
     if input.protocol != 1 || input.max_decoded_bytes == 0 {
         return Err(Failure::input(anyhow::anyhow!("unsupported render input")));
     }
@@ -118,8 +119,10 @@ async fn load(
         }
     }
     events.sort_by_key(|event| event.order);
-    rrweb2video::Replay::from_events(events.into_iter().map(|e| e.raw).collect())
-        .map_err(Failure::input)
+    let events: Vec<_> = events.into_iter().map(|e| e.raw).collect();
+    let evidence = replay_loader::interaction_evidence(&events).map_err(Failure::input)?;
+    let replay = rrweb2video::Replay::from_events(events).map_err(Failure::input)?;
+    Ok((replay, evidence))
 }
 
 pub async fn child_main() -> Result<()> {
@@ -132,7 +135,7 @@ pub async fn child_main() -> Result<()> {
         let input: Input = serde_json::from_str(&line)?;
         let started = std::time::Instant::now();
         progress("download", 0, input.chunks.len() as u64);
-        let replay = match load(&objects, input).await {
+        let (replay, evidence) = match load(&objects, input).await {
             Ok(replay) => replay,
             Err(f) => {
                 emit(&Output::Failed {
@@ -145,6 +148,14 @@ pub async fn child_main() -> Result<()> {
         };
         let download_seconds = started.elapsed().as_secs_f64();
         let replay_time_ms = replay.duration_ms;
+        if replay_time_ms < 2000 {
+            emit(&Output::Failed {
+                code: "replay_too_short".into(),
+                message: "Replay must be at least 2 seconds long to summarize".into(),
+                retryable: false,
+            });
+            continue;
+        }
         let replay_start_ms = replay.start_ms;
         let temporary = tempfile::tempdir()?;
         let options = rrweb2video::RenderOptions {
@@ -159,11 +170,12 @@ pub async fn child_main() -> Result<()> {
                 "/opt/player/node_modules/rrweb/dist/style.css",
             ),
             output: temporary.path().join("replay.mp4"),
-            fps: 3,
-            speed: 8.0,
+            fps: crate::config::optional("REPLAY_RENDER_FPS", 3)?,
+            speed: crate::config::optional("REPLAY_RENDER_SPEED", 1.0)?,
             max_duration_ms: None,
             timestamp_overlay: true,
         };
+        let (fps, speed) = (options.fps, options.speed);
         let (next, result) = tokio::task::spawn_blocking(move || {
             let result = session.render_owned(replay, &options, progress);
             (session, result)
@@ -173,7 +185,8 @@ pub async fn child_main() -> Result<()> {
         match result {
             Ok(report) => {
                 let video_path = report.output.clone();
-                let request = summarizer.summarize(&video_path, replay_start_ms, replay_time_ms);
+                let request =
+                    summarizer.summarize(&video_path, replay_time_ms, fps, speed, &evidence);
                 tokio::pin!(request);
                 let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(5));
                 let result = loop {
@@ -187,13 +200,20 @@ pub async fn child_main() -> Result<()> {
                         report,
                         replay_time_ms,
                         download_seconds,
-                        summary,
+                        summary: summary.summary,
+                        metadata: summary.metadata,
                         replay_start_ms,
                     }),
                     Err(error) => emit(&Output::Failed {
                         code: "openrouter".into(),
                         message: format!("{error:#}"),
-                        retryable: true,
+                        retryable: error.downcast_ref::<reqwest::Error>().is_some_and(|e| {
+                            e.is_timeout()
+                                || e.is_connect()
+                                || e.status().is_some_and(|status| {
+                                    status.as_u16() == 429 || status.is_server_error()
+                                })
+                        }),
                     }),
                 }
             }

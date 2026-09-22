@@ -95,3 +95,92 @@ mod tests {
         assert!(decode_chunk(b"[]", "unknown", 100).is_err());
     }
 }
+
+/// Interaction evidence contains no text, URLs, input values, or DOM content.
+/// Touch starts are kept distinct from clicks so scrolling is not labelled a failed click.
+pub fn interaction_evidence(events: &[Box<RawValue>]) -> Result<serde_json::Value> {
+    #[derive(Deserialize, Default)]
+    struct Data {
+        source: Option<u8>,
+        #[serde(rename = "type")]
+        kind: Option<u8>,
+        id: Option<i64>,
+        x: Option<f64>,
+        y: Option<f64>,
+    }
+    #[derive(Deserialize)]
+    struct Header<'a> {
+        #[serde(rename = "type")]
+        kind: u8,
+        timestamp: u64,
+        #[serde(borrow)]
+        data: &'a RawValue,
+    }
+    let start = events
+        .first()
+        .map(|e| serde_json::from_str::<Header>(e.get()))
+        .transpose()?
+        .map(|e| e.timestamp)
+        .unwrap_or(0);
+    let mut timeline = Vec::new();
+    let mut total = 0;
+    for event in events {
+        let event: Header = serde_json::from_str(event.get())?;
+        if event.kind != 3 {
+            continue;
+        }
+        let data: Data = serde_json::from_str(event.data.get())?;
+        let kind = match (data.source, data.kind) {
+            (Some(2), Some(2)) => "click",
+            (Some(2), Some(4)) => "double_click",
+            (Some(2), Some(7)) => "touch_start",
+            (Some(2), Some(9)) => "touch_end",
+            (Some(3), _) => "scroll",
+            (Some(5), _) => "input_change",
+            _ => continue,
+        };
+        total += 1;
+        if timeline.len() < 500 {
+            timeline.push(serde_json::json!({"timestampMs":event.timestamp.saturating_sub(start),"kind":kind,"nodeId":data.id,"x":data.x,"y":data.y}));
+        }
+    }
+    Ok(
+        serde_json::json!({"available":true,"truncated":total>timeline.len(),"totalEvents":total,"events":timeline}),
+    )
+}
+
+#[cfg(test)]
+mod evidence_tests {
+    use super::*;
+    #[test]
+    fn keeps_touch_separate_and_never_leaks_entered_text() {
+        let events: Vec<Box<RawValue>> = serde_json::from_str(
+            r#"[
+            {"type":4,"timestamp":1000,"data":{"href":"https://example.com/?token=secret"}},
+            {"type":3,"timestamp":1100,"data":{"source":2,"type":7,"id":2,"x":3,"y":4}},
+            {"type":3,"timestamp":1200,"data":{"source":3,"id":2,"x":0,"y":100}},
+            {"type":3,"timestamp":1300,"data":{"source":5,"id":2,"text":"private@example.com"}},
+            {"type":3,"timestamp":1400,"data":{"source":2,"type":2,"id":2,"x":3,"y":4}}
+        ]"#,
+        )
+        .unwrap();
+        let evidence = interaction_evidence(&events).unwrap();
+        assert_eq!(evidence["events"][0]["kind"], "touch_start");
+        assert_eq!(evidence["events"][0]["timestampMs"], 100);
+        assert_eq!(evidence["events"][3]["kind"], "click");
+        assert!(!evidence.to_string().contains("secret"));
+        assert!(!evidence.to_string().contains("private@"));
+        let many: Vec<Box<RawValue>> = (0..501)
+            .map(|i| {
+                RawValue::from_string(format!(
+                    r#"{{"type":3,"timestamp":{},"data":{{"source":3}}}}"#,
+                    i
+                ))
+                .unwrap()
+            })
+            .collect();
+        let evidence = interaction_evidence(&many).unwrap();
+        assert_eq!(evidence["events"].as_array().unwrap().len(), 500);
+        assert_eq!(evidence["truncated"], true);
+    }
+}

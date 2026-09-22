@@ -3,7 +3,7 @@ use std::time::Duration;
 // Lock selected recordings and atomically enqueue them and mark them complete.
 const ENQUEUE: &str = r#"
     WITH candidates AS MATERIALIZED (
-        SELECT s.project_id, s.session_id, s.window_id, p.replay_storage_generation, s.chunk_count
+        SELECT s.project_id, s.session_id, s.window_id, p.replay_storage_generation, s.chunk_count, s.actual_duration_ms
         FROM replay_sessions s JOIN project p ON p.id = s.project_id
         WHERE s.finalize_after <= NOW()
           AND s.deleted_at IS NULL AND s.has_full_snapshot AND s.chunk_count > 0
@@ -13,7 +13,7 @@ const ENQUEUE: &str = r#"
     ), queued AS (
         INSERT INTO replay_summary_jobs (id, project_id, session_id, window_id, storage_generation, chunk_count, state)
         SELECT gen_random_uuid(), project_id, session_id, window_id, replay_storage_generation, chunk_count, 'ready'
-        FROM candidates ON CONFLICT DO NOTHING
+        FROM candidates WHERE actual_duration_ms >= 2000 ON CONFLICT DO NOTHING
         RETURNING project_id, session_id, window_id, chunk_count
     )
     UPDATE replay_sessions s SET is_complete = true, finalized_at = COALESCE(finalized_at, NOW()), finalize_after = NULL

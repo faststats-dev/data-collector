@@ -27,6 +27,8 @@ struct Cli {
     speed: f64,
     #[arg(long)]
     max_duration_ms: Option<u64>,
+    #[arg(long)]
+    timestamp_overlay: bool,
 }
 fn main() -> Result<()> {
     let args = Cli::parse();
@@ -49,7 +51,7 @@ fn main() -> Result<()> {
             fps: args.fps,
             speed: args.speed,
             max_duration_ms: args.max_duration_ms,
-            timestamp_overlay: false,
+            timestamp_overlay: args.timestamp_overlay,
         },
     )?;
     eprintln!(

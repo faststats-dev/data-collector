@@ -58,32 +58,6 @@ the extension and `vector(1024)` column; the migration role needs permission to 
 the extension, or an administrator must create it first. Local Compose uses
 `pgvector/pgvector:pg18`. Do not run the old array-based worker against this schema.
 
-## Local insight backfill
-
-`--backfill-insights [--project UUID]` groups only current existing pain points
-without a membership. Existing automatic and manual memberships are never changed,
-so a fully backfilled database exits without paid calls. It accepts
-`REPLAY_INSIGHTS_ENV_FILE` (falling back to `REPLAY_EVAL_ENV_FILE`), requires a
-loopback `DATABASE_URL`, and handles at most `REPLAY_INSIGHTS_BACKFILL_LIMIT`
-points per invocation (default 100, maximum 1000):
-
-```sh
-REPLAY_INSIGHTS_ENV_FILE=../monorepo/apps/backend/.env \
-  cargo run -p replay-summarizer -- --backfill-insights
-```
-
-Backfill reuses embeddings when their model version and input hash match.
-To exercise real grouping without changing saved memberships, set
-`REPLAY_TEST_DATABASE_URL` and `OPENROUTER_API_KEY`, then run (makes paid Jev calls):
-
-```sh
-cargo test -p replay-summarizer evaluate_local_grouping -- --ignored --nocapture
-```
-
-This exercises within-summary and across-summary matching and idempotent publication
-using temporary grouping tables, then rolls back. Existing memberships are not
-treated as human-labelled truth.
-
 ## Prompt
 
 Edit [prompt.md](prompt.md) to change the analysis and writing instructions.
@@ -139,31 +113,3 @@ and recording-duration bounds are checked locally and described in the prompt.
 Large constrained schema bounds caused real provider errors during evaluation.
 Malformed/truncated summaries and HTTP 4xx errors other than 429 are not retried
 as whole render jobs. Connection/timeouts, 429s, and server errors remain retryable.
-
-## Local evaluation
-
-Build with `cargo build -p replay-summarizer -p rrweb2video`. These commands do not
-claim jobs or write summaries to PostgreSQL:
-
-```sh
-REPLAY_EVAL_ENV_FILE=../monorepo/apps/backend/.env target/debug/replay-summarizer \
-  --evaluate export PROJECT_UUID SESSION_ID WINDOW_ID /tmp/replay-evaluation/sample.json
-```
-
-Export uses local PostgreSQL by default, independently of `DATABASE_URL`.
-Override with `REPLAY_EVAL_DATABASE_URL` if necessary. Storage settings come from
-the supplied environment file. Render the JSON using the `rrweb2video` CLI with
-`--fps 3 --speed 1 --timestamp-overlay` on Linux; Chromium's BeginFrameControl is
-not available on macOS. Name the video `sample-3fps-1x.mp4`.
-
-```sh
-REPLAY_EVAL_ENV_FILE=../monorepo/apps/backend/.env \
-  python3 apps/replay-summarizer/evaluation/compare.py \
-  --directory /tmp/replay-evaluation --output /tmp/replay-evaluation/results \
-  --samples sample --models z-ai/glm-5.3-flash google/gemini-3.8-flash
-```
-
-The comparison makes paid API calls. Outputs include summaries, raw responses,
-usage even for rejected model output when returned, timing, and a prompt snapshot.
-Keep recordings and these potentially private outputs outside version control.
-See [the initial comparison](evaluation/2026-09-22.md) for findings and limitations.

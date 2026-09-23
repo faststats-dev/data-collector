@@ -1,11 +1,8 @@
 use anyhow::{Context, Result, ensure};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use sqlx::{
-    Postgres, Row, Transaction,
-    postgres::{PgConnectOptions, PgPoolOptions},
-};
-use std::{str::FromStr, time::Duration};
+use sqlx::{Postgres, Row, Transaction};
+use std::time::Duration;
 use uuid::Uuid;
 
 const PREP_VERSION: &str = "ux-point-canonical-v2-1024";
@@ -386,128 +383,6 @@ pub(crate) fn test_prepared(project_id: Uuid, point_id: Option<Uuid>) -> Prepare
             text: "test".into(),
             vector: normalize(vec![1.; 1024]).unwrap(),
         }],
-    }
-}
-
-pub(crate) async fn backfill(args: &[String]) -> Result<()> {
-    let url = std::env::var("DATABASE_URL").context("DATABASE_URL is required")?;
-    let options = PgConnectOptions::from_str(&url)?;
-    ensure!(
-        matches!(options.get_host(), "localhost" | "127.0.0.1" | "::1"),
-        "--backfill-insights only permits local PostgreSQL"
-    );
-    let project = parse_backfill_args(args)?;
-    let limit: i64 = std::env::var("REPLAY_INSIGHTS_BACKFILL_LIMIT")
-        .ok()
-        .and_then(|x| x.parse().ok())
-        .unwrap_or(100);
-    ensure!(
-        (1..=1000).contains(&limit),
-        "backfill limit must be 1..=1000"
-    );
-    let pool = PgPoolOptions::new()
-        .max_connections(2)
-        .connect(&url)
-        .await?;
-    let rows = sqlx::query(
-        r#"
-        SELECT pp.id, rs.project_id, pp.description, pp.evidence,
-               pp.surface, pp.action, pp.failure, pp.consequence,
-               e.embedding::real[]::double precision[], e.model_version, e.input_hash
-        FROM replay_summary_pain_points pp
-        JOIN replay_summaries rs ON rs.id = pp.summary_id
-        JOIN project p ON p.id = rs.project_id
-        JOIN replay_sessions s ON s.project_id = rs.project_id
-          AND s.session_id = rs.session_id AND s.window_id = rs.window_id
-        LEFT JOIN replay_insight_memberships m ON m.pain_point_id = pp.id
-        LEFT JOIN replay_insight_embeddings e ON e.pain_point_id = pp.id
-        WHERE m.pain_point_id IS NULL AND ($1::uuid IS NULL OR rs.project_id = $1)
-          AND p.replay_storage_state = 'active'
-          AND rs.storage_generation = p.replay_storage_generation
-          AND rs.chunk_count = s.chunk_count AND s.deleted_at IS NULL
-        ORDER BY pp.id LIMIT $2
-    "#,
-    )
-    .bind(project)
-    .bind(limit)
-    .fetch_all(&pool)
-    .await?;
-    let mut done = 0;
-    for row in rows {
-        let point = Point {
-            id: row.get(0),
-            description: row.get(2),
-            evidence: row.get(3),
-            surface: row.get(4),
-            action: row.get(5),
-            failure: row.get(6),
-            consequence: row.get(7),
-        };
-        let model = std::env::var("REPLAY_INSIGHTS_EMBED_MODEL")
-            .unwrap_or_else(|_| DEFAULT_EMBED_MODEL.into());
-        let version = format!("{model}+{PREP_VERSION}");
-        let text = canonical(&point);
-        let cached: Option<Vec<f64>> = row.get(8);
-        let prepared = if let Some(vector) = cached.filter(|_| {
-            row.get::<Option<String>, _>(9).as_deref() == Some(&version)
-                && row.get::<Option<String>, _>(10).as_deref()
-                    == Some(&format!("{:x}", Sha256::digest(text.as_bytes())))
-        }) {
-            Prepared {
-                project_id: row.get(1),
-                model_version: version,
-                points: vec![PreparedPoint {
-                    id: point.id,
-                    description: point.description,
-                    text,
-                    vector: normalize(vector)?,
-                }],
-            }
-        } else {
-            prepare(row.get(1), vec![point]).await?
-        };
-        let mut tx = pool.begin().await?;
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
-            .bind(prepared.project_id.to_string())
-            .execute(&mut *tx)
-            .await?;
-        let current = sqlx::query_scalar::<_, bool>(
-            r#"
-            SELECT p.replay_storage_state = 'active'
-               AND rs.storage_generation = p.replay_storage_generation
-               AND rs.chunk_count = s.chunk_count AND s.deleted_at IS NULL
-               AND m.pain_point_id IS NULL
-            FROM replay_summary_pain_points pp
-            JOIN replay_summaries rs ON rs.id = pp.summary_id
-            JOIN project p ON p.id = rs.project_id
-            JOIN replay_sessions s ON s.project_id = rs.project_id
-              AND s.session_id = rs.session_id AND s.window_id = rs.window_id
-            LEFT JOIN replay_insight_memberships m ON m.pain_point_id = pp.id
-            WHERE pp.id = $1 FOR UPDATE OF pp, rs, s, p
-        "#,
-        )
-        .bind(prepared.point_id(0))
-        .fetch_optional(&mut *tx)
-        .await?
-        .unwrap_or(false);
-        if !current {
-            tx.rollback().await?;
-            continue;
-        }
-        save(&mut tx, &prepared).await?;
-        tx.commit().await?;
-        done += 1;
-    }
-    tracing::info!(done, "backfilled insight memberships");
-    Ok(())
-}
-
-fn parse_backfill_args(args: &[String]) -> Result<Option<Uuid>> {
-    match args {
-        [] => Ok(None),
-        [flag, value] if flag == "--project" => Ok(Some(Uuid::parse_str(value)?)),
-        [flag] if flag == "--project" => anyhow::bail!("--project requires a UUID"),
-        _ => anyhow::bail!("usage: --backfill-insights [--project UUID]"),
     }
 }
 

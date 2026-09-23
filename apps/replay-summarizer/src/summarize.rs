@@ -228,12 +228,6 @@ impl Summarizer {
             .context("OpenRouter request failed")?;
         let status_error = http_response.error_for_status_ref().err();
         let response = http_response.json::<Value>().await;
-        // Explicit evaluation-only diagnostics: never enabled by the queue worker.
-        if std::env::args().nth(1).as_deref() == Some("--evaluate") {
-            if let (Ok(path), Ok(body)) = (std::env::var("REPLAY_EVAL_RESPONSE_FILE"), &response) {
-                std::fs::write(path, serde_json::to_vec_pretty(body)?)?;
-            }
-        }
         if let Some(error) = status_error {
             return Err(error).context("OpenRouter rejected video summarization");
         }

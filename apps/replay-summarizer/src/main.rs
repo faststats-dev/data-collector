@@ -1,5 +1,4 @@
 mod config;
-mod evaluate;
 mod insights;
 mod jobs;
 mod object_store;
@@ -21,16 +20,7 @@ const GROUPING_TIMEOUT: Duration = Duration::from_secs(300);
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args: Vec<String> = std::env::args().collect();
-    if let Ok(path) =
-        std::env::var("REPLAY_INSIGHTS_ENV_FILE").or_else(|_| std::env::var("REPLAY_EVAL_ENV_FILE"))
-    {
-        dotenvy::from_path(path)?;
-    }
     dotenvy::dotenv().ok();
-    if args.get(1).map(String::as_str) == Some("--evaluate") {
-        return evaluate::run(&args[2..]).await;
-    }
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(
@@ -38,12 +28,13 @@ async fn main() -> Result<()> {
                 .add_directive(tracing::Level::INFO.into()),
         )
         .init();
-    if args.get(1).map(String::as_str) == Some("--backfill-insights") {
-        return insights::backfill(&args[2..]).await;
-    }
     if std::env::args().any(|a| a == "--render-child") {
         return renderer::child_main().await;
     }
+    anyhow::ensure!(
+        std::env::args().len() == 1,
+        "this service does not accept CLI commands"
+    );
     let config = config::Config::from_env()?;
     let pool = PgPoolOptions::new()
         .max_connections(config.database_max_connections)

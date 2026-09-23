@@ -1,4 +1,6 @@
 use super::*;
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+use std::str::FromStr;
 
 #[test]
 fn batch_validation() {
@@ -71,19 +73,6 @@ fn legacy_null_evidence() {
         canonical(&point),
         "surface: checkout problem: button broke evidence:"
     );
-}
-
-#[test]
-fn backfill_arguments_are_strict() {
-    assert_eq!(parse_backfill_args(&[]).unwrap(), None);
-    let id = Uuid::new_v4();
-    assert_eq!(
-        parse_backfill_args(&["--project".into(), id.to_string()]).unwrap(),
-        Some(id)
-    );
-    assert!(parse_backfill_args(&["--project".into()]).is_err());
-    assert!(parse_backfill_args(&["--unknown".into()]).is_err());
-    assert!(parse_backfill_args(&["--project".into(), id.to_string(), "extra".into()]).is_err());
 }
 
 #[tokio::test]

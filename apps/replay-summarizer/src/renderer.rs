@@ -171,7 +171,7 @@ pub async fn child_main() -> Result<()> {
             ),
             output: temporary.path().join("replay.mp4"),
             fps: crate::config::optional("REPLAY_RENDER_FPS", 3)?,
-            speed: crate::config::optional("REPLAY_RENDER_SPEED", 1.0)?,
+            speed: crate::config::render_speed(replay_time_ms)?,
             max_duration_ms: None,
             timestamp_overlay: true,
         };

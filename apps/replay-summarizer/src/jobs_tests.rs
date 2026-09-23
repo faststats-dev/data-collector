@@ -58,6 +58,12 @@ async fn priority_manual_selection_and_fenced_summary_commit() -> Result<()> {
         manual.session_id, "manual",
         "manual beats older automatic job"
     );
+    let profile: String =
+        sqlx::query_scalar("SELECT render_profile FROM replay_summary_jobs WHERE id=$1")
+            .bind(manual.job_id)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(profile, PROFILE, "legacy jobs move to the current profile");
     assert!(
         prepare(&pool, &manual, 1024).await?.is_some(),
         "manual works without automatic settings"

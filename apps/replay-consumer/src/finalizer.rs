@@ -11,8 +11,8 @@ const ENQUEUE: &str = r#"
         ORDER BY s.finalize_after LIMIT 100
         FOR UPDATE OF s SKIP LOCKED
     ), queued AS (
-        INSERT INTO replay_summary_jobs (id, project_id, session_id, window_id, storage_generation, chunk_count, state)
-        SELECT gen_random_uuid(), project_id, session_id, window_id, replay_storage_generation, chunk_count, 'ready'
+        INSERT INTO replay_summary_jobs (id, project_id, session_id, window_id, storage_generation, chunk_count, state, render_profile)
+        SELECT gen_random_uuid(), project_id, session_id, window_id, replay_storage_generation, chunk_count, 'ready', 'h264-3fps-adaptive-v3'
         FROM candidates WHERE actual_duration_ms >= 2000 ON CONFLICT DO NOTHING
         RETURNING project_id, session_id, window_id, chunk_count
     )

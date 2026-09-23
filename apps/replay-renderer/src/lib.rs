@@ -1,5 +1,7 @@
 //! Render rrweb recordings with explicit replay timestamps and compositor frames.
 //! Requires chrome-headless-shell, FFmpeg, and a local rrweb UMD bundle.
+#![forbid(unsafe_code)]
+
 mod browser;
 mod encoder;
 mod matroska;
@@ -9,6 +11,7 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use browser::Browser;
 use encoder::Encoder;
 pub use replay::{FramePlan, Replay};
+pub use replay_render_protocol::{RenderReport, RenderStats};
 use serde_json::json;
 use std::path::PathBuf;
 
@@ -27,28 +30,6 @@ pub struct RenderOptions {
     /// Burn original replay milliseconds into a footer after frame reuse/encoding.
     pub timestamp_overlay: bool,
 }
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub struct RenderReport {
-    pub output: PathBuf,
-    pub frames: u64,
-    pub video_duration_seconds: f64,
-    pub stats: RenderStats,
-}
-
-/// Wall-clock stage timings. Encoder work overlaps replay/capture; `encoder_wait`
-/// measures backpressure, not total FFmpeg CPU time.
-#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
-pub struct RenderStats {
-    pub screenshots: u64,
-    pub packets: u64,
-    pub setup: f64,
-    pub advance: f64,
-    pub capture: f64,
-    pub encoder_wait: f64,
-    pub finalize: f64,
-    pub total: f64,
-}
-
 /// A warm browser process; every recording receives a fresh isolated context.
 #[derive(Default)]
 pub struct RenderSession {
@@ -90,18 +71,6 @@ pub fn render(replay: &Replay, options: &RenderOptions) -> Result<RenderReport> 
         replay,
         options,
         false,
-        &replay.events,
-        &mut RenderSession::default(),
-        &mut |_, _, _| {},
-    )
-}
-
-/// Encode the complete MP4 stream into the null sink without saving a video.
-pub fn render_discard(replay: &Replay, options: &RenderOptions) -> Result<RenderReport> {
-    render_inner(
-        replay,
-        options,
-        true,
         &replay.events,
         &mut RenderSession::default(),
         &mut |_, _, _| {},

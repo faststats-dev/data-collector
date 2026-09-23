@@ -1,4 +1,4 @@
-use rrweb2video::{FramePlan, Replay};
+use replay_renderer::{FramePlan, Replay};
 
 mod common;
 

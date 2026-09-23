@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
-use rrweb2video::{RenderOptions, Replay, render};
+use replay_renderer::{RenderOptions, Replay, render};
 use std::path::PathBuf;
 
 #[derive(Parser)]

@@ -1,11 +1,45 @@
 use super::*;
 use serde_json::json;
+#[path = "../../../tests/support/docker.rs"]
+mod docker;
 
-// Run against a disposable PostgreSQL database. Uses a unique schema and drops it.
+// Uses a unique schema, with Docker by default or an explicitly supplied test database.
 #[tokio::test]
-#[ignore = "requires REPLAY_TEST_DATABASE_URL pointing at a disposable PostgreSQL database"]
+#[ignore = "requires Docker or REPLAY_TEST_DATABASE_URL pointing at a disposable PostgreSQL database"]
 async fn priority_manual_selection_and_fenced_summary_commit() -> Result<()> {
-    let url = std::env::var("REPLAY_TEST_DATABASE_URL")?;
+    let container = if std::env::var_os("REPLAY_TEST_DATABASE_URL").is_none() {
+        Some(docker::Container::start(
+            "pgvector/pgvector:pg18",
+            &[
+                "-e",
+                "POSTGRES_PASSWORD=local-test-only",
+                "-p",
+                "127.0.0.1::5432",
+            ],
+        )?)
+    } else {
+        None
+    };
+    let url = if let Some(container) = &container {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while container
+            .exec(&["pg_isready", "-h", "127.0.0.1", "-U", "postgres"])
+            .is_err()
+        {
+            anyhow::ensure!(
+                std::time::Instant::now() < deadline,
+                "PostgreSQL did not become ready"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        container.exec(&["psql", "-U", "postgres", "-c", "CREATE EXTENSION vector"])?;
+        format!(
+            "postgres://postgres:local-test-only@127.0.0.1:{}/postgres",
+            container.port(5432)?
+        )
+    } else {
+        std::env::var("REPLAY_TEST_DATABASE_URL")?
+    };
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(1)
         .connect(&url)
@@ -58,6 +92,17 @@ async fn priority_manual_selection_and_fenced_summary_commit() -> Result<()> {
         sqlx::query("INSERT INTO replay_summary_jobs(project_id,session_id,window_id,priority,manual) VALUES($1,$2,'window',$3,$4)")
             .bind(project).bind(session).bind(if session=="manual" {100} else {0}).bind(session=="manual").execute(&pool).await?;
     }
+    let busy = claim(&pool).await?.unwrap();
+    defer_render(&pool, &busy).await?;
+    defer_render(&pool, &busy).await?; // stale repeat must not mutate it
+    let deferred: (String, i32, i32, bool) = sqlx::query_as(
+        "SELECT state, attempts, execution_token, next_attempt_at>NOW() FROM replay_summary_jobs WHERE id=$1"
+    ).bind(busy.job_id).fetch_one(&pool).await?;
+    assert_eq!(deferred, ("ready".into(), 0, busy.token + 1, true));
+    sqlx::query("UPDATE replay_summary_jobs SET next_attempt_at=NOW() WHERE id=$1")
+        .bind(busy.job_id)
+        .execute(&pool)
+        .await?;
     let manual = claim(&pool).await?.unwrap();
     assert_eq!(
         manual.session_id, "manual",

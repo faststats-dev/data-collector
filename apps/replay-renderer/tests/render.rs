@@ -1,5 +1,5 @@
 mod common;
-use rrweb2video::{RenderOptions, Replay, render};
+use replay_renderer::{RenderOptions, Replay, render};
 use std::{path::PathBuf, process::Command};
 
 /// RRWEB2VIDEO_CHROMIUM must point to chrome-headless-shell; run npm ci in player first.
@@ -70,7 +70,7 @@ fn discard_encodes_without_creating_a_video_file() {
         max_duration_ms: None,
         timestamp_overlay: false,
     };
-    let report = rrweb2video::render_discard_owned(replay, &options).unwrap();
+    let report = replay_renderer::render_discard_owned(replay, &options).unwrap();
     assert_eq!(report.frames, 3);
     assert_eq!(report.output, std::path::Path::new("/dev/null"));
     assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
@@ -91,7 +91,7 @@ fn warm_session_handles_separate_recordings_and_recovers_after_failure() {
         max_duration_ms: None,
         timestamp_overlay: false,
     };
-    let mut session = rrweb2video::RenderSession::default();
+    let mut session = replay_renderer::RenderSession::default();
     for attempt in 0..3 {
         let replay = Replay::from_slice(&common::recording()).unwrap();
         let mut stages = vec![];
@@ -139,7 +139,7 @@ fn warm_session_saves_timestamped_video_with_original_replay_time() {
         max_duration_ms: None,
         timestamp_overlay: true,
     };
-    let report = rrweb2video::RenderSession::default()
+    let report = replay_renderer::RenderSession::default()
         .render_owned(
             Replay::from_slice(&common::recording()).unwrap(),
             &options,

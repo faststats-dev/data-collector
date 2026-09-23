@@ -333,6 +333,24 @@ pub async fn finish(
     Ok(updated)
 }
 
+/// Requeue a busy renderer response without consuming a failure attempt.
+pub async fn defer_render(pool: &PgPool, claim: &Claim) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE replay_summary_jobs SET state='ready', stage='awaiting_renderer',
+            attempts=GREATEST(attempts-1,0), execution_token=execution_token+1,
+            next_attempt_at=NOW() + (5 + random()*10) * interval '1 second',
+            lease_until=NULL, last_error=NULL
+        WHERE id=$1 AND execution_token=$2 AND state='running' AND lease_until>NOW()
+        "#,
+    )
+    .bind(claim.job_id)
+    .bind(claim.token)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 pub async fn fail(pool: &PgPool, claim: &Claim, error: &str, retryable: bool) -> Result<()> {
     sqlx::query(
         r#"

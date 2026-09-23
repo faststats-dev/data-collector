@@ -63,6 +63,11 @@ impl Encoder {
         }
         let mut process = Process(
             Command::new(executable)
+                .env_clear()
+                .env("PATH", "/usr/local/bin:/usr/bin:/bin")
+                .env("HOME", std::env::temp_dir())
+                .env("TMPDIR", std::env::temp_dir())
+                .env("LANG", "C.UTF-8")
                 .args([
                     "-hide_banner",
                     "-loglevel",

@@ -12,9 +12,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::watch;
 
 const DATABASE_TIMEOUT: Duration = Duration::from_secs(20);
-const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 const LEASE_RENEWAL_INTERVAL: Duration = Duration::from_secs(30);
-const PROGRESS_TIMEOUT: Duration = Duration::from_secs(60);
 const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(1800);
 const GROUPING_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -28,14 +26,13 @@ async fn main() -> Result<()> {
                 .add_directive(tracing::Level::INFO.into()),
         )
         .init();
-    if std::env::args().any(|a| a == "--render-child") {
-        return renderer::child_main().await;
-    }
     anyhow::ensure!(
         std::env::args().len() == 1,
         "this service does not accept CLI commands"
     );
     let config = config::Config::from_env()?;
+    renderer::Client::new()?;
+    object_store::ObjectStore::from_env()?;
     let pool = PgPoolOptions::new()
         .max_connections(config.database_max_connections)
         .acquire_timeout(Duration::from_secs(10))
@@ -97,13 +94,12 @@ async fn observe_queue(pool: sqlx::PgPool, mut stop: watch::Receiver<bool>) {
 }
 
 async fn worker(pool: sqlx::PgPool, limit: usize, mut stop: watch::Receiver<bool>) -> Result<()> {
-    let mut child: Option<renderer::Child> = None;
+    let renderer = renderer::Client::new()?;
+    let objects = object_store::ObjectStore::from_env()?;
+    let summarizer = summarize::Summarizer::new(config::required("OPENROUTER_API_KEY")?)?;
     let idle_delay = Duration::from_millis(3000 + (uuid::Uuid::new_v4().as_u128() % 2000) as u64);
     loop {
         if *stop.borrow() {
-            if let Some(renderer) = child.as_mut() {
-                renderer.stop().await;
-            }
             return Ok(());
         }
         let claim = match tokio::time::timeout(DATABASE_TIMEOUT, jobs::claim(&pool))
@@ -125,12 +121,18 @@ async fn worker(pool: sqlx::PgPool, limit: usize, mut stop: watch::Receiver<bool
             }
         };
         tracing::info!(job_id = %claim.job_id, token = claim.token, "Claimed replay job");
-        let outcome = run_job(&pool, &claim, limit, &mut child, &mut stop).await;
+        let outcome = run_job(
+            &pool,
+            &claim,
+            limit,
+            &renderer,
+            &objects,
+            &summarizer,
+            &mut stop,
+        )
+        .await;
         if let Err(error) = outcome {
             tracing::error!(job_id = %claim.job_id, error = %format!("{error:#}"), "Replay attempt failed");
-            if let Some(mut renderer) = child.take() {
-                renderer.stop().await;
-            }
             if let Err(error) = jobs::fail(&pool, &claim, &format!("{error:#}"), true).await {
                 tracing::warn!(%error, "Could not record failure; lease expiry will recover job");
             }
@@ -141,78 +143,120 @@ async fn run_job(
     pool: &sqlx::PgPool,
     claim: &jobs::Claim,
     limit: usize,
-    child: &mut Option<renderer::Child>,
+    renderer: &renderer::Client,
+    objects: &object_store::ObjectStore,
+    summarizer: &summarize::Summarizer,
     stop: &mut watch::Receiver<bool>,
 ) -> Result<()> {
-    let Some(input) = tokio::time::timeout(DATABASE_TIMEOUT, jobs::prepare(pool, claim, limit))
-        .await
-        .context("job preparation timed out")??
-    else {
-        jobs::finish(pool, claim, "skipped", None, None).await?;
-        return Ok(());
-    };
-    let renderer = match &mut *child {
-        Some(renderer) => renderer,
-        slot @ None => slot.insert(renderer::Child::spawn()?),
-    };
-    tokio::time::timeout(Duration::from_secs(30), renderer.start(&input))
-        .await
-        .context("renderer start timed out")??;
     let started = Instant::now();
-    let mut progress = Instant::now();
-    let mut last_renewal = Instant::now();
-    let mut stage = "download".to_string();
-    let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
+    let operation = async {
+        let Some(input) = tokio::time::timeout(DATABASE_TIMEOUT, jobs::prepare(pool, claim, limit))
+            .await
+            .context("job preparation timed out")??
+        else {
+            jobs::finish(pool, claim, "skipped", None, None).await?;
+            return Ok(());
+        };
+        let downloaded = Instant::now();
+        let replay = match replay_loader::load(objects, input).await {
+            Ok(value) => value,
+            Err(failure) => {
+                jobs::fail(
+                    pool,
+                    claim,
+                    &format!("{}: {:#}", failure.code, failure.error),
+                    failure.retryable,
+                )
+                .await?;
+                return Ok(());
+            }
+        };
+        let download_seconds = downloaded.elapsed().as_secs_f64();
+        if replay.duration_ms < 2000 {
+            jobs::fail(pool, claim, "replay_too_short", false).await?;
+            return Ok(());
+        }
+        let replay_time_ms = replay.duration_ms;
+        let replay_start_ms = replay.start_ms;
+        let fps = config::optional("REPLAY_RENDER_FPS", 3)?;
+        let speed = config::render_speed(replay_time_ms)?;
+        let temporary = tempfile::tempdir()?;
+        let output = temporary.path().join("replay.mp4");
+        let report = match renderer
+            .render(
+                replay_render_protocol::Request {
+                    protocol: 1,
+                    events: replay.events,
+                    fps,
+                    speed,
+                },
+                &output,
+            )
+            .await
+        {
+            Ok(report) => report,
+            Err(error) => {
+                if error
+                    .downcast_ref::<reqwest::Error>()
+                    .and_then(|e| e.status())
+                    .is_some_and(|s| s.as_u16() == 429)
+                {
+                    jobs::defer_render(pool, claim).await?;
+                    return Ok(());
+                }
+                jobs::fail(
+                    pool,
+                    claim,
+                    &format!("renderer: {error:#}"),
+                    renderer::retryable(&error),
+                )
+                .await?;
+                return Ok(());
+            }
+        };
+        let result = match summarizer
+            .summarize(&output, replay_time_ms, fps, speed, &replay.evidence)
+            .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                let retryable = error.downcast_ref::<reqwest::Error>().is_some_and(|e| {
+                    e.is_timeout()
+                        || e.is_connect()
+                        || e.status()
+                            .is_some_and(|s| s.as_u16() == 429 || s.is_server_error())
+                });
+                jobs::fail(pool, claim, &format!("openrouter: {error:#}"), retryable).await?;
+                return Ok(());
+            }
+        };
+        let prepared = tokio::time::timeout(
+            GROUPING_TIMEOUT,
+            prepare_insights_with_lease(pool, claim, &result.summary),
+        )
+        .await
+        .context("inline grouping timed out")??;
+        let report = serde_json::json!({ "render": report, "replay_time_ms": replay_time_ms,
+            "download_seconds": download_seconds, "processing_seconds": started.elapsed().as_secs_f64(),
+            "summary": result.summary, "replay_start_ms": replay_start_ms,
+            "model": result.metadata.model, "metadata": result.metadata });
+        let committed =
+            jobs::finish(pool, claim, "succeeded", Some(report), Some(&prepared)).await?;
+        tracing::info!(job_id = %claim.job_id, committed, "Replay summary processed");
+        Ok(())
+    };
+    tokio::pin!(operation);
+    let mut heartbeat = tokio::time::interval(LEASE_RENEWAL_INTERVAL);
+    heartbeat.tick().await;
+    let deadline = tokio::time::sleep(ATTEMPT_TIMEOUT + GROUPING_TIMEOUT);
+    tokio::pin!(deadline);
     loop {
         tokio::select! {
+            result = &mut operation => return result,
             _ = stop.changed() => anyhow::bail!("worker shutting down"),
+            _ = &mut deadline => anyhow::bail!("replay attempt deadline exceeded"),
             _ = heartbeat.tick() => {
-                anyhow::ensure!(started.elapsed() < ATTEMPT_TIMEOUT, "render attempt exceeded 30 minutes");
-                anyhow::ensure!(progress.elapsed() < PROGRESS_TIMEOUT, "renderer made no progress for 60 seconds");
-                if last_renewal.elapsed() >= LEASE_RENEWAL_INTERVAL {
-                    // Stop if renewal fails or ownership has changed.
-                    let renewed = tokio::time::timeout(DATABASE_TIMEOUT, jobs::renew(pool, claim, &stage))
-                        .await.context("lease renewal timed out")??;
-                    if !renewed {
-                        renderer.stop().await;
-                        *child = None;
-                        jobs::finish(pool, claim, "superseded", None, None).await?;
-                        return Ok(());
-                    }
-                    last_renewal = Instant::now();
-                }
-            }
-            output = renderer.next() => match output? {
-                renderer::Output::Progress { stage: next, completed, total } => {
-                    stage = next;
-                    progress = Instant::now();
-                    tracing::debug!(job_id = %claim.job_id, %stage, completed, total, "Replay progress");
-                }
-                renderer::Output::Complete { report, replay_time_ms, download_seconds, summary, metadata, replay_start_ms } => {
-                    // Embed outside the transaction while keeping the summary lease alive.
-                    let prepared = tokio::time::timeout(
-                        GROUPING_TIMEOUT,
-                        prepare_insights_with_lease(pool, claim, &summary),
-                    ).await.context("inline insight grouping timed out")??;
-                    let report = serde_json::json!({
-                        "render": report,
-                        "replay_time_ms": replay_time_ms,
-                        "download_seconds": download_seconds,
-                        "processing_seconds": started.elapsed().as_secs_f64(),
-                        "summary": summary,
-                        "replay_start_ms": replay_start_ms,
-                        "model": metadata.model,
-                        "metadata": metadata,
-                    });
-                    let committed = jobs::finish(pool, claim, "succeeded", Some(report), Some(&prepared)).await?;
-                    tracing::info!(job_id = %claim.job_id, committed, "Replay summary processed");
-                    return Ok(());
-                }
-                renderer::Output::Failed { code, message, retryable } => {
-                    jobs::fail(pool, claim, &format!("{code}: {message}"), retryable).await?;
-                    tracing::warn!(job_id = %claim.job_id, %code, %message, retryable, "Replay attempt failed");
-                    return Ok(());
-                }
+                anyhow::ensure!(tokio::time::timeout(DATABASE_TIMEOUT, jobs::renew(pool, claim, "processing")).await.context("lease renewal timed out")??, "summary lease became stale");
             }
         }
     }

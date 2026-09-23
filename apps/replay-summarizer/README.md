@@ -1,115 +1,78 @@
 # replay-summarizer
 
 Generates summaries and timestamped UX pain points from recorded user sessions.
-
-Summarization always requires at least 2,000 ms of recording duration, including
-manual requests. Shorter recordings still finalize normally but are not queued;
-already queued recordings are checked again before downloading or rendering.
+Recordings must contain at least two seconds of replay time, including manually
+requested summaries.
 
 ## How it works
 
-1. Picks up automatic or manually requested jobs from PostgreSQL.
-2. Downloads rrweb recordings from S3 and renders them into a temporary video.
-3. Sends the video to OpenRouter for analysis.
-4. Batch-embeds pain points through OpenRouter (one request per summary).
-5. Atomically saves the summary, pain points, embeddings, memberships, and job success.
+1. Claims automatic or manually requested jobs from PostgreSQL.
+2. Downloads and decodes rrweb recordings from S3, orders events and prepares interaction evidence.
+3. Sends events to the [replay-renderer](../replay-renderer/README.md) and receives a temporary video.
+4. Sends the video and evidence to OpenRouter for analysis.
+5. Batch-embeds the resulting pain points and assigns them to project-local insight groups.
+6. Atomically saves the summary, pain points, embeddings, memberships and job success.
 
-Each instance processes one replay at a time. Failed jobs can retry, and outdated
-recordings cannot overwrite newer results. Temporary videos are deleted after processing.
-Grouping retrieves at most four project-local representatives with cosine similarity
-of at least 0.65, using exact pgvector search in PostgreSQL. Each representative is
-the oldest current member; it changes only when evidence becomes stale, is deleted,
-or is manually moved. Member vectors are not loaded into the worker or averaged.
-`typesafe/jev-1.13` compares all four candidates in one request per pain point.
-Points are assigned sequentially so later points in a summary see the actual groups
-created by earlier points, not speculative representatives. A score of at least 0.8 permits a join;
-otherwise the observation starts a new group. Scores are not calibrated probabilities.
+Each worker processes one replay at a time and renews its lease while working.
+The renderer is a separate service accessed through an authenticated API; the
+worker contains no Chromium or FFmpeg. Busy renderer responses return the job to
+the queue without consuming a failed attempt. Temporary videos are deleted after
+processing.
 
-Embedding requests run before publication while the lease is renewed. Jev runs under
-the existing publication transaction and project lock, with a **five-second total
-deadline and no retries**. This briefly delays same-project publications and manual
-edits, but avoids stale decisions and duplicate concurrent groups. Failed, malformed,
-or timed-out decisions leave remaining observations separate; they do not fail the summary or
-fall back to vector-only joins. There is no separate worker or regrouping service.
+Publication is fenced by the lease, recording revision, deletion state and storage
+generation so outdated work cannot overwrite newer results. Failed jobs can retry,
+but successful intermediate outputs are not durably checkpointed: a later failure
+can repeat rendering or inference.
 
-## Configuration
+## Analysis
 
-Required environment variables:
+The default summary model is `google/gemini-3.8-flash`. The instructions in
+[prompt.md](prompt.md) account for replay limitations, such as missing canvas
+charts, to reduce false bug reports. Responses use a structured schema, with
+local checks for text lengths, array sizes and recording-duration bounds.
 
-- `DATABASE_URL`: PostgreSQL connection string.
-- `OPENROUTER_API_KEY`: API key for video analysis.
-- `REPLAY_S3_BUCKET_PREFIX`: prefix for project replay buckets.
-- `REPLAY_S3_ACCESS_KEY_ID` and `REPLAY_S3_SECRET_ACCESS_KEY`: storage credentials.
+At the default 3 FPS, playback stays at 1× for recordings up to one minute, uses
+4× through 30 minutes and 8× for longer recordings. Frame rate and speed can be
+overridden. Idle time is retained, and the selected settings are saved with the
+summary. Higher frame density does not guarantee the provider examines every frame.
 
-Set `REPLAY_S3_ENDPOINT` for S3-compatible storage and `REPLAY_S3_REGION` if needed
-(default: `us-east-1`).
+The video is accompanied by up to 500 recorded click, touch, scroll and input-change
+events. This evidence excludes URLs, DOM text and entered values, and marks
+truncation. It distinguishes interactions such as touch scrolling from clicks
+without claiming that an action succeeded or failed.
 
-The embedding model defaults to `qwen/qwen3-embedding-8b` and may be overridden with
-`REPLAY_INSIGHTS_EMBED_MODEL`. Use a model supporting Matryoshka truncation to 1024
-dimensions. Canonical preparation is `ux-point-canonical-v2-1024`; the first 1024
-dimensions are normalized before storage.
-Embeddings from different models/preparation versions are never compared; switching
-models requires re-embedding existing observations to match against their groups.
-The cutoffs are provisional and must be reevaluated when changing models.
+Malformed or truncated summaries and HTTP 4xx errors other than 429 are not
+retried as whole jobs. Connection failures, timeouts, 429s and server errors remain
+retryable.
 
-Before deploying the worker/API, provision PostgreSQL with pgvector and apply the
-monorepo's consolidated `20260923092552_cross_replay_insights` migration. It creates
-the extension and `vector(1024)` column; the migration role needs permission to create
-the extension, or an administrator must create it first. Local Compose uses
-`pgvector/pgvector:pg18`. Do not run the old array-based worker against this schema.
+## Grouping pain points
 
-## Prompt
+Pain points are embedded in one batch per summary. The default embedding model is
+`qwen/qwen3-embedding-8b`; canonical preparation uses `ux-point-canonical-v2-1024`.
+The first 1,024 dimensions are normalized before storage. Different models or
+preparation versions are never compared.
 
-Edit [prompt.md](prompt.md) to change the analysis and writing instructions.
-Rebuild and redeploy to apply changes. The prompt accounts for replay rendering
-limitations, such as missing canvas charts, to reduce false bug reports.
+Exact pgvector search retrieves up to four project-local representatives with
+cosine similarity of at least 0.65. Each representative is the oldest current
+member of its group; member vectors are not averaged. `typesafe/jev-1.13` compares
+all candidates in one request per pain point. A score of at least 0.8 permits a
+join; otherwise the observation starts a new group. These scores are not
+calibrated probabilities.
 
-## Build
+Points are assigned sequentially so later points see groups created by earlier
+ones. Embedding happens before publication while the lease is renewed. Grouping
+runs inside the publication transaction and project lock, with a five-second
+total deadline and no retries. Failed, malformed or timed-out decisions leave
+remaining observations separate rather than falling back to vector-only joins.
 
-From the repository root:
+## Stored results
 
-```sh
-docker build -f apps/replay-summarizer/Dockerfile -t replay-summarizer .
-```
-
-The image includes Chromium and FFmpeg for rendering.
-
-## Summary entities and deployment
-
-Apply the monorepo's `replay_summary_entities` migration, then
-`replay_summary_entity_cutover`, before starting this worker and the updated API.
-The first backfills existing summaries; the second removes the old inline columns.
-`replay_summaries` stores the recording revision, text, confidence, model, response
-ID, prompt/schema version, provider-reported USD cost, token counts, latency, and
+`replay_summaries` stores the recording revision, summary text, confidence, model,
+response ID, prompt/schema version, provider cost and token counts, latency and
 render settings. `replay_summary_pain_points` stores ordered timestamped findings,
-evidence, and confidence. Publication remains atomic with job completion and fenced
-by lease, recording revision, deletion, and storage generation.
+evidence and confidence.
 
-Cost/token fields are nullable: absent provider accounting is unknown, not zero.
-These fields describe the successful summary call, not cumulative billing across
-failed attempts. Job reports retain rendering diagnostics without duplicating
-summary text or model metadata. Confidence is a model estimate, not calibrated.
-
-## Rendering and model configuration
-
-- `REPLAY_SUMMARY_MODEL`: OpenRouter model ID; default `google/gemini-3.8-flash`.
-- `REPLAY_RENDER_FPS`: default `3` (1–120).
-- `REPLAY_RENDER_SPEED`: optional fixed-speed override (0.1–64).
-
-At 3 FPS, the default preserves 1× speed for recordings up to one minute, uses 4×
-through 30 minutes, and 8× for longer recordings. This keeps full detail for short
-sessions while bounding video duration and model cost for long sessions. Idle time
-is retained. The worker accepts queued legacy render profiles and claims them under
-the adaptive profile; persisted render settings record the selected speed or fixed
-override. Higher input density does not guarantee the provider examines every frame.
-
-A bounded timeline of up to 500 recorded click, touch, scroll, and input-change
-events accompanies the video. It excludes URLs, DOM text, and entered values and
-explicitly marks truncation. It helps distinguish touch scrolling from clicks but
-does not establish that an interaction succeeded or failed.
-
-The request uses a portable structured-output schema; string lengths, array size,
-and recording-duration bounds are checked locally and described in the prompt.
-Large constrained schema bounds caused real provider errors during evaluation.
-Malformed/truncated summaries and HTTP 4xx errors other than 429 are not retried
-as whole render jobs. Connection/timeouts, 429s, and server errors remain retryable.
+Missing provider accounting remains null rather than becoming zero. Cost and
+token fields describe the successful summary call, not failed attempts. Job
+reports retain rendering diagnostics without duplicating summary text or model
+metadata. Confidence is a model estimate, not a calibrated probability.

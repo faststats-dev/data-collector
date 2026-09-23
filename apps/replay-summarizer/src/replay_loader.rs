@@ -1,7 +1,103 @@
+use crate::{jobs::Input, object_store::ObjectStore};
 use anyhow::{Context, Result, bail, ensure};
+use futures_util::future::try_join_all;
 use serde::Deserialize;
 use serde_json::value::RawValue;
 use std::io::Read;
+
+pub struct LoadedReplay {
+    pub events: Vec<Box<RawValue>>,
+    pub start_ms: u64,
+    pub duration_ms: u64,
+    pub evidence: serde_json::Value,
+}
+
+pub struct Failure {
+    pub code: &'static str,
+    pub error: anyhow::Error,
+    pub retryable: bool,
+}
+impl Failure {
+    fn input(error: impl Into<anyhow::Error>) -> Self {
+        Self {
+            code: "invalid_input",
+            error: error.into(),
+            retryable: false,
+        }
+    }
+}
+
+pub async fn load(
+    objects: &ObjectStore,
+    input: Input,
+) -> std::result::Result<LoadedReplay, Failure> {
+    if input.protocol != 1 || input.max_decoded_bytes == 0 {
+        return Err(Failure::input(anyhow::anyhow!("unsupported render input")));
+    }
+    let bucket = objects.bucket(input.project_id);
+    let mut chunks = input.chunks.into_iter().peekable();
+    let mut events = vec![];
+    let mut decoded = 0;
+    while chunks.peek().is_some() {
+        // Limit concurrent downloads by both chunk count and compressed size.
+        let mut wave = vec![];
+        let mut bytes = 0;
+        while let Some(chunk) = chunks.peek() {
+            let size = usize::try_from(chunk.compressed_bytes)
+                .unwrap_or(usize::MAX)
+                .max(1);
+            if size > input.max_decoded_bytes {
+                return Err(Failure::input(anyhow::anyhow!(
+                    "compressed chunk exceeds input budget"
+                )));
+            }
+            if wave.len() == 4 || bytes + size > input.max_decoded_bytes {
+                break;
+            }
+            bytes += size;
+            wave.push(chunks.next().unwrap());
+        }
+        let bodies =
+            try_join_all(wave.iter().map(|chunk| {
+                objects.get(&bucket, &chunk.key, chunk.compressed_bytes.max(1) as usize)
+            }))
+            .await
+            .map_err(|error| Failure {
+                code: "object_store",
+                error,
+                retryable: true,
+            })?;
+        for (chunk, body) in wave.into_iter().zip(bodies) {
+            let remaining = input.max_decoded_bytes - decoded;
+            let (mut part, size) = tokio::task::spawn_blocking(move || {
+                decode_chunk(&body, &chunk.encoding, remaining)
+            })
+            .await
+            .map_err(Failure::input)?
+            .map_err(Failure::input)?;
+            decoded += size;
+            events.append(&mut part);
+        }
+    }
+    prepare(events).map_err(Failure::input)
+}
+
+fn prepare(mut events: Vec<Event>) -> Result<LoadedReplay> {
+    events.sort_by_key(|event| event.order);
+    if events.len() < 2 {
+        bail!("at least two events are required");
+    }
+    let start_ms = events[0].order.0;
+    let duration_ms = events.last().unwrap().order.0 - start_ms;
+    let events: Vec<_> = events.into_iter().map(|e| e.raw).collect();
+    let evidence = interaction_evidence(&events)?;
+    Ok(LoadedReplay {
+        events,
+        start_ms,
+        duration_ms,
+        evidence,
+    })
+}
 
 pub struct Event {
     pub raw: Box<RawValue>,
@@ -48,6 +144,26 @@ pub fn decode_chunk(bytes: &[u8], encoding: &str, remaining: usize) -> Result<(V
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preparation_preserves_timing_and_orders_events() {
+        let input = br#"[{"type":5,"timestamp":4200,"data":{}},{"type":5,"timestamp":1000,"data":{}},{"type":5,"timestamp":4200,"_faststatsSeqId":1,"data":{}}]"#;
+        let (events, _) = decode_chunk(input, "identity", input.len()).unwrap();
+        let replay = prepare(events).unwrap();
+        assert_eq!(replay.start_ms, 1000);
+        assert_eq!(replay.duration_ms, 3200);
+        let timestamps: Vec<u64> = replay
+            .events
+            .iter()
+            .map(|e| {
+                serde_json::from_str::<serde_json::Value>(e.get()).unwrap()["timestamp"]
+                    .as_u64()
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(timestamps, [1000, 4200, 4200]);
+        assert!(prepare(vec![]).is_err());
+    }
 
     #[test]
     fn compressed_and_plain_chunks_preserve_payloads_and_sequence_order() {

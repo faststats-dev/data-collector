@@ -1,11 +1,9 @@
 use crate::error_tracking::ErrorLanguage;
 use crate::error_tracking::mapping::MappingResolver;
-use crate::polar::{PolarClient, UsageCounts};
 use crate::tinybird::{
     ErrorOccurrenceV3Row, ModsEventRow, TinybirdClient, WebEventRow, WebVitalRow,
 };
 use futures_util::StreamExt;
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -24,39 +22,20 @@ const TINYBIRD_MAX_BATCH_SIZE: usize = 5000;
 const EVENT_PROCESSING_CONCURRENCY: usize = 100;
 const KAFKA_PUBLISH_CONCURRENCY: usize = 100;
 
-pub struct OwnerUsage {
-    pub counts: UsageCounts,
-    pub token: Arc<str>,
-    pub org: Option<Arc<str>>,
-}
-
-pub type AggregatedUsage = HashMap<Arc<str>, OwnerUsage>;
-
-#[derive(Debug, Clone)]
-pub struct TrackingContext {
-    pub owner_id: Arc<str>,
-    pub token: Arc<str>,
-    pub organization_id: Option<Arc<str>>,
-}
-
 #[derive(Debug)]
 pub enum QueuedEvent {
     WebEvent {
         row: Box<WebEventRow>,
-        tracking: Option<TrackingContext>,
     },
     ModsEvent {
         row: ModsEventRow,
-        tracking: Option<TrackingContext>,
     },
     ErrorOccurrenceV3 {
         row: Box<ErrorOccurrenceV3Row>,
         language: ErrorLanguage,
-        tracking: Option<TrackingContext>,
     },
     WebVital {
         row: WebVitalRow,
-        tracking: Option<TrackingContext>,
     },
 }
 
@@ -80,10 +59,10 @@ pub enum QueueError {
 
 #[derive(Debug, Default)]
 struct TinybirdBatch {
-    web_events: Vec<(WebEventRow, Option<TrackingContext>)>,
-    mods_events: Vec<(ModsEventRow, Option<TrackingContext>)>,
-    error_occurrences_v3: Vec<(ErrorOccurrenceV3Row, Option<TrackingContext>)>,
-    web_vitals: Vec<(WebVitalRow, Option<TrackingContext>)>,
+    web_events: Vec<WebEventRow>,
+    mods_events: Vec<ModsEventRow>,
+    error_occurrences_v3: Vec<ErrorOccurrenceV3Row>,
+    web_vitals: Vec<WebVitalRow>,
 }
 
 impl TinybirdBatch {
@@ -103,49 +82,16 @@ impl TinybirdBatch {
 
     fn push(&mut self, event: QueuedEvent) {
         match event {
-            QueuedEvent::WebEvent { row, tracking } => self.web_events.push((*row, tracking)),
-            QueuedEvent::ModsEvent { row, tracking } => self.mods_events.push((row, tracking)),
-            QueuedEvent::ErrorOccurrenceV3 { row, tracking, .. } => {
-                self.error_occurrences_v3.push((*row, tracking))
-            }
-            QueuedEvent::WebVital { row, tracking } => self.web_vitals.push((row, tracking)),
+            QueuedEvent::WebEvent { row } => self.web_events.push(*row),
+            QueuedEvent::ModsEvent { row } => self.mods_events.push(row),
+            QueuedEvent::ErrorOccurrenceV3 { row, .. } => self.error_occurrences_v3.push(*row),
+            QueuedEvent::WebVital { row } => self.web_vitals.push(row),
         }
-    }
-
-    fn aggregate_usage(&self) -> AggregatedUsage {
-        let estimated_owners = self.total_count().min(100);
-
-        let mut usage: AggregatedUsage = HashMap::with_capacity(estimated_owners);
-
-        macro_rules! count_usage {
-            ($iter:expr, $field:ident) => {
-                for (_, ctx) in $iter {
-                    if let Some(ctx) = ctx {
-                        usage
-                            .entry(Arc::clone(&ctx.owner_id))
-                            .or_insert_with(|| OwnerUsage {
-                                counts: UsageCounts::default(),
-                                token: Arc::clone(&ctx.token),
-                                org: ctx.organization_id.as_ref().map(Arc::clone),
-                            })
-                            .counts
-                            .$field += 1;
-                    }
-                }
-            };
-        }
-
-        count_usage!(&self.web_events, events);
-        count_usage!(&self.mods_events, events);
-        count_usage!(&self.error_occurrences_v3, error_tracking);
-        count_usage!(&self.web_vitals, web_vitals);
-        usage
     }
 }
 
 #[derive(Debug, Default)]
 struct TinybirdBatchSendResult {
-    delivered: TinybirdBatch,
     retryable: TinybirdBatch,
     permanent_failure_count: usize,
     errors: Vec<String>,
@@ -161,31 +107,14 @@ impl TinybirdBatchSendResult {
     }
 }
 
-fn merge_usage(target: &mut AggregatedUsage, source: AggregatedUsage) {
-    for (owner_id, source_usage) in source {
-        let target_usage = target.entry(owner_id).or_insert_with(|| OwnerUsage {
-            counts: UsageCounts::default(),
-            token: Arc::clone(&source_usage.token),
-            org: source_usage.org.as_ref().map(Arc::clone),
-        });
-        target_usage.counts.events += source_usage.counts.events;
-        target_usage.counts.error_tracking += source_usage.counts.error_tracking;
-        target_usage.counts.web_vitals += source_usage.counts.web_vitals;
-        target_usage
-            .counts
-            .session_replay_ids
-            .extend(source_usage.counts.session_replay_ids);
-    }
-}
-
 fn classify_delivery<T>(
     outcome: Result<(), crate::tinybird::TinybirdError>,
     rows: Vec<T>,
     datasource: &'static str,
     errors: &mut Vec<String>,
-) -> (Vec<T>, Vec<T>, usize) {
+) -> (Vec<T>, usize) {
     let Err(error) = outcome else {
-        return (rows, Vec::new(), 0);
+        return (Vec::new(), 0);
     };
     let permanence = if error.is_transient() {
         "transient"
@@ -197,16 +126,15 @@ fn classify_delivery<T>(
         rows.len()
     ));
     if error.is_transient() {
-        (Vec::new(), rows, 0)
+        (rows, 0)
     } else {
         let count = rows.len();
-        (Vec::new(), Vec::new(), count)
+        (Vec::new(), count)
     }
 }
 
 pub struct BatchQueue {
     tinybird: TinybirdClient,
-    polar: Option<Arc<PolarClient>>,
     mappings: Option<MappingResolver>,
     event_publisher: crate::kafka::EventPublisher,
     sender: mpsc::Sender<QueuedEvent>,
@@ -219,7 +147,6 @@ pub struct BatchQueue {
 impl BatchQueue {
     pub fn new(
         tinybird: TinybirdClient,
-        polar: Option<Arc<PolarClient>>,
         mappings: Option<MappingResolver>,
         event_publisher: crate::kafka::EventPublisher,
     ) -> Arc<Self> {
@@ -228,7 +155,6 @@ impl BatchQueue {
 
         let queue = Arc::new(Self {
             tinybird,
-            polar,
             mappings,
             event_publisher,
             sender,
@@ -254,31 +180,6 @@ impl BatchQueue {
                 mpsc::error::TrySendError::Closed(_) => QueueError::Closed,
             }
         })
-    }
-
-    pub fn track_replay_usage(&self, session_id: &str, tracking: &TrackingContext) {
-        let Some(polar) = &self.polar else {
-            return;
-        };
-
-        let mut usage = AggregatedUsage::new();
-        let mut owner_usage = OwnerUsage {
-            counts: UsageCounts::default(),
-            token: Arc::clone(&tracking.token),
-            org: tracking.organization_id.as_ref().map(Arc::clone),
-        };
-        owner_usage
-            .counts
-            .session_replay_ids
-            .insert(session_id.to_string());
-        usage.insert(Arc::clone(&tracking.owner_id), owner_usage);
-
-        let polar = Arc::clone(polar);
-        tokio::spawn(async move {
-            if let Err(error) = polar.ingest_usage(&usage).await {
-                error!("Failed to ingest replay usage to Polar: {}", error);
-            }
-        });
     }
 
     pub fn channel_capacity(&self) -> usize {
@@ -394,26 +295,7 @@ impl BatchQueue {
         let total = batch.total_count();
         info!("Flushing in-memory batch of {} events", total);
 
-        let usage = self.send_tinybird_batch_with_retry(batch).await;
-
-        if let Some(polar) = &self.polar
-            && !usage.is_empty()
-        {
-            let polar = Arc::clone(polar);
-            tokio::spawn(async move {
-                match polar.ingest_usage(&usage).await {
-                    Ok(response) => {
-                        info!(
-                            "Polar usage ingested: {} inserted, {} duplicates",
-                            response.inserted, response.duplicates
-                        );
-                    }
-                    Err(e) => {
-                        error!("Failed to ingest usage to Polar: {}", e);
-                    }
-                }
-            });
-        }
+        self.send_tinybird_batch_with_retry(batch).await;
     }
 
     fn calculate_retry_delay(retry_count: u32) -> Duration {
@@ -424,14 +306,12 @@ impl BatchQueue {
         Duration::from_millis(capped.saturating_sub(jitter))
     }
 
-    async fn send_tinybird_batch_with_retry(&self, batch: TinybirdBatch) -> AggregatedUsage {
+    async fn send_tinybird_batch_with_retry(&self, batch: TinybirdBatch) {
         let mut retry_count = 0u32;
         let mut current_batch = batch;
-        let mut delivered_usage = AggregatedUsage::new();
 
         loop {
             let result = self.send_tinybird_batch(current_batch).await;
-            merge_usage(&mut delivered_usage, result.delivered.aggregate_usage());
 
             if result.permanent_failure_count > 0 {
                 let error_summary = result.error_summary();
@@ -443,7 +323,7 @@ impl BatchQueue {
             }
 
             if result.retryable.is_empty() {
-                return delivered_usage;
+                return;
             }
             retry_count += 1;
 
@@ -455,7 +335,7 @@ impl BatchQueue {
                     result.retryable.total_count(),
                     retry_count
                 );
-                return delivered_usage;
+                return;
             }
 
             let error_summary = result.error_summary();
@@ -484,11 +364,10 @@ impl BatchQueue {
             web_vitals,
         } = batch;
 
-        let web_event_rows: Vec<_> = web_events.iter().map(|(e, _)| e).collect();
-        let mods_event_rows: Vec<_> = mods_events.iter().map(|(e, _)| e).collect();
-        let error_occurrence_v3_rows: Vec<_> =
-            error_occurrences_v3.iter().map(|(e, _)| e).collect();
-        let web_vital_rows: Vec<_> = web_vitals.iter().map(|(e, _)| e).collect();
+        let web_event_rows: Vec<_> = web_events.iter().collect();
+        let mods_event_rows: Vec<_> = mods_events.iter().collect();
+        let error_occurrence_v3_rows: Vec<_> = error_occurrences_v3.iter().collect();
+        let web_vital_rows: Vec<_> = web_vitals.iter().collect();
 
         let (web_events_res, mods_events_res, error_occurrences_v3_res, web_vitals_res) = tokio::join!(
             self.tinybird.insert_web_events(&web_event_rows),
@@ -498,35 +377,31 @@ impl BatchQueue {
             self.tinybird.insert_web_vitals(&web_vital_rows),
         );
 
-        let (delivered, retryable, permanent) =
+        let (retryable, permanent) =
             classify_delivery(web_events_res, web_events, "web_events", &mut result.errors);
-        result.delivered.web_events = delivered;
         result.retryable.web_events = retryable;
         result.permanent_failure_count += permanent;
 
-        let (delivered, retryable, permanent) = classify_delivery(
+        let (retryable, permanent) = classify_delivery(
             mods_events_res,
             mods_events,
             "mods_events",
             &mut result.errors,
         );
-        result.delivered.mods_events = delivered;
         result.retryable.mods_events = retryable;
         result.permanent_failure_count += permanent;
 
-        let (delivered, retryable, permanent) = classify_delivery(
+        let (retryable, permanent) = classify_delivery(
             error_occurrences_v3_res,
             error_occurrences_v3,
             "error_tracking_v3",
             &mut result.errors,
         );
-        result.delivered.error_occurrences_v3 = delivered;
         result.retryable.error_occurrences_v3 = retryable;
         result.permanent_failure_count += permanent;
 
-        let (delivered, retryable, permanent) =
+        let (retryable, permanent) =
             classify_delivery(web_vitals_res, web_vitals, "web_vitals", &mut result.errors);
-        result.delivered.web_vitals = delivered;
         result.retryable.web_vitals = retryable;
         result.permanent_failure_count += permanent;
 
@@ -566,12 +441,7 @@ impl BatchQueue {
             return event;
         };
 
-        let QueuedEvent::ErrorOccurrenceV3 {
-            row,
-            language,
-            tracking,
-        } = event
-        else {
+        let QueuedEvent::ErrorOccurrenceV3 { row, language } = event else {
             return event;
         };
 
@@ -579,7 +449,6 @@ impl BatchQueue {
         QueuedEvent::ErrorOccurrenceV3 {
             row: Box::new(row),
             language,
-            tracking,
         }
     }
 }
@@ -591,7 +460,13 @@ mod tests {
     #[test]
     fn classifies_delivery_per_datasource() {
         let mut errors = Vec::new();
-        let (delivered, retryable, permanent) = classify_delivery(
+        let (retryable, permanent) =
+            classify_delivery(Ok(()), vec![1, 2], "successful_source", &mut errors);
+        assert!(retryable.is_empty());
+        assert_eq!(permanent, 0);
+        assert!(errors.is_empty());
+
+        let (retryable, permanent) = classify_delivery(
             Err(crate::tinybird::TinybirdError::Api {
                 status: 503,
                 message: "unavailable".into(),
@@ -600,11 +475,10 @@ mod tests {
             "transient_source",
             &mut errors,
         );
-        assert!(delivered.is_empty());
         assert_eq!(retryable, vec![1, 2]);
         assert_eq!(permanent, 0);
 
-        let (delivered, retryable, permanent) = classify_delivery(
+        let (retryable, permanent) = classify_delivery(
             Err(crate::tinybird::TinybirdError::Api {
                 status: 400,
                 message: "invalid".into(),
@@ -613,52 +487,9 @@ mod tests {
             "permanent_source",
             &mut errors,
         );
-        assert!(delivered.is_empty());
         assert!(retryable.is_empty());
         assert_eq!(permanent, 3);
         assert_eq!(errors.len(), 2);
-    }
-
-    #[test]
-    fn merges_delivered_usage_counts() {
-        let owner: Arc<str> = "owner".into();
-        let context = TrackingContext {
-            owner_id: Arc::clone(&owner),
-            token: "token".into(),
-            organization_id: None,
-        };
-        let mut target = AggregatedUsage::new();
-        let source = AggregatedUsage::from([(
-            owner,
-            OwnerUsage {
-                counts: UsageCounts {
-                    events: 2,
-                    error_tracking: 1,
-                    ..UsageCounts::default()
-                },
-                token: Arc::clone(&context.token),
-                org: None,
-            },
-        )]);
-        merge_usage(&mut target, source);
-        let source = AggregatedUsage::from([(
-            Arc::clone(&context.owner_id),
-            OwnerUsage {
-                counts: UsageCounts {
-                    events: 3,
-                    web_vitals: 4,
-                    ..UsageCounts::default()
-                },
-                token: context.token,
-                org: None,
-            },
-        )]);
-        merge_usage(&mut target, source);
-
-        let counts = &target[&context.owner_id].counts;
-        assert_eq!(counts.events, 5);
-        assert_eq!(counts.error_tracking, 1);
-        assert_eq!(counts.web_vitals, 4);
     }
 
     mod retry_delay {

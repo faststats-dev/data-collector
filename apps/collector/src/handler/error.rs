@@ -65,8 +65,6 @@ pub async fn error(
         Err(error) => return error_response(StatusCode::BAD_REQUEST, &error.to_string()),
     };
 
-    let tracking_ctx = ctx.tracking_context(&token);
-
     let context = payload.context.unwrap_or_else(empty_context);
 
     for error in payload.errors {
@@ -94,8 +92,6 @@ pub async fn error(
             .queue_event(QueuedEvent::ErrorOccurrenceV3 {
                 row: Box::new(occurrence),
                 language,
-
-                tracking: Some(tracking_ctx.clone()),
             })
         {
             return queue_error_response(error, "error occurrence");

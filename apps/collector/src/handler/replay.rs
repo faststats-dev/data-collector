@@ -221,8 +221,7 @@ pub async fn replay(
     let request_origin = get_request_origin(&headers);
     let country = get_country(&headers);
 
-    let (token, context) = match authenticate_project(&state.pool, &headers, Some(body_token)).await
-    {
+    let context = match authenticate_project(&state.pool, &headers, Some(body_token)).await {
         Ok(authenticated) => authenticated,
         Err(error) => return error,
     };
@@ -260,25 +259,16 @@ pub async fn replay(
             Err(message) => return error_response(StatusCode::BAD_REQUEST, &message),
         };
 
-    let session_id = chunk.session_id.clone();
-    match state
+    if let Err(error) = state
         .replay_publisher
         .publish(ReplayCommand::Snapshot(Box::new(chunk)))
         .await
     {
-        Ok(()) => {
-            // Usage tracking is idempotent by replay session in the billing pipeline.
-            state
-                .batch_queue
-                .track_replay_usage(&session_id, &context.tracking_context(&token));
-        }
-        Err(error) => {
-            error!("Failed to publish replay: {}", error);
-            return error_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Service temporarily unavailable",
-            );
-        }
+        error!("Failed to publish replay: {}", error);
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Service temporarily unavailable",
+        );
     }
 
     let mut warnings = HashMap::new();

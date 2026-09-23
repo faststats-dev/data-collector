@@ -129,8 +129,7 @@ pub async fn vitals(
     };
 
     let request_origin = get_request_origin(&headers);
-    let (token, ctx) = match authenticate_project(&state.pool, &headers, request.token.take()).await
-    {
+    let ctx = match authenticate_project(&state.pool, &headers, request.token.take()).await {
         Ok(authenticated) => authenticated,
         Err(error) => return error,
     };
@@ -151,8 +150,6 @@ pub async fn vitals(
         return error_response(StatusCode::FORBIDDEN, msg);
     }
 
-    let tracking_ctx = ctx.tracking_context(&token);
-
     let user_agent = headers
         .get("User-Agent")
         .and_then(|v| v.to_str().ok())
@@ -171,10 +168,7 @@ pub async fn vitals(
     for row in rows {
         let is_poor = is_poor_web_vital(&row.metric, row.value);
 
-        if let Err(e) = state.batch_queue.queue_event(QueuedEvent::WebVital {
-            row,
-            tracking: Some(tracking_ctx.clone()),
-        }) {
+        if let Err(e) = state.batch_queue.queue_event(QueuedEvent::WebVital { row }) {
             return queue_error_response(e, "web vital");
         }
 

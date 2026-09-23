@@ -3,7 +3,7 @@ use super::{
     check_ip_allowed, error_response, extract_known_fields, get_client_ip, get_country,
     queue_error_response, success_response,
 };
-use crate::batch_queue::{QueuedEvent, TrackingContext};
+use crate::batch_queue::QueuedEvent;
 use crate::error_tracking::ErrorLanguage;
 use crate::error_tracking::v3::{OccurrenceInput, build_occurrence, mods_context};
 use crate::models::{AppState, Request};
@@ -21,7 +21,7 @@ pub async fn collect(
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    let (token, ctx) = match authenticate_project(&state.pool, &headers, None).await {
+    let ctx = match authenticate_project(&state.pool, &headers, None).await {
         Ok(authenticated) => authenticated,
         Err(error) => return error,
     };
@@ -35,15 +35,15 @@ pub async fn collect(
         Ok(req) => req,
         Err(_) => return error_response(StatusCode::BAD_REQUEST, "Invalid JSON"),
     };
-    let built = match build_collect_events(&ctx, &token, req, get_country(&headers).as_deref()) {
+    let built = match build_collect_events(&ctx, req, get_country(&headers).as_deref()) {
         Ok(built) => built,
         Err(message) => return error_response(StatusCode::BAD_REQUEST, message),
     };
 
-    if let Err(error) = state.batch_queue.queue_event(QueuedEvent::ModsEvent {
-        row: built.event,
-        tracking: Some(built.tracking.clone()),
-    }) {
+    if let Err(error) = state
+        .batch_queue
+        .queue_event(QueuedEvent::ModsEvent { row: built.event })
+    {
         return queue_error_response(error, "mods event");
     }
 
@@ -53,8 +53,6 @@ pub async fn collect(
             .queue_event(QueuedEvent::ErrorOccurrenceV3 {
                 row: Box::new(occurrence),
                 language: ErrorLanguage::Java,
-
-                tracking: Some(built.tracking.clone()),
             })
         {
             return queue_error_response(error, "error occurrence");
@@ -67,13 +65,11 @@ pub async fn collect(
 pub(crate) struct BuiltCollectEvents {
     pub event: ModsEventRow,
     pub errors: Vec<ErrorOccurrenceV3Row>,
-    pub tracking: TrackingContext,
     pub warnings: HashMap<String, String>,
 }
 
 pub(crate) fn build_collect_events(
     ctx: &ProjectContext,
-    token: &str,
     request: Request,
     country: Option<&str>,
 ) -> Result<BuiltCollectEvents, &'static str> {
@@ -92,8 +88,6 @@ pub(crate) fn build_collect_events(
         .map_err(|_| "Invalid server_id or identifier")?;
     let mut known = extract_known_fields(&mut data, MODS_EVENT_FIELDS);
     let (valid_custom, warnings) = validate_and_filter_payload(data, &ctx.datasources);
-
-    let tracking = ctx.tracking_context(token);
 
     let event_row = build_mods_event_row(
         ctx.project_id,
@@ -130,7 +124,6 @@ pub(crate) fn build_collect_events(
     Ok(BuiltCollectEvents {
         event: event_row,
         errors: occurrences,
-        tracking,
         warnings,
     })
 }

@@ -27,7 +27,6 @@ mod handler;
 mod identity;
 mod kafka;
 mod models;
-mod polar;
 mod tinybird;
 mod utils;
 mod validation;
@@ -95,16 +94,10 @@ async fn main() {
             .expect("TINYBIRD_TOKEN must be set in .env file or environment variables"),
     );
 
-    let polar_client = std::env::var("POLAR_TOKEN").ok().map(|token| {
-        info!("Polar integration enabled for usage tracking");
-        Arc::new(polar::PolarClient::new(token))
-    });
-
     let kafka_publisher = kafka::Publisher::from_env().expect("Invalid Kafka configuration");
     let event_publisher = kafka::EventPublisher::from_env(kafka_publisher.clone());
     let batch_queue = batch_queue::BatchQueue::new(
         tinybird_client,
-        polar_client,
         error_tracking::mapping::MappingResolver::from_env(pool.clone()),
         event_publisher,
     );

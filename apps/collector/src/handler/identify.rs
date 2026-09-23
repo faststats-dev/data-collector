@@ -71,7 +71,7 @@ pub async fn identify(
 
     let request_origin = get_request_origin(&headers);
     let ctx = match authenticate_project(&state.pool, &headers, body_token).await {
-        Ok((_, context)) => context,
+        Ok(context) => context,
         Err(e) => return e,
     };
 

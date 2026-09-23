@@ -65,7 +65,7 @@ pub async fn web(
     };
 
     let request_origin = get_request_origin(&headers);
-    let (token, ctx) = match authenticate_project(&state.pool, &headers, body_token).await {
+    let ctx = match authenticate_project(&state.pool, &headers, body_token).await {
         Ok(authenticated) => authenticated,
         Err(error) => return error,
     };
@@ -146,7 +146,6 @@ pub async fn web(
 
     let has_errors = errors.as_ref().is_some_and(|items| !items.is_empty());
 
-    let tracking_ctx = ctx.tracking_context(&token);
     let fallback_identity = resolved_user_id.to_string();
     let event_row = super::build_web_event_row(
         ctx.project_id,
@@ -161,7 +160,6 @@ pub async fn web(
 
     if let Err(error) = state.batch_queue.queue_event(QueuedEvent::WebEvent {
         row: Box::new(event_row),
-        tracking: Some(tracking_ctx.clone()),
     }) {
         return queue_error_response(error, "web event");
     }
@@ -190,8 +188,6 @@ pub async fn web(
                 .queue_event(QueuedEvent::ErrorOccurrenceV3 {
                     row: Box::new(occurrence),
                     language: ErrorLanguage::JavaScript,
-
-                    tracking: Some(tracking_ctx.clone()),
                 })
             {
                 return queue_error_response(error, "error occurrence");

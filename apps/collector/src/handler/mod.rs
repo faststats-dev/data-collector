@@ -13,7 +13,7 @@ pub use replay::replay;
 pub use vitals::vitals;
 pub use web::web;
 
-use crate::batch_queue::{QueueError, TrackingContext};
+use crate::batch_queue::QueueError;
 use crate::models::DataSource;
 use crate::tinybird::{ModsEventRow, WebEventRow};
 use axum::Json;
@@ -100,12 +100,11 @@ pub async fn authenticate_project(
     pool: &sqlx::PgPool,
     headers: &HeaderMap,
     body_token: Option<String>,
-) -> Result<(String, Arc<ProjectContext>), HandlerResponse> {
+) -> Result<Arc<ProjectContext>, HandlerResponse> {
     let token = body_token
         .or_else(|| get_authorization(headers))
         .ok_or_else(|| error_response(StatusCode::UNAUTHORIZED, "Unauthorized"))?;
-    let context = load_project_context(pool, &token).await?;
-    Ok((token, context))
+    load_project_context(pool, &token).await
 }
 
 pub fn error_response(status: StatusCode, message: &str) -> HandlerResponse {
@@ -148,10 +147,6 @@ pub struct ProjectContext {
     pub project_id: Uuid,
     pub replay_storage_generation: i32,
     pub replay_storage_active: bool,
-    /// The user ID to bill — either the owner_id directly (if it's a user)
-    /// or the org owner's user_id (if owner_id is an organization).
-    pub billing_customer_id: String,
-    pub organization_id: Option<String>,
     pub allowed_hostnames: Vec<String>,
     pub datasources: HashMap<String, DataSource>,
     pub error_tracking_enabled: bool,
@@ -159,16 +154,6 @@ pub struct ProjectContext {
     pub session_replays_enabled: bool,
     pub cookieless_mode: Option<bool>,
     pub ip_rules: Vec<IpRule>,
-}
-
-impl ProjectContext {
-    fn tracking_context(&self, token: &str) -> TrackingContext {
-        TrackingContext {
-            owner_id: self.billing_customer_id.as_str().into(),
-            token: token.into(),
-            organization_id: self.organization_id.as_deref().map(Into::into),
-        }
-    }
 }
 
 pub async fn load_project_context(
@@ -181,17 +166,13 @@ pub async fn load_project_context(
 
     let rows = sqlx::query(
         r#"
-        SELECT p.id, p.owner_id, p.allowed_hostnames, p.error_tracking_enabled,
+        SELECT p.id, p.allowed_hostnames, p.error_tracking_enabled,
                p.web_vitals_enabled, p.session_replays_enabled, p.cookieless_mode,
                p.replay_storage_generation, p.replay_storage_state::text AS replay_storage_state,
-               o.id AS organization_id,
-               m.user_id AS org_owner_user_id,
                d.reference_id, d.data_type::text, d.regex, d.allow_negative,
                d.allow_float, d.min_value, d.max_value, d.metric_shape::text
         FROM project p
         LEFT JOIN data_sources d ON d.project_id = p.id
-        LEFT JOIN organization o ON o.id = p.owner_id
-        LEFT JOIN member m ON m.organization_id = o.id AND m.role = 'owner'
         WHERE p.token = $1
         "#,
     )
@@ -241,17 +222,11 @@ pub async fn load_project_context(
             .collect();
 
     let project_id = first.get::<Uuid, _>("id");
-    let owner_id: String = first.get("owner_id");
-    let organization_id: Option<String> = first.get("organization_id");
-    let org_owner_user_id: Option<String> = first.get("org_owner_user_id");
-    let billing_customer_id = org_owner_user_id.unwrap_or(owner_id);
 
     let ctx = Arc::new(ProjectContext {
         project_id,
         replay_storage_generation: first.get("replay_storage_generation"),
         replay_storage_active: first.get::<String, _>("replay_storage_state") == "active",
-        billing_customer_id,
-        organization_id,
         allowed_hostnames: first
             .try_get::<sqlx::types::Json<Vec<String>>, _>("allowed_hostnames")
             .ok()

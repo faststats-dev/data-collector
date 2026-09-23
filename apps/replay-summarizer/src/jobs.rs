@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use serde_json::Value;
 
-pub const PROFILE: &str = "h264-3fps-1x-v2";
+pub const PROFILE: &str = "h264-3fps-adaptive-v3";
 #[derive(Debug)]
 pub struct Claim {
     pub job_id: Uuid,
@@ -52,7 +52,9 @@ pub async fn claim(pool: &PgPool) -> Result<Option<Claim>> {
         r#"
         WITH candidate AS (
             SELECT id FROM replay_summary_jobs WHERE NOT processed AND state='ready'
-                AND next_attempt_at<=NOW() AND attempts<3 AND render_profile IN ($1,'h264-3fps-8x-v1') ORDER BY priority DESC NULLS LAST,next_attempt_at,created_at
+                AND next_attempt_at<=NOW() AND attempts<3
+                AND render_profile IN ($1,'h264-3fps-1x-v2','h264-3fps-8x-v1')
+            ORDER BY priority DESC NULLS LAST,next_attempt_at,created_at
             LIMIT 1 FOR UPDATE SKIP LOCKED
         ) UPDATE replay_summary_jobs j SET state='running', render_profile=$1, execution_token=execution_token+1,
             lease_until=NOW()+interval '120 seconds', attempts=attempts+1, stage='preparing', progress_at=NOW()

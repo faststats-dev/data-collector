@@ -5,9 +5,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{io::Read, path::Path, time::Duration};
 
-pub const PROMPT_VERSION: &str = "replay-summary-v2";
+pub const PROMPT_VERSION: &str = "replay-summary-v3";
 pub const SCHEMA_VERSION: u32 = 2;
-pub const MODEL: &str = "z-ai/glm-5.3-flash";
+pub const MODEL: &str = "google/gemini-3.8-flash";
 const PROMPT: &str = include_str!("../prompt.md");
 const MAX_VIDEO_BYTES: u64 = 64 * 1024 * 1024;
 

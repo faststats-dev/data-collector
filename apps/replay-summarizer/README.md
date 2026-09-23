@@ -62,15 +62,16 @@ summary text or model metadata. Confidence is a model estimate, not calibrated.
 
 ## Rendering and model configuration
 
-- `REPLAY_SUMMARY_MODEL`: OpenRouter model ID; default `z-ai/glm-5.3-flash`.
+- `REPLAY_SUMMARY_MODEL`: OpenRouter model ID; default `google/gemini-3.8-flash`.
 - `REPLAY_RENDER_FPS`: default `3` (1–120).
-- `REPLAY_RENDER_SPEED`: default `1` (0.1–64).
+- `REPLAY_RENDER_SPEED`: optional fixed-speed override (0.1–64).
 
-The default now preserves normal speed: about 333 ms of original replay time
-between frames, instead of 2667 ms at 8×. Idle time is retained. The worker accepts
-queued legacy render profiles and claims them under the new profile; persisted
-render settings record actual overrides. Higher input density does not guarantee
-the provider examines every frame, and longer recordings cost more to process.
+At 3 FPS, the default preserves 1× speed for recordings up to one minute, uses 4×
+through 30 minutes, and 8× for longer recordings. This keeps full detail for short
+sessions while bounding video duration and model cost for long sessions. Idle time
+is retained. The worker accepts queued legacy render profiles and claims them under
+the adaptive profile; persisted render settings record the selected speed or fixed
+override. Higher input density does not guarantee the provider examines every frame.
 
 A bounded timeline of up to 500 recorded click, touch, scroll, and input-change
 events accompanies the video. It excludes URLs, DOM text, and entered values and

@@ -11,10 +11,26 @@ already queued recordings are checked again before downloading or rendering.
 1. Picks up automatic or manually requested jobs from PostgreSQL.
 2. Downloads rrweb recordings from S3 and renders them into a temporary video.
 3. Sends the video to OpenRouter for analysis.
-4. Validates the response and saves the summary and pain points to PostgreSQL.
+4. Batch-embeds pain points through OpenRouter (one request per summary).
+5. Atomically saves the summary, pain points, embeddings, memberships, and job success.
 
 Each instance processes one replay at a time. Failed jobs can retry, and outdated
 recordings cannot overwrite newer results. Temporary videos are deleted after processing.
+Grouping retrieves at most four project-local representatives with cosine similarity
+of at least 0.65, using exact pgvector search in PostgreSQL. Each representative is
+the oldest current member; it changes only when evidence becomes stale, is deleted,
+or is manually moved. Member vectors are not loaded into the worker or averaged.
+`typesafe/jev-1.13` compares all four candidates in one request per pain point.
+Points are assigned sequentially so later points in a summary see the actual groups
+created by earlier points, not speculative representatives. A score of at least 0.8 permits a join;
+otherwise the observation starts a new group. Scores are not calibrated probabilities.
+
+Embedding requests run before publication while the lease is renewed. Jev runs under
+the existing publication transaction and project lock, with a **five-second total
+deadline and no retries**. This briefly delays same-project publications and manual
+edits, but avoids stale decisions and duplicate concurrent groups. Failed, malformed,
+or timed-out decisions leave remaining observations separate; they do not fail the summary or
+fall back to vector-only joins. There is no separate worker or regrouping service.
 
 ## Configuration
 
@@ -27,6 +43,46 @@ Required environment variables:
 
 Set `REPLAY_S3_ENDPOINT` for S3-compatible storage and `REPLAY_S3_REGION` if needed
 (default: `us-east-1`).
+
+The embedding model defaults to `qwen/qwen3-embedding-8b` and may be overridden with
+`REPLAY_INSIGHTS_EMBED_MODEL`. Use a model supporting Matryoshka truncation to 1024
+dimensions. Canonical preparation is `ux-point-canonical-v2-1024`; the first 1024
+dimensions are normalized before storage.
+Embeddings from different models/preparation versions are never compared; switching
+models requires re-embedding existing observations to match against their groups.
+The cutoffs are provisional and must be reevaluated when changing models.
+
+Before deploying the worker/API, provision PostgreSQL with pgvector and apply the
+monorepo's consolidated `20260923092552_cross_replay_insights` migration. It creates
+the extension and `vector(1024)` column; the migration role needs permission to create
+the extension, or an administrator must create it first. Local Compose uses
+`pgvector/pgvector:pg18`. Do not run the old array-based worker against this schema.
+
+## Local insight backfill
+
+`--backfill-insights [--project UUID]` groups only current existing pain points
+without a membership. Existing automatic and manual memberships are never changed,
+so a fully backfilled database exits without paid calls. It accepts
+`REPLAY_INSIGHTS_ENV_FILE` (falling back to `REPLAY_EVAL_ENV_FILE`), requires a
+loopback `DATABASE_URL`, and handles at most `REPLAY_INSIGHTS_BACKFILL_LIMIT`
+points per invocation (default 100, maximum 1000):
+
+```sh
+REPLAY_INSIGHTS_ENV_FILE=../monorepo/apps/backend/.env \
+  cargo run -p replay-summarizer -- --backfill-insights
+```
+
+Backfill reuses embeddings when their model version and input hash match.
+To exercise real grouping without changing saved memberships, set
+`REPLAY_TEST_DATABASE_URL` and `OPENROUTER_API_KEY`, then run (makes paid Jev calls):
+
+```sh
+cargo test -p replay-summarizer evaluate_local_grouping -- --ignored --nocapture
+```
+
+This exercises within-summary and across-summary matching and idempotent publication
+using temporary grouping tables, then rolls back. Existing memberships are not
+treated as human-labelled truth.
 
 ## Prompt
 

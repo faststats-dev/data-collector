@@ -1,5 +1,6 @@
 mod config;
 mod evaluate;
+mod insights;
 mod jobs;
 mod object_store;
 mod renderer;
@@ -16,11 +17,14 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 const LEASE_RENEWAL_INTERVAL: Duration = Duration::from_secs(30);
 const PROGRESS_TIMEOUT: Duration = Duration::from_secs(60);
 const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(1800);
+const GROUPING_TIMEOUT: Duration = Duration::from_secs(300);
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    if let Ok(path) = std::env::var("REPLAY_EVAL_ENV_FILE") {
+    if let Ok(path) =
+        std::env::var("REPLAY_INSIGHTS_ENV_FILE").or_else(|_| std::env::var("REPLAY_EVAL_ENV_FILE"))
+    {
         dotenvy::from_path(path)?;
     }
     dotenvy::dotenv().ok();
@@ -34,6 +38,9 @@ async fn main() -> Result<()> {
                 .add_directive(tracing::Level::INFO.into()),
         )
         .init();
+    if args.get(1).map(String::as_str) == Some("--backfill-insights") {
+        return insights::backfill(&args[2..]).await;
+    }
     if std::env::args().any(|a| a == "--render-child") {
         return renderer::child_main().await;
     }
@@ -150,7 +157,7 @@ async fn run_job(
         .await
         .context("job preparation timed out")??
     else {
-        jobs::finish(pool, claim, "skipped", None).await?;
+        jobs::finish(pool, claim, "skipped", None, None).await?;
         return Ok(());
     };
     let renderer = match &mut *child {
@@ -178,7 +185,7 @@ async fn run_job(
                     if !renewed {
                         renderer.stop().await;
                         *child = None;
-                        jobs::finish(pool, claim, "superseded", None).await?;
+                        jobs::finish(pool, claim, "superseded", None, None).await?;
                         return Ok(());
                     }
                     last_renewal = Instant::now();
@@ -191,6 +198,11 @@ async fn run_job(
                     tracing::debug!(job_id = %claim.job_id, %stage, completed, total, "Replay progress");
                 }
                 renderer::Output::Complete { report, replay_time_ms, download_seconds, summary, metadata, replay_start_ms } => {
+                    // Embed outside the transaction while keeping the summary lease alive.
+                    let prepared = tokio::time::timeout(
+                        GROUPING_TIMEOUT,
+                        prepare_insights_with_lease(pool, claim, &summary),
+                    ).await.context("inline insight grouping timed out")??;
                     let report = serde_json::json!({
                         "render": report,
                         "replay_time_ms": replay_time_ms,
@@ -201,7 +213,7 @@ async fn run_job(
                         "model": metadata.model,
                         "metadata": metadata,
                     });
-                    let committed = jobs::finish(pool, claim, "succeeded", Some(report)).await?;
+                    let committed = jobs::finish(pool, claim, "succeeded", Some(report), Some(&prepared)).await?;
                     tracing::info!(job_id = %claim.job_id, committed, "Replay summary processed");
                     return Ok(());
                 }
@@ -211,6 +223,44 @@ async fn run_job(
                     return Ok(());
                 }
             }
+        }
+    }
+}
+
+async fn prepare_insights_with_lease(
+    pool: &sqlx::PgPool,
+    claim: &jobs::Claim,
+    summary: &summarize::ReplaySummary,
+) -> Result<insights::Prepared> {
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        // Renew before every potentially slow provider attempt; unlike renderer
+        // progress this stage has no 60-second no-progress deadline.
+        anyhow::ensure!(
+            jobs::renew(pool, claim, "grouping").await?,
+            "summary lease became stale during grouping"
+        );
+        let operation = insights::prepare_new(claim.project_id, summary);
+        tokio::pin!(operation);
+        let mut heartbeat = tokio::time::interval(LEASE_RENEWAL_INTERVAL);
+        heartbeat.tick().await;
+        let result = loop {
+            tokio::select! {
+                result = &mut operation => break result,
+                _ = heartbeat.tick() => anyhow::ensure!(
+                    jobs::renew(pool, claim, "grouping").await?,
+                    "summary lease became stale during grouping"
+                ),
+            }
+        };
+        match result {
+            Ok(value) => return Ok(value),
+            Err(error) if attempts < 3 && insights::is_transient(&error) => {
+                tracing::warn!(%error, attempts, "transient inline grouping failure");
+                tokio::time::sleep(Duration::from_secs(attempts * 2)).await;
+            }
+            Err(error) => return Err(error),
         }
     }
 }

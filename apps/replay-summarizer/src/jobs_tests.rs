@@ -14,9 +14,11 @@ async fn priority_manual_selection_and_fenced_summary_commit() -> Result<()> {
     sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
         .execute(&pool)
         .await?;
-    sqlx::query(sqlx::AssertSqlSafe(format!("SET search_path TO {schema}")))
-        .execute(&pool)
-        .await?;
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "SET search_path TO {schema}, public"
+    )))
+    .execute(&pool)
+    .await?;
     sqlx::raw_sql(r#"
         CREATE TABLE project(id uuid PRIMARY KEY, replay_storage_state text DEFAULT 'active', replay_storage_generation int DEFAULT 1);
         CREATE TABLE replay_sessions(project_id uuid, session_id text, window_id text, chunk_count int, is_complete boolean DEFAULT true, actual_duration_ms bigint DEFAULT 2000, deleted_at timestamp,
@@ -25,7 +27,10 @@ async fn priority_manual_selection_and_fenced_summary_commit() -> Result<()> {
             summary text, confidence double precision, replay_start_ms bigint, model text, response_id text, prompt_version text, schema_version int,
             cost_usd numeric, prompt_tokens bigint, completion_tokens bigint, latency_ms bigint, render_fps int, render_speed double precision,
             UNIQUE(project_id,session_id,window_id,storage_generation,chunk_count));
-        CREATE TABLE replay_summary_pain_points(summary_id uuid REFERENCES replay_summaries(id),position int,timestamp_ms bigint,description text,evidence text,confidence double precision);
+        CREATE TABLE replay_summary_pain_points(id uuid PRIMARY KEY,summary_id uuid REFERENCES replay_summaries(id),position int,timestamp_ms bigint,description text,evidence text,confidence double precision,surface text,action text,failure text,consequence text);
+        CREATE TABLE replay_insights(id uuid PRIMARY KEY,project_id uuid,title text,description text,status text DEFAULT 'active');
+        CREATE TABLE replay_insight_embeddings(pain_point_id uuid PRIMARY KEY,project_id uuid,model_version text,input_hash text,input_text text,embedding vector(1024));
+        CREATE TABLE replay_insight_memberships(pain_point_id uuid PRIMARY KEY,insight_id uuid,manual boolean DEFAULT false,match_reason text,created_at timestamp DEFAULT clock_timestamp());
         CREATE TABLE replay_summary_settings(project_id uuid PRIMARY KEY, settings jsonb);
         CREATE TABLE replay_snapshots(id uuid DEFAULT gen_random_uuid(), project_id uuid, session_id text, window_id text, storage_generation int DEFAULT 1,
             s3_key text DEFAULT 'fixture',content_encoding text DEFAULT 'identity',compressed_bytes bigint DEFAULT 1,
@@ -101,7 +106,7 @@ async fn priority_manual_selection_and_fenced_summary_commit() -> Result<()> {
     sqlx::query("DELETE FROM replay_summary_settings")
         .execute(&pool)
         .await?;
-    let report = json!({"summary":{"summary":"Checkout failed", "confidence":0.8, "painPoints":[{"timestampMs":10,"description":"Repeated submit","evidence":"Error persisted after retry","confidence":0.8}]}, "replay_start_ms":1700000000000_i64, "metadata":{"model":"test-model","responseId":"test-id","promptVersion":"v2","schemaVersion":2,"costUsd":0.0123,"promptTokens":123,"completionTokens":45,"latencyMs":100,"renderFps":3,"renderSpeed":1.0}});
+    let report = json!({"summary":{"summary":"Checkout failed", "confidence":0.8, "painPoints":[{"timestampMs":10,"description":"Repeated submit","evidence":"Error persisted after retry","confidence":0.8,"surface":"checkout","action":"submit order","failure":"error persisted","consequence":"order was not confirmed"}]}, "replay_start_ms":1700000000000_i64, "metadata":{"model":"test-model","responseId":"test-id","promptVersion":"v4","schemaVersion":3,"costUsd":0.0123,"promptTokens":123,"completionTokens":45,"latencyMs":100,"renderFps":3,"renderSpeed":1.0}});
     let stale = Claim {
         token: manual.token - 1,
         manual: true,
@@ -112,10 +117,36 @@ async fn priority_manual_selection_and_fenced_summary_commit() -> Result<()> {
         storage_generation: 1,
         chunk_count: 1,
     };
-    assert!(!finish(&pool, &stale, "succeeded", Some(report.clone())).await?);
-    assert!(finish(&pool, &manual, "succeeded", Some(report.clone())).await?);
+    let prepared = crate::insights::test_prepared(project, None);
     assert!(
-        !finish(&pool, &manual, "succeeded", Some(report.clone())).await?,
+        !finish(
+            &pool,
+            &stale,
+            "succeeded",
+            Some(report.clone()),
+            Some(&prepared)
+        )
+        .await?
+    );
+    assert!(
+        finish(
+            &pool,
+            &manual,
+            "succeeded",
+            Some(report.clone()),
+            Some(&prepared)
+        )
+        .await?
+    );
+    assert!(
+        !finish(
+            &pool,
+            &manual,
+            "succeeded",
+            Some(report.clone()),
+            Some(&prepared)
+        )
+        .await?,
         "duplicate completion is fenced"
     );
     let saved: String =
@@ -132,6 +163,57 @@ async fn priority_manual_selection_and_fenced_summary_commit() -> Result<()> {
         .fetch_one(&pool)
         .await?;
     assert_eq!(points, 1);
+    let facet: Option<String> =
+        sqlx::query_scalar("SELECT surface FROM replay_summary_pain_points LIMIT 1")
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(facet.as_deref(), Some("checkout"));
+    let point_id: Uuid = sqlx::query_scalar("SELECT id FROM replay_summary_pain_points LIMIT 1")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM replay_insight_memberships")
+            .fetch_one(&pool)
+            .await?,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM replay_insights")
+            .fetch_one(&pool)
+            .await?,
+        1
+    );
+    sqlx::query("UPDATE replay_insight_memberships SET manual=true WHERE pain_point_id=$1")
+        .bind(point_id)
+        .execute(&pool)
+        .await?;
+    let original_group: Uuid = sqlx::query_scalar(
+        "SELECT insight_id FROM replay_insight_memberships WHERE pain_point_id=$1",
+    )
+    .bind(point_id)
+    .fetch_one(&pool)
+    .await?;
+    let raced = crate::insights::test_prepared(project, Some(point_id));
+    let mut tx = pool.begin().await?;
+    crate::insights::save(&mut tx, &raced).await?;
+    tx.commit().await?;
+    assert_eq!(
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT insight_id FROM replay_insight_memberships WHERE pain_point_id=$1"
+        )
+        .bind(point_id)
+        .fetch_one(&pool)
+        .await?,
+        original_group,
+        "manual membership is preserved"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM replay_insights")
+            .fetch_one(&pool)
+            .await?,
+        1,
+        "manual race creates no orphan group"
+    );
     let automatic = claim(&pool).await?.unwrap();
     assert!(
         prepare(&pool, &automatic, 1024).await?.is_none(),
@@ -143,7 +225,7 @@ async fn priority_manual_selection_and_fenced_summary_commit() -> Result<()> {
         .execute(&pool)
         .await?;
     assert!(
-        !finish(&pool, &automatic, "skipped", None).await?,
+        !finish(&pool, &automatic, "skipped", None, None).await?,
         "promotion must survive an in-flight skip"
     );
     let promoted = claim(&pool).await?.unwrap();
@@ -153,7 +235,7 @@ async fn priority_manual_selection_and_fenced_summary_commit() -> Result<()> {
     sqlx::query("UPDATE replay_sessions SET chunk_count=2 WHERE session_id='automatic'")
         .execute(&pool)
         .await?;
-    assert!(finish(&pool, &promoted, "succeeded", Some(report)).await?);
+    assert!(finish(&pool, &promoted, "succeeded", Some(report), Some(&prepared)).await?);
     let state: String = sqlx::query_scalar("SELECT state FROM replay_summary_jobs WHERE id=$1")
         .bind(promoted.job_id)
         .fetch_one(&pool)

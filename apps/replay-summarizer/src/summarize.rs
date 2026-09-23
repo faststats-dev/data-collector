@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{io::Read, path::Path, time::Duration};
 
-pub const PROMPT_VERSION: &str = "replay-summary-v3";
-pub const SCHEMA_VERSION: u32 = 2;
+pub const PROMPT_VERSION: &str = "replay-summary-v4-insights";
+pub const SCHEMA_VERSION: u32 = 3;
 pub const MODEL: &str = "google/gemini-3.8-flash";
 const PROMPT: &str = include_str!("../prompt.md");
 const MAX_VIDEO_BYTES: u64 = 64 * 1024 * 1024;
@@ -20,6 +20,11 @@ pub struct PainPoint {
     pub description: String,
     pub evidence: String,
     pub confidence: f64,
+    /// Optional normalized facets for cross-replay grouping. Null means not visible.
+    pub surface: Option<String>,
+    pub action: Option<String>,
+    pub failure: Option<String>,
+    pub consequence: Option<String>,
 }
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -63,12 +68,16 @@ fn request(
                         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
                         "painPoints": {"type": "array", "items": {
                             "type": "object", "additionalProperties": false,
-                            "required": ["timestampMs", "description", "evidence", "confidence"],
+                            "required": ["timestampMs", "description", "evidence", "confidence", "surface", "action", "failure", "consequence"],
                             "properties": {
                                 "timestampMs": {"type": "integer", "minimum": 0, "description": "Original elapsed replay milliseconds shown in the video footer."},
                                 "description": {"type": "string", "description": "The observed UX problem and its visible consequence, excluding replay artifacts and speculation."},
                                 "evidence": {"type": "string", "description": "Concrete visible observations supporting this problem, without inferring a cause."},
-                                "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+                                "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                                "surface": {"type": ["string", "null"], "description": "Visible product area or control, or null when not identifiable."},
+                                "action": {"type": ["string", "null"], "description": "Observed user action, or null. Never include private input values."},
+                                "failure": {"type": ["string", "null"], "description": "Observed failure state only, or null. Do not infer a cause."},
+                                "consequence": {"type": ["string", "null"], "description": "Visible consequence for the user, or null."}
                             }
                         }}
                     }
@@ -115,6 +124,19 @@ fn parse(response: &Value, duration_ms: u64) -> Result<ReplaySummary> {
             !point.description.trim().is_empty() && point.description.chars().count() <= 4000,
             "invalid pain point description"
         );
+        for facet in [
+            &point.surface,
+            &point.action,
+            &point.failure,
+            &point.consequence,
+        ] {
+            ensure!(
+                facet
+                    .as_ref()
+                    .is_none_or(|value| !value.trim().is_empty() && value.chars().count() <= 1000),
+                "invalid pain point facet"
+            );
+        }
     }
     summary.pain_points.sort_by_key(|point| point.timestamp_ms);
     Ok(summary)
@@ -274,6 +296,9 @@ mod tests {
                 for point in points {
                     point["confidence"] = json!(0.8);
                     point["evidence"] = json!("Visible error after submit.");
+                    for facet in ["surface", "action", "failure", "consequence"] {
+                        point[facet] = Value::Null;
+                    }
                 }
             }
             json!({"choices":[{"finish_reason":"stop", "message":{"content":content.to_string()}}]})

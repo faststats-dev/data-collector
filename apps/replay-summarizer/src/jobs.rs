@@ -7,7 +7,7 @@ use uuid::Uuid;
 use serde_json::Value;
 
 pub const PROFILE: &str = "h264-3fps-adaptive-v3";
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Claim {
     pub job_id: Uuid,
     pub project_id: Uuid,
@@ -175,10 +175,16 @@ pub async fn finish(
     claim: &Claim,
     state: &str,
     report: Option<serde_json::Value>,
+    insights: Option<&crate::insights::Prepared>,
 ) -> Result<bool> {
     // Lock the project and session so deletion or ingestion cannot race publication.
     let mut tx = pool.begin().await?;
     sqlx::query("SET LOCAL statement_timeout = '15s'")
+        .execute(&mut *tx)
+        .await?;
+    // Global order shared with manual merges: advisory, project/session, summary job.
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
+        .bind(claim.project_id.to_string())
         .execute(&mut *tx)
         .await?;
     let active = sqlx::query_scalar::<_, bool>(
@@ -309,12 +315,19 @@ pub async fn finish(
         .bind(metadata.prompt_tokens.map(|n| n as i64)).bind(metadata.completion_tokens.map(|n| n as i64))
         .bind(metadata.latency_ms as i64).bind(metadata.render_fps as i32).bind(metadata.render_speed)
         .execute(&mut *tx).await?;
+        let prepared = insights.context("missing prepared insight grouping")?;
+        ensure!(
+            prepared.len() == summary.pain_points.len(),
+            "prepared pain point count mismatch"
+        );
         for (position, point) in summary.pain_points.iter().enumerate() {
-            sqlx::query("INSERT INTO replay_summary_pain_points (summary_id,position,timestamp_ms,description,evidence,confidence) VALUES($1,$2,$3,$4,$5,$6)")
-                .bind(id).bind(position as i32).bind(point.timestamp_ms as i64)
+            sqlx::query("INSERT INTO replay_summary_pain_points (id,summary_id,position,timestamp_ms,description,evidence,confidence,surface,action,failure,consequence) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)")
+                .bind(prepared.point_id(position)).bind(id).bind(position as i32).bind(point.timestamp_ms as i64)
                 .bind(&point.description).bind(&point.evidence).bind(point.confidence)
+                .bind(&point.surface).bind(&point.action).bind(&point.failure).bind(&point.consequence)
                 .execute(&mut *tx).await?;
         }
+        crate::insights::save(&mut tx, prepared).await?;
     }
     tx.commit().await?;
     Ok(updated)

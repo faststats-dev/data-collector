@@ -69,6 +69,9 @@ Additional evidence rules
 - Each pain point must include evidence: the concrete visible sequence or message
   supporting it. The description explains the UX problem and visible consequence.
   Ordinary successful validation and repeated clicks alone do not prove friction.
+  Also provide nullable surface, action, failure, and consequence fields. Keep each
+  field factual and concise. Use null when it is not visibly supported; never infer
+  a technical or root cause, and never copy private input values into these fields.
   Do not report normal inline validation that the user immediately corrects as a
   pain point; mention it in the summary only when it materially changes the flow.
 - Supply confidence between 0 and 1 for the summary and each pain point. This is

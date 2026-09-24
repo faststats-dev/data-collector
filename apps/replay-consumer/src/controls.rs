@@ -3,6 +3,13 @@ use replay_message::ReplaySessionPatch;
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Acceptance {
+    Chunk,
+    EmptyTerminal,
+    Duplicate,
+}
+
 pub async fn lock_stream(
     tx: &mut Transaction<'_, Postgres>,
     project: Uuid,
@@ -17,46 +24,97 @@ pub async fn lock_stream(
     Ok(())
 }
 
-/// Caller has verified the generation and holds the stream lock. A terminal
-/// sequence is remembered even when its snapshot has not arrived yet.
-#[allow(clippy::too_many_arguments)]
+/// Caller holds the project generation share lock and recording advisory lock.
+/// Data contributes coverage only after its metadata insert succeeds.
 pub async fn record_chunk(
     tx: &mut Transaction<'_, Postgres>,
-    project: Uuid,
-    generation: i32,
-    session: &str,
-    window: &str,
-    sequence: i64,
-    terminal: bool,
-    has_data: bool,
+    chunk: &replay_message::ReplayChunk,
+    acceptance: Acceptance,
     grace: i32,
 ) -> Result<(), sqlx::Error> {
-    let changed = sqlx::query(r#"
-        INSERT INTO replay_recording_controls
-            (project_id, storage_generation, session_id, window_id, last_chunk_sequence, terminal_sequence, terminal_received_at)
-        VALUES ($1,$2,$3,$4,CASE WHEN $7 THEN $5 ELSE -1 END,CASE WHEN $6 THEN $5 END,CASE WHEN $6 THEN NOW() END)
-        ON CONFLICT (project_id, storage_generation, session_id, window_id) DO UPDATE SET
-            last_chunk_sequence = GREATEST(replay_recording_controls.last_chunk_sequence, EXCLUDED.last_chunk_sequence),
-            terminal_sequence = GREATEST(replay_recording_controls.terminal_sequence, EXCLUDED.terminal_sequence),
-            terminal_received_at = CASE WHEN EXCLUDED.terminal_sequence > COALESCE(replay_recording_controls.terminal_sequence,-1) THEN NOW() ELSE replay_recording_controls.terminal_received_at END,
-            updated_at = NOW()
-        WHERE EXCLUDED.last_chunk_sequence > replay_recording_controls.last_chunk_sequence
-           OR EXCLUDED.terminal_sequence > COALESCE(replay_recording_controls.terminal_sequence,-1)
-    "#).bind(project).bind(generation).bind(session).bind(window).bind(sequence).bind(terminal).bind(has_data)
-        .execute(&mut **tx).await?.rows_affected() > 0;
-    // New data (including late lower sequences) resets a valid terminal grace.
-    // Retried empty markers do not change deadlines or reopen finished revisions.
-    sqlx::query(r#"
+    use replay_message::coverage::Coverage;
+    let started = std::time::Instant::now();
+    let has_data = acceptance == Acceptance::Chunk;
+    let deleted: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM replay_sessions WHERE project_id=$1 AND session_id=$2 AND window_id=$3 AND deleted_at IS NOT NULL)")
+        .bind(chunk.project_id).bind(&chunk.session_id).bind(&chunk.window_id).fetch_one(&mut **tx).await?;
+    if deleted {
+        return Ok(());
+    }
+    sqlx::query("INSERT INTO replay_recording_controls(project_id,storage_generation,session_id,window_id) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING")
+        .bind(chunk.project_id).bind(chunk.storage_generation).bind(&chunk.session_id).bind(&chunk.window_id).execute(&mut **tx).await?;
+    let legacy = sqlx::query_scalar::<_,bool>("SELECT coverage_version=0 FROM replay_sessions WHERE project_id=$1 AND session_id=$2 AND window_id=$3 FOR UPDATE")
+        .bind(chunk.project_id).bind(&chunk.session_id).bind(&chunk.window_id).fetch_optional(&mut **tx).await?.unwrap_or(false);
+    let sqlx::types::Json(mut coverage): sqlx::types::Json<Coverage> = sqlx::query_scalar("SELECT jsonb_set(coverage,'{terminal}',COALESCE(to_jsonb(terminal_sequence),'null'::jsonb)) FROM replay_recording_controls WHERE project_id=$1 AND storage_generation=$2 AND session_id=$3 AND window_id=$4 FOR UPDATE")
+        .bind(chunk.project_id).bind(chunk.storage_generation).bind(&chunk.session_id).bind(&chunk.window_id).fetch_one(&mut **tx).await?;
+    let before = coverage.clone();
+    // Historical chunks did not attest an initial sequence. Mark uncertainty
+    // without reading their payloads or scanning accepted snapshot metadata.
+    if legacy && coverage.unknown.is_none() {
+        coverage.unknown = Some(replay_message::coverage::UnknownReason::LegacyContract);
+    }
+    if acceptance != Acceptance::Duplicate {
+        coverage.accept(
+            chunk.sequence,
+            chunk.sequence_contract_version,
+            chunk.is_final,
+        );
+    } else if chunk.is_final {
+        // A duplicate payload can update its terminal boundary, but cannot attest
+        // a new sequence merely by reusing an accepted batch identity.
+        coverage.terminal = Some(
+            coverage
+                .terminal
+                .map_or(chunk.sequence, |old| old.max(chunk.sequence)),
+        );
+        if chunk.sequence_contract_version != Some(1) && coverage.unknown.is_none() {
+            coverage.unknown = Some(replay_message::coverage::UnknownReason::LegacyContract);
+        }
+    }
+    if chunk.is_final {
+        let boundary = chunk.last_sequence.unwrap_or(chunk.sequence);
+        coverage.terminal = Some(coverage.terminal.map_or(boundary, |old| old.max(boundary)));
+    }
+    let changed = legacy || before != coverage;
+    if !changed && !has_data {
+        return Ok(());
+    }
+    if changed {
+        sqlx::query("UPDATE replay_recording_controls SET coverage=$5, coverage_complete=$6, terminal_sequence=$7, updated_at=NOW() WHERE project_id=$1 AND storage_generation=$2 AND session_id=$3 AND window_id=$4")
+            .bind(chunk.project_id).bind(chunk.storage_generation).bind(&chunk.session_id).bind(&chunk.window_id)
+            .bind(sqlx::types::Json(&coverage)).bind(coverage.complete()).bind(coverage.terminal).execute(&mut **tx).await?;
+    }
+    sqlx::query(
+        r#"
         UPDATE replay_sessions s SET
             has_errors = s.has_errors OR c.has_errors,
             has_poor_vitals = s.has_poor_vitals OR c.has_poor_vitals,
-            finalize_after = CASE WHEN ($6 OR $7) AND NOT s.is_complete AND c.terminal_sequence >= c.last_chunk_sequence
-                THEN NOW() + make_interval(secs => $5) ELSE s.finalize_after END
+            coverage = $8,
+            coverage_version = 1,
+            completeness_revision = s.completeness_revision + CASE WHEN $5 OR $6 THEN 1 ELSE 0 END,
+            finalization_state = CASE WHEN $5 OR $6 THEN 'open' ELSE s.finalization_state END,
+            finalized_at = CASE WHEN $5 OR $6 THEN NULL ELSE s.finalized_at END,
+            finalize_after = CASE WHEN $5 OR $6 THEN
+                CASE WHEN c.coverage_complete THEN NOW() + make_interval(secs => $7)
+                ELSE COALESCE(s.finalize_after, NOW() + make_interval(secs => $7)) END
+                ELSE s.finalize_after END
         FROM replay_recording_controls c
         WHERE s.project_id=$1 AND s.session_id=$3 AND s.window_id=$4 AND s.deleted_at IS NULL
           AND c.project_id=$1 AND c.storage_generation=$2 AND c.session_id=$3 AND c.window_id=$4
-    "#).bind(project).bind(generation).bind(session).bind(window).bind(grace).bind(has_data).bind(changed)
-        .execute(&mut **tx).await?;
+    "#,
+    )
+    .bind(chunk.project_id)
+    .bind(chunk.storage_generation)
+    .bind(&chunk.session_id)
+    .bind(&chunk.window_id)
+    .bind(has_data)
+    .bind(changed)
+    .bind(grace)
+    .bind(sqlx::types::Json(&coverage))
+    .execute(&mut **tx)
+    .await?;
+    tracing::info!(elapsed_ms=started.elapsed().as_secs_f64()*1000.0,
+        range_count=coverage.ranges.len(),unknown=?coverage.unknown,changed,has_data,
+        "Replay coverage updated");
     Ok(())
 }
 

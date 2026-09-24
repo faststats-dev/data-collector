@@ -223,7 +223,7 @@ pub(crate) async fn save(tx: &mut Transaction<'_, Postgres>, prepared: &Prepared
                 WHERE m.insight_id = i.id AND e.project_id = $1 AND rs.project_id = $1
                   AND e.model_version = $2 AND pr.replay_storage_state = 'active'
                   AND rs.storage_generation = pr.replay_storage_generation
-                  AND rs.chunk_count = s.chunk_count AND s.deleted_at IS NULL
+                  AND rs.chunk_count = s.chunk_count AND rs.completeness_revision = s.completeness_revision AND s.deleted_at IS NULL
                 ORDER BY m.created_at, m.pain_point_id LIMIT 1
             ) anchor ON true
             WHERE i.project_id = $1 AND i.status <> 'merged'

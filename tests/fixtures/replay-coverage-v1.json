@@ -1,0 +1,209 @@
+[
+  {
+    "name": "missing_first",
+    "messages": [
+      [
+        1,
+        1,
+        false
+      ],
+      [
+        2,
+        1,
+        true
+      ]
+    ],
+    "complete": false,
+    "coverage": {
+      "ranges": [
+        [
+          1,
+          2
+        ]
+      ],
+      "terminal": 2,
+      "unknown": null
+    }
+  },
+  {
+    "name": "missing_middle",
+    "messages": [
+      [
+        0,
+        1,
+        false
+      ],
+      [
+        2,
+        1,
+        true
+      ]
+    ],
+    "complete": false,
+    "coverage": {
+      "ranges": [
+        [
+          0,
+          0
+        ],
+        [
+          2,
+          2
+        ]
+      ],
+      "terminal": 2,
+      "unknown": null
+    }
+  },
+  {
+    "name": "out_of_order_empty_terminal",
+    "messages": [
+      [
+        2,
+        1,
+        true
+      ],
+      [
+        0,
+        1,
+        false
+      ],
+      [
+        1,
+        1,
+        false
+      ]
+    ],
+    "complete": true,
+    "coverage": {
+      "ranges": [
+        [
+          0,
+          2
+        ]
+      ],
+      "terminal": 2,
+      "unknown": null
+    }
+  },
+  {
+    "name": "absent_terminal",
+    "messages": [
+      [
+        0,
+        1,
+        false
+      ]
+    ],
+    "complete": false,
+    "coverage": {
+      "ranges": [
+        [
+          0,
+          0
+        ]
+      ],
+      "terminal": null,
+      "unknown": null
+    }
+  },
+  {
+    "name": "legacy_unknown",
+    "messages": [
+      [
+        0,
+        null,
+        false
+      ],
+      [
+        1,
+        null,
+        true
+      ]
+    ],
+    "complete": false,
+    "coverage": {
+      "ranges": [
+        [
+          0,
+          1
+        ]
+      ],
+      "terminal": 1,
+      "unknown": "legacy_contract"
+    }
+  },
+  {
+    "name": "terminal_before_data",
+    "messages": [
+      [
+        2,
+        1,
+        true
+      ]
+    ],
+    "complete": false,
+    "coverage": {
+      "ranges": [
+        [
+          2,
+          2
+        ]
+      ],
+      "terminal": 2,
+      "unknown": null
+    }
+  },
+  {
+    "name": "duplicate_terminal",
+    "messages": [
+      [
+        0,
+        1,
+        true
+      ],
+      [
+        0,
+        1,
+        true
+      ]
+    ],
+    "complete": true,
+    "coverage": {
+      "ranges": [
+        [
+          0,
+          0
+        ]
+      ],
+      "terminal": 0,
+      "unknown": null
+    }
+  },
+  {
+    "name": "late_data",
+    "messages": [
+      [
+        0,
+        1,
+        true
+      ],
+      [
+        1,
+        1,
+        false
+      ]
+    ],
+    "complete": false,
+    "coverage": {
+      "ranges": [
+        [
+          0,
+          1
+        ]
+      ],
+      "terminal": 0,
+      "unknown": null
+    }
+  }
+]

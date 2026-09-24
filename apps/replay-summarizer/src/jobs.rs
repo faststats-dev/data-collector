@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
+use replay_message::coverage::{Coverage, FinalizationState};
 use serde_json::Value;
 
 pub const PROFILE: &str = "h264-3fps-adaptive-v3";
@@ -15,6 +16,9 @@ pub struct Claim {
     pub window_id: String,
     pub storage_generation: i32,
     pub chunk_count: i32,
+    pub completeness_revision: i32,
+    pub coverage: Coverage,
+    pub finalization_state: FinalizationState,
     pub token: i32,
     pub manual: bool,
 }
@@ -31,6 +35,8 @@ pub struct Input {
     pub project_id: Uuid,
     pub chunks: Vec<Chunk>,
     pub max_decoded_bytes: usize,
+    pub coverage: Coverage,
+    pub finalization_state: FinalizationState,
 }
 
 pub async fn claim(pool: &PgPool) -> Result<Option<Claim>> {
@@ -76,6 +82,12 @@ pub async fn claim(pool: &PgPool) -> Result<Option<Claim>> {
         window_id: row.try_get("window_id")?,
         storage_generation: row.try_get("storage_generation")?,
         chunk_count: row.try_get("chunk_count")?,
+        completeness_revision: row.try_get("completeness_revision")?,
+        coverage: row.try_get::<sqlx::types::Json<Coverage>, _>("coverage")?.0,
+        finalization_state: row
+            .try_get::<String, _>("finalization_state")?
+            .parse()
+            .map_err(anyhow::Error::msg)?,
     }))
 }
 
@@ -92,7 +104,7 @@ pub async fn prepare(pool: &PgPool, claim: &Claim, limit: usize) -> Result<Optio
         SELECT to_jsonb(s) AS attributes,COALESCE(cfg.settings, '{"mode":"off"}'::jsonb) AS settings FROM replay_sessions s
         JOIN project p ON p.id=s.project_id LEFT JOIN replay_summary_settings cfg ON cfg.project_id=s.project_id
         WHERE s.project_id=$1 AND s.session_id=$2 AND s.window_id=$3 AND s.deleted_at IS NULL
-          AND p.replay_storage_state='active' AND p.replay_storage_generation=$4 AND s.chunk_count=$5 AND s.is_complete AND s.actual_duration_ms >= 2000
+          AND p.replay_storage_state='active' AND p.replay_storage_generation=$4 AND s.chunk_count=$5 AND s.completeness_revision=$6 AND replay_analysis_eligible(s.finalization_state,s.has_full_snapshot,s.chunk_count,s.actual_duration_ms)
         "#,
     )
     .bind(claim.project_id)
@@ -100,6 +112,7 @@ pub async fn prepare(pool: &PgPool, claim: &Claim, limit: usize) -> Result<Optio
     .bind(&claim.window_id)
     .bind(claim.storage_generation)
     .bind(claim.chunk_count)
+    .bind(claim.completeness_revision)
     .fetch_optional(&mut *tx)
     .await?;
     let selected = match row {
@@ -148,6 +161,8 @@ pub async fn prepare(pool: &PgPool, claim: &Claim, limit: usize) -> Result<Optio
         project_id: claim.project_id,
         chunks,
         max_decoded_bytes: limit,
+        coverage: claim.coverage.clone(),
+        finalization_state: claim.finalization_state,
     }))
 }
 
@@ -158,7 +173,7 @@ pub async fn renew(pool: &PgPool, claim: &Claim, stage: &str) -> Result<bool> {
         FROM replay_sessions s,project p
         WHERE j.id=$1 AND j.execution_token=$2 AND j.state='running' AND j.lease_until>NOW()
           AND s.project_id=j.project_id AND s.session_id=j.session_id AND s.window_id=j.window_id
-          AND s.chunk_count=j.chunk_count AND s.deleted_at IS NULL
+          AND s.chunk_count=j.chunk_count AND s.completeness_revision=j.completeness_revision AND s.finalization_state<>'open' AND s.deleted_at IS NULL
           AND p.id=j.project_id AND p.replay_storage_state='active' AND p.replay_storage_generation=j.storage_generation
         "#,
     )
@@ -200,7 +215,7 @@ pub async fn finish(
     .unwrap_or(false);
     let current = sqlx::query_scalar::<_, bool>(
         r#"
-        SELECT chunk_count=$4 AND deleted_at IS NULL AND COALESCE(actual_duration_ms, 0) >= 2000 FROM replay_sessions
+        SELECT chunk_count=$4 AND completeness_revision=$5 AND deleted_at IS NULL AND replay_analysis_eligible(finalization_state,has_full_snapshot,chunk_count,actual_duration_ms) FROM replay_sessions
         WHERE project_id=$1 AND session_id=$2 AND window_id=$3 FOR UPDATE
         "#,
     )
@@ -208,6 +223,7 @@ pub async fn finish(
     .bind(&claim.session_id)
     .bind(&claim.window_id)
     .bind(claim.chunk_count)
+    .bind(claim.completeness_revision)
     .fetch_optional(&mut *tx)
     .await?
     .unwrap_or(false);
@@ -304,8 +320,8 @@ pub async fn finish(
         sqlx::query(r#"
             INSERT INTO replay_summaries (id, project_id, session_id, window_id, storage_generation,
                 chunk_count, summary, confidence, replay_start_ms, model, response_id, prompt_version,
-                schema_version, cost_usd, prompt_tokens, completion_tokens, latency_ms, render_fps, render_speed)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::text::numeric,$15,$16,$17,$18,$19)
+                schema_version, cost_usd, prompt_tokens, completion_tokens, latency_ms, render_fps, render_speed, completeness_revision, coverage, finalization_state)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::text::numeric,$15,$16,$17,$18,$19,$20,$21,$22)
         "#)
         .bind(id).bind(claim.project_id).bind(&claim.session_id).bind(&claim.window_id)
         .bind(claim.storage_generation).bind(claim.chunk_count).bind(&summary.summary).bind(summary.confidence)
@@ -314,6 +330,7 @@ pub async fn finish(
         .bind(metadata.schema_version as i32).bind(metadata.cost_usd.map(|cost| cost.to_string()))
         .bind(metadata.prompt_tokens.map(|n| n as i64)).bind(metadata.completion_tokens.map(|n| n as i64))
         .bind(metadata.latency_ms as i64).bind(metadata.render_fps as i32).bind(metadata.render_speed)
+        .bind(claim.completeness_revision).bind(sqlx::types::Json(&claim.coverage)).bind(claim.finalization_state.as_str())
         .execute(&mut *tx).await?;
         let prepared = insights.context("missing prepared insight grouping")?;
         ensure!(

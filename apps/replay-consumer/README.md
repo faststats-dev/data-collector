@@ -75,8 +75,9 @@ signals cannot affect a reset project. Duplicate signals do not extend deadlines
 Explicit finals use a 10-second grace period (`REPLAY_FINAL_GRACE_SECONDS`);
 missing finals retain the 35-minute inactivity fallback (`REPLAY_FINAL_IDLE_SECONDS`).
 The five-second finalizer atomically creates a ready PostgreSQL job and marks the
-revision complete. The summarizer claims that job directly from PostgreSQL; there
-is no completion Kafka topic or publication loop.
+revision finalized as `complete` only with proven accepted sequence coverage,
+or `timed_out_incomplete` when coverage is missing or unknown. The summarizer claims
+that job directly from PostgreSQL; there is no completion Kafka topic or publication loop.
 
 Malformed commands are dropped with a warning containing their topic, partition
 and offset. Their offsets advance with the completed batch; payloads are not retained.

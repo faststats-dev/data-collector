@@ -162,15 +162,13 @@ async fn handle_message(
     };
     match command {
         ReplayCommand::Snapshot(chunk) => {
+            chunk.validate_sequence().map_err(str::to_owned)?;
             if chunk.events.is_empty() {
                 if chunk.is_final {
                     storage::record_terminal_hint(
                         pool,
-                        chunk.project_id,
-                        &chunk.session_id,
-                        &chunk.window_id,
-                        chunk.storage_generation,
-                        chunk.sequence,
+                        &chunk,
+                        crate::controls::Acceptance::EmptyTerminal,
                         config.final_grace_seconds,
                     )
                     .await

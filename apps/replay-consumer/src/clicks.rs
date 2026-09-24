@@ -210,6 +210,12 @@ pub async fn refresh(
     ).bind(project).bind(session).bind(window).fetch_one(&mut **tx).await?;
     let previous = stored.and_then(|value| serde_json::from_value::<Checkpoint>(value).ok());
     let mut checkpoint = match previous {
+        _ if count == 1 => {
+            // The accepted chunk is already in memory; there is no history to load.
+            let mut state = Checkpoint::new(generation, count);
+            state.extend(new_chunk.signals);
+            Some(state)
+        }
         Some(mut state)
             if state.version == VERSION
                 && state.generation == generation

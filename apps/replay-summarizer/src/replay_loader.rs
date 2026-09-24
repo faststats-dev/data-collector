@@ -79,7 +79,11 @@ pub async fn load(
             events.append(&mut part);
         }
     }
-    prepare(events).map_err(Failure::input)
+    let mut replay = prepare(events).map_err(Failure::input)?;
+    replay.evidence["recordingCoverage"] =
+        serde_json::to_value(input.coverage).map_err(Failure::input)?;
+    replay.evidence["finalizationState"] = serde_json::json!(input.finalization_state);
+    Ok(replay)
 }
 
 fn prepare(mut events: Vec<Event>) -> Result<LoadedReplay> {

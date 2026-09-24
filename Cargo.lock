@@ -3302,6 +3302,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 name = "replay-consumer"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "aws-sdk-s3",
  "dotenvy",
  "futures-util",
@@ -3367,6 +3368,7 @@ dependencies = [
  "base64 0.22.1",
  "dotenvy",
  "futures-util",
+ "replay-message",
  "replay-render-protocol",
  "reqwest",
  "serde",

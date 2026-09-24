@@ -55,9 +55,9 @@ async fn priority_manual_selection_and_fenced_summary_commit() -> Result<()> {
     .await?;
     sqlx::raw_sql(r#"
         CREATE TABLE project(id uuid PRIMARY KEY, replay_storage_state text DEFAULT 'active', replay_storage_generation int DEFAULT 1);
-        CREATE TABLE replay_sessions(project_id uuid, session_id text, window_id text, chunk_count int, is_complete boolean DEFAULT true, actual_duration_ms bigint DEFAULT 2000, deleted_at timestamp,
+        CREATE TABLE replay_sessions(project_id uuid, session_id text, window_id text, chunk_count int, finalization_state text DEFAULT 'complete', has_full_snapshot boolean DEFAULT true, completeness_revision int DEFAULT 1, actual_duration_ms bigint DEFAULT 2000, deleted_at timestamp,
             PRIMARY KEY(project_id,session_id,window_id));
-        CREATE TABLE replay_summaries(id uuid PRIMARY KEY, project_id uuid, session_id text, window_id text, storage_generation int, chunk_count int,
+        CREATE TABLE replay_summaries(id uuid PRIMARY KEY, project_id uuid, session_id text, window_id text, storage_generation int, chunk_count int, completeness_revision int, coverage jsonb, finalization_state text,
             summary text, confidence double precision, replay_start_ms bigint, model text, response_id text, prompt_version text, schema_version int,
             cost_usd numeric, prompt_tokens bigint, completion_tokens bigint, latency_ms bigint, render_fps int, render_speed double precision,
             UNIQUE(project_id,session_id,window_id,storage_generation,chunk_count));
@@ -69,12 +69,25 @@ async fn priority_manual_selection_and_fenced_summary_commit() -> Result<()> {
         CREATE TABLE replay_snapshots(id uuid DEFAULT gen_random_uuid(), project_id uuid, session_id text, window_id text, storage_generation int DEFAULT 1,
             s3_key text DEFAULT 'fixture',content_encoding text DEFAULT 'identity',compressed_bytes bigint DEFAULT 1,
             first_sequence bigint,sequence bigint,first_event_timestamp_ms bigint,created_at timestamp DEFAULT NOW());
-        CREATE TABLE replay_summary_jobs(id uuid PRIMARY KEY DEFAULT gen_random_uuid(), project_id uuid, session_id text, window_id text, storage_generation int DEFAULT 1, chunk_count int DEFAULT 1,
+        CREATE TABLE replay_summary_jobs(id uuid PRIMARY KEY DEFAULT gen_random_uuid(), project_id uuid, session_id text, window_id text, storage_generation int DEFAULT 1, chunk_count int DEFAULT 1, completeness_revision int DEFAULT 1, coverage jsonb DEFAULT '{"ranges":[],"terminal":null,"unknown":"legacy_contract"}', finalization_state text DEFAULT 'complete',
             state text DEFAULT 'ready', processed boolean DEFAULT false, processed_at timestamp, attempts int DEFAULT 0, execution_token int DEFAULT 0, lease_until timestamp,
             next_attempt_at timestamp DEFAULT NOW(),created_at timestamp DEFAULT NOW(),render_profile text DEFAULT 'h264-3fps-8x-v1',
             priority int DEFAULT 0,manual boolean DEFAULT false,stage text,progress_at timestamp,report jsonb,last_error text,
             UNIQUE(project_id,session_id,window_id,storage_generation,chunk_count));
     "#).execute(&pool).await?;
+    // Install the database-owned function from its actual migration in this
+    // isolated test schema. Application crates own no function DDL.
+    let migration = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../monorepo/packages/database/drizzle/20260923192640_replay_completeness/migration.sql"
+    ))?;
+    let policy = migration
+        .split("--> statement-breakpoint")
+        .find(|statement| statement.contains("CREATE FUNCTION replay_analysis_eligible("))
+        .context("database migration is missing analysis eligibility")?;
+    sqlx::raw_sql(sqlx::AssertSqlSafe(policy.to_owned()))
+        .execute(&pool)
+        .await?;
     let project = Uuid::new_v4();
     sqlx::query("INSERT INTO project(id) VALUES($1)")
         .bind(project)
@@ -138,6 +151,9 @@ async fn priority_manual_selection_and_fenced_summary_commit() -> Result<()> {
                     window_id: manual.window_id.clone(),
                     storage_generation: manual.storage_generation,
                     chunk_count: manual.chunk_count,
+                    completeness_revision: manual.completeness_revision,
+                    coverage: manual.coverage.clone(),
+                    finalization_state: manual.finalization_state,
                     token: manual.token,
                     manual: manual.manual,
                 }
@@ -161,6 +177,9 @@ async fn priority_manual_selection_and_fenced_summary_commit() -> Result<()> {
         window_id: "window".into(),
         storage_generation: 1,
         chunk_count: 1,
+        completeness_revision: manual.completeness_revision,
+        coverage: manual.coverage.clone(),
+        finalization_state: manual.finalization_state,
     };
     let prepared = crate::insights::test_prepared(project, None);
     assert!(
@@ -280,7 +299,16 @@ async fn priority_manual_selection_and_fenced_summary_commit() -> Result<()> {
     sqlx::query("UPDATE replay_sessions SET chunk_count=2 WHERE session_id='automatic'")
         .execute(&pool)
         .await?;
-    assert!(finish(&pool, &promoted, "succeeded", Some(report), Some(&prepared)).await?);
+    assert!(
+        finish(
+            &pool,
+            &promoted,
+            "succeeded",
+            Some(report.clone()),
+            Some(&prepared)
+        )
+        .await?
+    );
     let state: String = sqlx::query_scalar("SELECT state FROM replay_summary_jobs WHERE id=$1")
         .bind(promoted.job_id)
         .fetch_one(&pool)
@@ -291,6 +319,68 @@ async fn priority_manual_selection_and_fenced_summary_commit() -> Result<()> {
             .fetch_one(&pool)
             .await?;
     assert_eq!(saved, 0);
+    // A control-only change invalidates a prepared execution with the same chunks.
+    sqlx::query("UPDATE replay_sessions SET chunk_count=1, finalization_state='timed_out_incomplete' WHERE session_id='automatic'").execute(&pool).await?;
+    sqlx::query("UPDATE replay_summary_jobs SET state='ready',processed=false,attempts=0,next_attempt_at=NOW() WHERE id=$1").bind(promoted.job_id).execute(&pool).await?;
+    let control_claim = claim(&pool).await?.unwrap();
+    assert!(
+        prepare(&pool, &control_claim, 1024).await?.is_some(),
+        "manual incomplete analysis stays eligible"
+    );
+    // Hold the recording row while another connection tries to publish. The
+    // publication must observe the new completeness revision after waiting.
+    let worker_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&url)
+        .await?;
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "SET search_path TO {schema},public"
+    )))
+    .execute(&worker_pool)
+    .await?;
+    let mut control_tx = pool.begin().await?;
+    sqlx::query("UPDATE replay_sessions SET completeness_revision=completeness_revision+1 WHERE session_id='automatic'").execute(&mut *control_tx).await?;
+    let publishing_pool = worker_pool.clone();
+    let publishing_claim = control_claim.clone();
+    let mut publication = tokio::spawn(async move {
+        let prepared = crate::insights::test_prepared(project, None);
+        finish(
+            &publishing_pool,
+            &publishing_claim,
+            "succeeded",
+            Some(report),
+            Some(&prepared),
+        )
+        .await
+    });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), &mut publication)
+            .await
+            .is_err(),
+        "publication must wait for the recording transaction"
+    );
+    control_tx.commit().await?;
+    assert!(publication.await??);
+    assert!(
+        !renew(&pool, &control_claim, "model").await?,
+        "control change cancels the lease"
+    );
+    worker_pool.close().await;
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT state FROM replay_summary_jobs WHERE id=$1")
+            .bind(control_claim.job_id)
+            .fetch_one(&pool)
+            .await?,
+        "superseded"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM replay_summaries WHERE session_id='automatic'"
+        )
+        .fetch_one(&pool)
+        .await?,
+        0
+    );
     sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
         .execute(&pool)
         .await?;

@@ -36,7 +36,7 @@ Every step must:
 
 Retain Rust processing, Kafka, compressed object storage, generation fences, execution tokens where required for publication, child-process supervision, bounded downloads, model-output validation, and incremental detector checkpoints. Temporal must not replace Kafka streaming or make ingestion wait for analysis.
 
-**Confirmed storage direction:** “remove the multi tenant replay model” means **remove per-project buckets and provisioning**. Use exactly one central replay bucket for raw payloads, manifests and derived artifacts, with project/generation/type prefixes and explicit object references. No bucket routing by region, project or storage policy is part of this plan. Keep project authorization, retention and deletion isolation. Step 2 includes every reader/writer, lifecycle worker and provisioning cleanup needed to ship this change; it does not require dedicated tenant cells or a database per project.
+**Confirmed storage direction:** “remove the multi tenant replay model” means **remove per-project buckets and provisioning**. Use exactly one central replay bucket for raw payloads, manifests and derived artifacts, with project/generation/type prefixes and explicit object references. No bucket routing by region, project or storage policy is part of this plan. Keep project authorization, retention and deletion isolation. Step 1 includes every reader/writer, lifecycle worker and provisioning cleanup needed to ship this change; it does not require dedicated tenant cells or a database per project.
 
 ## Infrastructure gaps and recommendations
 
@@ -44,91 +44,20 @@ Retain Rust processing, Kafka, compressed object storage, generation fences, exe
 
 | Gap or unverified capability | Recommendation | Delivered by |
 | --- | --- | --- |
-| Enforced renderer sandbox/egress/resource boundary | Isolated container/job workers with OS sandboxing, deny-by-default egress, no provider/database credentials, and hard resource limits | 1 |
-| Immutable storage, inventory reconciliation, consistent retention/deletion | Production-supported S3-compatible storage, checksum verification, inventory/reconciliation workers, one central replay bucket; validate the actual provider's conditional-write behavior | 2 |
-| Durable workflow service and independently scaled stage workers | Use Temporal Cloud with native Rust workers; keep compute in our infrastructure and avoid operating an additional orchestration cluster | 5 |
-| Reliable PostgreSQL-to-Kafka delivery | Transactional outbox and durable dispatcher with at-least-once delivery and idempotent consumers. Use this one permanent delivery mechanism for authoritative PostgreSQL changes | 5, reused by 6–8 |
-| Replay facts/state/deletion topics, quarantine, schema compatibility checks | Versioned topic contracts in source plus CI compatibility validation; explicit partitions/retention/ACLs and DLQ tooling. Enforce contract compatibility in CI using checked-in versioned schemas | 7–8 |
-| Replay ClickHouse sink and duplicate-safe aggregates | Extend the existing Kafka-engine/MV pattern with replay-specific migrations and read models; prove offset/retry and aggregate correctness under redelivery | 8 |
-| Production HA, backup/restore and disaster recovery evidence | Audit actual Kafka replication/ISR, PostgreSQL failover/PITR, ClickHouse replication/Keeper where self-hosted, object durability and Temporal recovery; provision missing HA before the relevant release receives production traffic | Each owning step; full recovery exercise in 14 |
+| Immutable storage, inventory reconciliation, consistent retention/deletion | Production-supported S3-compatible storage, checksum verification, inventory/reconciliation workers, one central replay bucket; validate the actual provider's conditional-write behavior | 1 |
+| Durable workflow service and independently scaled stage workers | Use Temporal Cloud with native Rust workers; keep compute in our infrastructure and avoid operating an additional orchestration cluster | 3 |
+| Reliable PostgreSQL-to-Kafka delivery | Transactional outbox and durable dispatcher with at-least-once delivery and idempotent consumers. Use this one permanent delivery mechanism for authoritative PostgreSQL changes | 3, reused by 4–6 |
+| Replay facts/state/deletion topics, quarantine, schema compatibility checks | Versioned topic contracts in source plus CI compatibility validation; explicit partitions/retention/ACLs and DLQ tooling. Enforce contract compatibility in CI using checked-in versioned schemas | 5–6 |
+| Replay ClickHouse sink and duplicate-safe aggregates | Extend the existing Kafka-engine/MV pattern with replay-specific migrations and read models; prove offset/retry and aggregate correctness under redelivery | 6 |
+| Production HA, backup/restore and disaster recovery evidence | Audit actual Kafka replication/ISR, PostgreSQL failover/PITR, ClickHouse replication/Keeper where self-hosted, object durability and Temporal recovery; provision missing HA before the relevant release receives production traffic | Each owning step; full recovery exercise in 12 |
 
 The local single-broker Kafka configuration (replication factor 1), single ClickHouse/PostgreSQL instances, and alpha-tagged local object-store image are development fixtures, not proof of production durability. Size Kafka retention for the maximum supported outage plus catch-up time; object manifests and authoritative state must support rebuilding beyond that horizon. Temporal owns durable analysis execution; pgvector owns similarity retrieval.
 
 ## Ordered releases
 
-## 1. Give rendering a stronger isolation boundary
+## 1. Strengthen object identity, reconciliation, and storage layout
 
-**Prerequisites:** None.
-
-**Shippable outcome:** Deploy isolated rendering for the current pipeline, with all credentials, network and process-tree tests passing.
-
-**Deployment and recovery:** Canary in the real runtime; on failure stop admission and roll forward the isolation configuration, never fall back to an insecure renderer.
-
-**Priority: high; can proceed independently.**
-
-### Original problem (implementation below removes this path)
-
-Chromium runs with `--no-sandbox`. The renderer child inherits the worker environment, and Chromium inherits that environment again, exposing credentials to more processes than necessary.
-
-Fresh browser contexts and network URL blocking are useful existing controls, but they do not substitute for an enforced isolation boundary around untrusted recorded content.
-
-### Tasks
-
-- [x] Define the renderer's required inputs and remove unrelated database/provider credentials from its environment.
-- [x] Pass local staged inputs or narrowly scoped object access instead of broad persistent credentials where practical.
-- [x] Keep model-provider credentials in the existing supervisor/inference code and out of the browser process; this isolation must work before the Temporal stage split.
-- [x] Enable the Chromium sandbox where the execution environment supports it; otherwise use an explicitly designed stronger outer isolation boundary.
-- [x] Enforce network restrictions outside browser-level request blocking.
-- [x] Apply CPU, memory, process, temporary-disk, and execution-time limits to the renderer and descendants.
-- [x] Retain fresh contexts, temporary-directory cleanup, and process-group termination on cancellation.
-- [x] Implement private authenticated renderer service, protocol/input/output bounds, one-job admission and busy-job deferral without consuming failed-attempt retries; keep object downloads, inference and database access in the supervisor.
-- [x] Move rendering into `apps/replay-renderer` and remove `crates/rrweb2video`; keep only wire types/limits in `crates/replay-render-protocol`. Move the CLI, player assets and tests with the renderer; remove browser/encoding dependencies from the summarizer and database/storage dependencies from the renderer.
-- [x] Wire separate Docker images into one DigitalOcean app through `../infra`, with generated shared authentication, private DNS/port only, independent instance counts and CPU/memory sizes, and infrastructure regression tests.
-- [x] Implement shutdown/disconnect/deadline cancellation, whole-process-group termination, adopted-descendant reaping and restart scratch cleanup; no local-render fallback remains.
-- [ ] Complete the deployment acceptance checks below, including actual App Platform OOM/restart behavior.
-
-### Acceptance criteria
-
-- Chromium cannot inherit database or provider secrets from the supervisor.
-- Renderer network access and resource limits are enforced independently of replay JavaScript/browser configuration.
-- Failed or cancelled jobs leave no running descendants or unbounded temporary artifacts.
-- [ ] Verify isolation in the actual App Platform deployment: startup kernel preflight, private-only routing, a representative replay, replica routing, enforced CPU/memory/disk/process limits, timeout/disconnect/shutdown and OOM restart cleanup. These require a deployment; local Docker and mocked Terraform checks alone do not satisfy this gate.
-
-### Implementation and local verification
-
-The boundary is permanent: the current PostgreSQL worker calls the private render API;
-Temporal Activities will call the same API in step 5. Rendering releases its slot
-before inference. There is no Temporal dependency in this release. The renderer
-uses inherited Linux seccomp to deny network sockets outside `AF_UNIX`, pipe-based
-CDP, clean environments and fixed resource/deadline limits. The API service has
-no storage/database/provider credentials. See `apps/replay-summarizer/README.md`
-for the supervisor and `apps/replay-renderer/README.md` for rendering behavior and isolation. Deployment and scaling details live in `../infra/README.md`.
-
-- [x] Rust unit/integration tests and strict Clippy for the affected packages pass; optional paid-provider and additional standalone browser fixtures remain explicitly ignored.
-- [x] Disposable PostgreSQL/pgvector integration verifies busy-renderer deferral preserves retry budget and execution fencing, alongside existing publication tests.
-- [x] Both separate production Docker images build successfully.
-- [x] Infrastructure formatting, validation and all 12 mocked OpenTofu tests pass.
-- [x] Linux container tests verify a real Chromium/FFmpeg render, authentication, invalid input, admission, child credential isolation, disconnect cancellation and shutdown.
-- [x] Stalled-job timeout and abrupt-child-death container regressions pass, including orphan-process reaping.
-- [x] Run renderer and disposable PostgreSQL checks through Rust tests under `cargo test`; remove the Python test wrappers.
-
-### References
-
-- `apps/replay-renderer/Dockerfile`
-- `apps/replay-renderer/chromium.sh`
-- `apps/replay-summarizer/Dockerfile`
-- `apps/replay-summarizer/src/renderer.rs`: private API client
-- `apps/replay-summarizer/src/replay_loader.rs`: credentialed downloads and evidence preparation
-- `crates/replay-render-protocol/src/lib.rs`: shared wire types and limits
-- `apps/replay-renderer/src/main.rs`: admission and job supervision
-- `apps/replay-renderer/src/sandbox.rs`
-- `apps/replay-renderer/tests/container.rs`
-- `../infra/modules/workload/app.tf` and `../infra/environments/production/apps/services.tf`
-- `apps/replay-renderer/src/browser.rs`
-
-## 2. Strengthen object identity, reconciliation, and storage layout
-
-**Prerequisites:** Step 1.
+**Prerequisites:** Implemented recording finalization, accepted sequence coverage and completeness revision fences.
 
 **Shippable outcome:** All ingest, playback, summarizer, expiry and project-delete paths use verified immutable object references in the single central replay bucket.
 
@@ -168,7 +97,7 @@ Database failures intentionally leave uploaded objects behind. Those objects req
 
 ### Cross-repository storage and deletion cutover
 
-Use current authoritative chunk metadata plus the checksums/location references added here; this release must not wait for step 4 manifests. Later manifest creation consumes these same verified references.
+Use current authoritative chunk metadata plus the checksums/location references added here; this release must not wait for step 2 manifests. Later manifest creation consumes these same verified references.
 
 - [ ] Update `../monorepo/apps/backend/src/services/session-replays/object-store.ts`, `bucket-provisioner.ts`, `replay-storage.ts`, `replay-expiry-worker.ts`, playback downloads, collector and summarizer together. Persist an explicit bucket/key/layout reference instead of reconstructing locations from a project ID.
 - [ ] Keep project-specific expiry in authoritative metadata and scheduled deletion; a shared-bucket lifecycle rule must never erase another project's data or fail to honor a shorter retention period.
@@ -177,50 +106,12 @@ Use current authoritative chunk metadata plus the checksums/location references 
 - [ ] Migrate all retained objects and references, verify checksums and playback, then remove old project buckets after the explicit rollback window. Remove `ReplayBucketProvisionerLive`, its startup wiring, `REPLAY_RUN_MIGRATION_CLEANUP`, `deleteLegacyBucket`, `deleteBucketsExcept`, project lifecycle synchronization, and obsolete provisioning-only states/callers. No startup migration may delete the central bucket.
 - [ ] Replace project reset/delete operations with generation-fenced deletion of owned prefixes/references. Runtime credentials must not permit bucket creation/deletion or account-wide bucket enumeration; reserve bucket administration for infrastructure deployment.
 - [ ] Define one key layout, for example `projects/{project_id}/generations/{generation}/{raw|manifests|artifacts}/...`; forbid cross-project deduplication. Restrict authorized object access by project and generation, including signed URL creation.
-- [ ] Implement bounded, checkpointed expiry/orphan deletion with durable retry records now, using existing PostgreSQL maintenance facilities; do not depend on step 5. Apply project retention to referenced objects and artifacts, and reclaim multipart uploads/noncurrent versions if enabled. Bucket-wide lifecycle rules must be safe for every project.
+- [ ] Implement bounded, checkpointed expiry/orphan deletion with durable retry records now, using existing PostgreSQL maintenance facilities; do not depend on step 3. Apply project retention to referenced objects and artifacts, and reclaim multipart uploads/noncurrent versions if enabled. Bucket-wide lifecycle rules must be safe for every project.
 - [ ] Verify central-bucket durability/recovery and documented throughput limits against the target workload. An object-store outage may delay processing; it must not trigger a second-bucket fallback or acknowledgment of unpersisted data.
 
-## 3. Separate recording completeness from inactivity
+## 2. Use immutable recording revisions and analysis specifications
 
-**Prerequisites:** Steps 1–2.
-
-**Shippable outcome:** Finalization and UI distinguish complete from timed-out-incomplete recordings using real sequence coverage.
-
-**Deployment and recovery:** Migrate range state and update readers before enabling new finalization; retain accepted chunk facts so state can be recomputed without claiming gaps are complete.
-
-**Priority: high correctness requirement.**
-
-### Current problem
-
-Controls retain the maximum received sequence and terminal sequence, but do not prove that intervening sequences arrived. Chunks 1 and 3 plus terminal 3 can satisfy the terminal condition despite missing chunk 2.
-
-An inactivity deadline is useful for progress, but it is not evidence of completeness. Late data reopens recordings and invalidates analysis.
-
-### Tasks
-
-- [ ] Define sequence semantics, including initial sequence, empty terminal markers, retries, and any coalesced ranges.
-- [ ] Track received ranges or a contiguous watermark against an explicit terminal boundary.
-- [ ] Represent open, complete, and timed-out-incomplete states separately.
-- [ ] Persist completeness and missing-range information in recording metadata and analysis provenance; step 4 includes this existing state in immutable manifests.
-- [ ] Define whether and when incomplete recordings may be summarized, and expose the evidence limitation.
-- [ ] Define late-arrival behavior using the existing accepted-chunk revision/execution fences: invalidate stale results, cancel stale work and reschedule. Step 4 strengthens content identity; gap detection and stale-work rejection must already work in this release.
-- [ ] Prevent repeated equivalent terminal markers from extending deadlines.
-- [ ] Test out-of-order delivery, missing middle chunks, duplicate ranges, and a terminal marker arriving before data.
-
-### Acceptance criteria
-
-- A terminal maximum alone cannot mark a recording gap-free.
-- Timeouts allow progress without falsely asserting completeness.
-- Late arrivals produce explicit revision transitions and cannot overwrite newer analysis.
-
-### References
-
-- `apps/replay-consumer/src/controls.rs`: `record_chunk`
-- `apps/replay-consumer/src/finalizer.rs`
-
-## 4. Use immutable recording revisions and analysis specifications
-
-**Prerequisites:** Steps 1–3.
+**Prerequisites:** Step 1.
 
 **Shippable outcome:** Existing execution and publication use immutable manifest/spec identities, including manual reprocessing.
 
@@ -257,9 +148,9 @@ Job and summary uniqueness identify a recording revision without a complete anal
 - `apps/replay-summarizer/src/summarize.rs`: version constants and metadata
 - `../monorepo/packages/database/schemas/replays.ts`: revision uniqueness constraints
 
-## 5. Adopt Temporal Cloud and decouple summary publication from grouping
+## 3. Adopt Temporal Cloud and decouple summary publication from grouping
 
-**Prerequisites:** Steps 1–4.
+**Prerequisites:** Steps 1–2.
 
 **Shippable outcome:** Deploy a complete durable analysis workflow with checkpointed outputs, a proven workflow-start outbox, short summary publication transactions and independently retryable grouping.
 
@@ -271,13 +162,13 @@ Job and summary uniqueness identify a recording revision without a complete anal
 
 The retry unit spans download, rendering, video analysis, embedding, and publication. Successful model output is not durably checkpointed before embedding/publication. A downstream failure can repeat rendering and a paid model request.
 
-Step 1 releases the private renderer slot before remote inference. The PostgreSQL supervisor still carries each job through download, rendering, inference and publication in one execution attempt; these stages still need independent durable retries and admission.
+The completed renderer isolation release frees the private renderer slot before remote inference. The PostgreSQL supervisor still carries each job through download, rendering, inference and publication in one execution attempt; these stages still need independent durable retries and admission.
 
 ### Tasks
 
 - [ ] Define explicit stages: prepare manifest, render or extract evidence, analyze, validate, publish summary, embed, and group.
 - [ ] Store durable outputs and provenance for successful stages before advancing.
-- [ ] Key outputs by immutable recording revision and versioned analysis specification; coordinate with step 4.
+- [ ] Key outputs by immutable recording revision and versioned analysis specification; coordinate with step 2.
 - [ ] Use Temporal Activity timeouts/heartbeats, retry budgets, error classifications, and attempt records; retain PostgreSQL publication fences rather than a competing stage scheduler.
 - [ ] Reuse successful render and inference outputs after embedding or publication failures.
 - [ ] Separate renderer concurrency from inference, embedding, and grouping concurrency. Use separately deployable worker pools with independent scheduling and bounded resources.
@@ -307,7 +198,7 @@ The current `jobs.rs`/`main.rs` already implement claiming, execution tokens, le
 
 Temporal Cloud is the sole selected execution service. We deploy native Rust workers and retain domain fencing, publication transactions and delivery outboxes in PostgreSQL. Sources: [Temporal Rust SDK 1.0.0 GA release](https://github.com/temporalio/sdk-rust/releases/tag/v1.0.0) and [Rust SDK guide](https://docs.temporal.io/develop/rust).
 
-**Integration boundary:** Kafka ingestion and ClickHouse streaming remain independent of Temporal. Start one analysis workflow per selected immutable recording revision and analysis specification, with separate durable grouping work after summary publication. Use Rust Activity workers for preparation, rendering, inference, embedding and publication, with separate task queues and resource limits. Rendering retains the private service boundary from step 1; its service supervises the isolated child process tree. Activity cancellation/heartbeats must cancel the render request, and the service must terminate its process tree on disconnect. Keep replay bodies, videos and model output in object storage and pass small verified references through workflow history. PostgreSQL retains product state, authorization, deletion/generation fences and publication authority.
+**Integration boundary:** Kafka ingestion and ClickHouse streaming remain independent of Temporal. Start one analysis workflow per selected immutable recording revision and analysis specification, with separate durable grouping work after summary publication. Use Rust Activity workers for preparation, rendering, inference, embedding and publication, with separate task queues and resource limits. Rendering retains the existing private renderer service boundary; its service supervises the isolated child process tree. Activity cancellation/heartbeats must cancel the render request, and the service must terminate its process tree on disconnect. Keep replay bodies, videos and model output in object storage and pass small verified references through workflow history. PostgreSQL retains product state, authorization, deletion/generation fences and publication authority.
 
 **What we still implement:** idempotent object output keys, provider idempotency/request lookup where available, transactional outbox delivery, generation fencing, retention/deletion, and resource admission. Temporal does not make arbitrary external calls exactly-once or eliminate the crash window between a provider response and durable persistence. These are application correctness boundaries, not reasons to build another scheduler. See [Activity idempotency](https://docs.temporal.io/activity-definition).
 
@@ -395,9 +286,9 @@ Fragmentation increases the search population. Using the oldest single member as
 - `apps/replay-summarizer/src/insights.rs`: deadline handling, fallback group creation, `best_match`
 - `apps/replay-summarizer/README.md`
 
-## 6. Reduce PostgreSQL work on every ingested chunk
+## 4. Reduce PostgreSQL work on every ingested chunk
 
-**Prerequisites:** Steps 1–5.
+**Prerequisites:** Steps 1–3.
 
 **Shippable outcome:** Ingestion commits minimal durable facts; a complete asynchronous detector/rebuild worker maintains current product counts and routes.
 
@@ -413,10 +304,13 @@ This creates round trips, row churn, index maintenance, and dependencies between
 
 ### Tasks
 
+- [ ] Remove the synchronous full `click_analysis` metadata reload in `apps/replay-consumer/src/clicks.rs::refresh` for late/overlapping chunks or missing/incompatible checkpoints. Ordinary ordered ingestion and the first chunk are incremental; the fallback currently reads and sorts all stored click signals under the recording transaction. Use bounded repair work with explicit stale/unknown counts until repaired, preserving exact rage-click semantics.
+
+
 - [ ] Measure SQL statements, transaction duration, WAL volume, row/index growth, and lock waits per chunk.
 - [ ] Define the minimum durable state required before acknowledging a chunk: verified payload reference, accepted identity, generation, and required lifecycle bookkeeping.
 - [ ] Move derived analytics outside the ingestion transaction; emit work atomically using a transactional outbox published to Kafka.
-- [ ] Provision this release's accepted-chunk topic, schema and consumers before switching ingestion. Keep one versioned detector/extraction implementation: it maintains the existing product projection now and emits the step 8 analytical facts later. The ClickHouse migration must remove superseded PostgreSQL analytical projections without leaving a second detector or rebuild scheduler.
+- [ ] Provision this release's accepted-chunk topic, schema and consumers before switching ingestion. Keep one versioned detector/extraction implementation: it maintains the existing product projection now and emits the step 6 analytical facts later. The ClickHouse migration must remove superseded PostgreSQL analytical projections without leaving a second detector or rebuild scheduler.
 - [ ] Correct the existing `uncompressed_bytes` assignment using the actual decoded size and retain exact usage semantics; include a compressed-versus-decoded fixture. This is data correctness, not instrumentation.
 
 - [ ] Batch metadata operations where ordering and idempotency permit.
@@ -471,9 +365,9 @@ Entry/exit route updates are arrival-based: a late older chunk can incorrectly b
 - `apps/replay-consumer/src/clicks.rs`: `Checkpoint`, `refresh`
 - `apps/replay-consumer/src/storage.rs`: session route updates
 
-## 7. Isolate consumer failures and remove the whole-batch barrier
+## 5. Isolate consumer failures and remove the whole-batch barrier
 
-**Prerequisites:** Steps 1–6.
+**Prerequisites:** Steps 1–4.
 
 **Shippable outcome:** Consumers isolate partition failures with durable quarantine and repair tooling.
 
@@ -511,9 +405,9 @@ Malformed records are instead dropped and acknowledged without durable quarantin
 - `apps/replay-consumer/src/consumer.rs`: `run`, `store_processed`, `create_consumer`, `handle_message`
 - `crates/replay-message/src/lib.rs`
 
-## 8. Move broad replay analytics off the transactional database
+## 6. Move broad replay analytics off the transactional database
 
-**Prerequisites:** Steps 1–7.
+**Prerequisites:** Steps 1–5.
 
 **Shippable outcome:** Kafka-fed event/state projections power production replay filters and a usable heatmap slice, with deletion and backfill working.
 
@@ -583,7 +477,7 @@ The existing `ReplayChunk` envelope has project/session/window/view IDs, generat
 ### Kafka sink, consistency and recovery
 
 - [ ] Provision versioned facts, state and tombstone topics (for example `replay-events-v1`, `replay-state-v1`, `replay-deletions-v1`), keyed by project/generation/recording for per-recording order. Define source versions across topics; do not assume cross-topic arrival order.
-- [ ] Use the step 5 outbox for transactional state and accepted-chunk notifications; extraction workers read verified objects and publish facts to Kafka before acknowledging their input. Kafka transport is at-least-once: deterministic identities and version handling must make reprocessing safe.
+- [ ] Use the step 3 outbox for transactional state and accepted-chunk notifications; extraction workers read verified objects and publish facts to Kafka before acknowledging their input. Kafka transport is at-least-once: deterministic identities and version handling must make reprocessing safe.
 - [ ] Add Kafka-engine/MV migrations to `../monorepo/packages/clickhouse`, with explicit consumer groups, batch sizes, partition/consumer capacity, malformed-data quarantine and offset recovery. No `INSERT`, `INSERT SELECT`, HTTP insert, or direct repair path from application/backfill code.
 - [ ] Prove duplicate-safe query and aggregate semantics before serving reads. ReplacingMergeTree background merging alone does not prevent an incremental sum MV from counting duplicates. Choose deduplicated query state or versioned replacement aggregate snapshots; test corrections/deletions and measure query cost before selecting engines.
 - [ ] Publish versioned deletion/generation tombstones through Kafka, enforce authoritative read authorization immediately, and remove physical facts/aggregates within a documented deletion SLA. Keep deletion fences beyond the maximum replay horizon so old topics/backfills cannot resurrect data; include caches and heatmaps.
@@ -600,9 +494,9 @@ The existing `ReplayChunk` envelope has project/session/window/view IDs, generat
 
 Additional references: `crates/replay-message/src/lib.rs`, `apps/replay-consumer/src/clicks.rs`, `../monorepo/packages/domain/src/session-replays.ts`, `../monorepo/packages/domain/src/replay-events.ts`, `../monorepo/packages/clickhouse/migrations/initial_schema.sql`, and the [ClickHouse Kafka engine documentation](https://clickhouse.com/docs/integrations/connectors/data-ingestion/kafka/kafka-table-engine).
 
-## 9. Replace per-group reconstruction in similarity retrieval
+## 7. Replace per-group reconstruction in similarity retrieval
 
-**Prerequisites:** Steps 1–8.
+**Prerequisites:** Steps 1–6.
 
 **Shippable outcome:** Grouping searches maintained representatives; invalidation and the selected exact/indexed retrieval behavior are tested.
 
@@ -638,9 +532,9 @@ This work currently happens under the project publication lock and grows with th
 - `apps/replay-summarizer/src/insights.rs`: candidate query in `save`
 - `../monorepo/packages/database/schemas/replays.ts`: insight embeddings and memberships
 
-## 10. Remove fixed background-work ceilings
+## 8. Remove fixed background-work ceilings
 
-**Prerequisites:** Steps 1–9.
+**Prerequisites:** Steps 1–7.
 
 **Shippable outcome:** Finalization and cleanup drain backlogs within explicit budgets independently of consumer replicas.
 
@@ -675,9 +569,9 @@ Finalization also creates automatic jobs for recordings whose settings may cause
 - `apps/replay-consumer/src/finalizer.rs`
 - `apps/replay-summarizer/src/jobs.rs`: `prepare`, `matches_settings`
 
-## 11. Enforce tenant fairness and shared resource budgets
+## 9. Enforce tenant fairness and shared resource budgets
 
-**Prerequisites:** Steps 1–10.
+**Prerequisites:** Steps 1–8.
 
 **Shippable outcome:** Tenant fairness and global provider budgets hold under overload and worker scaling.
 
@@ -698,9 +592,9 @@ Finalization also creates automatic jobs for recordings whose settings may cause
 - Adding replicas cannot exceed provider or project budgets, including retried attempts.
 - Limits can be reduced safely while work drains, without process restart loops or an unbounded in-memory queue.
 
-## 12. Stop requiring whole-session video as the primary analysis representation
+## 10. Stop requiring whole-session video as the primary analysis representation
 
-**Prerequisites:** Steps 1–11.
+**Prerequisites:** Steps 1–9.
 
 **Shippable outcome:** Timestamped evidence and representative visual windows replace whole-session video defaults after quality evaluation.
 
@@ -739,9 +633,9 @@ Structured interaction evidence contains only the first 500 matching events, bia
 - `apps/replay-summarizer/src/renderer.rs`
 - `apps/replay-summarizer/src/summarize.rs`
 
-## 13. Replace hard size failures with segmentation and resource-aware admission
+## 11. Replace hard size failures with segmentation and resource-aware admission
 
-**Prerequisites:** Steps 1–12.
+**Prerequisites:** Steps 1–10.
 
 **Shippable outcome:** Supported large recordings run through reconstructible segments and budgeted resource classes.
 
@@ -780,9 +674,9 @@ Decoded bytes do not bound browser DOM memory, frame buffers, or render duration
 - `apps/replay-summarizer/src/summarize.rs`: `encode_video`
 - `apps/replay-renderer/src/replay.rs`: viewport and frame-plan validation
 
-## 14. Prove end-to-end scale, recovery and quality
+## 12. Prove end-to-end scale, recovery and quality
 
-**Prerequisites:** Steps 1–13.
+**Prerequisites:** Steps 1–11.
 
 **Shippable outcome:** Publish capacity, recovery and quality evidence for the complete target system and resolve any failed gates.
 
@@ -810,7 +704,7 @@ This release is a final system-level capacity certification, not a deferred test
 
 Reviewed sources include the replay consumer/summarizer, replay message schema, monorepo replay services and database schemas, ClickHouse migration baseline and local `docker-compose.yml`. Deployment recommendations require confirmation against production inventory.
 
-- [Temporal](https://temporal.io/) and the step 5 documentation links: durable workflows/Activities; application-side idempotency and publication fences remain required.
+- [Temporal](https://temporal.io/) and the step 3 documentation links: durable workflows/Activities; application-side idempotency and publication fences remain required.
 - [ClickHouse Kafka table engine](https://clickhouse.com/docs/integrations/connectors/data-ingestion/kafka/kafka-table-engine): Kafka-fed materialized-view ingestion; duplicate handling must be designed explicitly.
 - [PostgreSQL SELECT / SKIP LOCKED](https://www.postgresql.org/docs/current/sql-select.html): bounded concurrent claiming for outbox/maintenance work.
 - [pgvector documentation](https://github.com/pgvector/pgvector/blob/master/README.md): exact versus approximate retrieval and filtered-search evaluation.

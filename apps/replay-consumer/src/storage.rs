@@ -1,4 +1,4 @@
-use crate::object_store::ObjectStore;
+use crate::{controls::Acceptance, object_store::ObjectStore};
 use replay_message::ReplayChunk;
 use serde::Serialize;
 use serde_json::Value;
@@ -10,6 +10,14 @@ use uuid::Uuid;
 const REPLAY_CONTENT_ENCODING: &str = "zstd";
 const ZSTD_COMPRESSION_LEVEL: i32 = 3;
 const REPLAY_COMPRESSION_TIMEOUT: Duration = Duration::from_secs(10);
+
+pub(crate) const ACCEPTED_CHUNK: &str = r#"
+    SELECT EXISTS (
+        SELECT 1 FROM replay_snapshots
+        WHERE project_id=$1 AND session_id=$2 AND window_id=$3 AND storage_generation=$6
+          AND (($4::text IS NOT NULL AND batch_id=$4) OR sequence=$5)
+    )
+"#;
 
 enum PersistOutcome {
     Stored { first_for_billing: bool },
@@ -60,32 +68,21 @@ pub async fn store_replay_chunk(
         return Ok(false);
     }
 
-    // Skip uploads for retries and legacy coalesced chunks; recheck under the lock.
-    let already_stored: bool = sqlx::query_scalar(
-        r#"
-        SELECT EXISTS (
-            SELECT 1 FROM replay_snapshots
-            WHERE project_id = $1
-              AND session_id = $2
-              AND window_id = $3
-              AND storage_generation = $6
-              AND (
-                  ($4::text IS NOT NULL AND batch_id = $4)
-                  OR ($4::text IS NULL AND sequence = $5)
-                  OR ($5 BETWEEN first_sequence AND last_sequence)
-              )
-        )
-        "#,
-    )
-    .bind(input.project_id)
-    .bind(&input.session_id)
-    .bind(&input.window_id)
-    .bind(&input.batch_id)
-    .bind(input.sequence)
-    .bind(input.storage_generation)
-    .fetch_one(pool)
-    .await?;
+    // Only accepted identities establish a retry. Legacy range endpoints do
+    // not prove their interiors and must never suppress a missing singleton.
+    let already_stored: bool = sqlx::query_scalar(ACCEPTED_CHUNK)
+        .bind(input.project_id)
+        .bind(&input.session_id)
+        .bind(&input.window_id)
+        .bind(&input.batch_id)
+        .bind(input.sequence)
+        .bind(input.storage_generation)
+        .fetch_one(pool)
+        .await?;
     if already_stored {
+        if input.is_final {
+            record_terminal_hint(pool, &input, Acceptance::Duplicate, grace_seconds).await?;
+        }
         return Ok(false);
     }
     if !input.events.is_sorted_by_key(replay_event_order) {
@@ -113,7 +110,7 @@ pub async fn store_replay_chunk(
         input.sequence,
         first_event_timestamp_ms.unwrap_or(0),
     );
-    let compressed = compress_replay_events(input.events).await?;
+    let compressed = compress_replay_events(std::mem::take(&mut input.events)).await?;
     let compressed_bytes = i64::try_from(compressed.len()).unwrap_or(i64::MAX);
 
     // This column historically stores compressed size; keep existing accounting.
@@ -148,31 +145,16 @@ pub async fn store_replay_chunk(
         )
         .await?;
 
-        let overlap_exists: bool = sqlx::query_scalar(
-            r#"
-            SELECT EXISTS (
-                SELECT 1 FROM replay_snapshots
-                WHERE project_id = $1
-                  AND session_id = $2
-                  AND window_id = $3
-                  AND storage_generation = $6
-                  AND (
-                      ($4::text IS NOT NULL AND batch_id = $4)
-                      OR ($4::text IS NULL AND sequence = $5)
-                      OR ($5 BETWEEN first_sequence AND last_sequence)
-                  )
-            )
-            "#,
-        )
-        .bind(input.project_id)
-        .bind(&input.session_id)
-        .bind(&input.window_id)
-        .bind(&input.batch_id)
-        .bind(input.sequence)
-        .bind(input.storage_generation)
-        .fetch_one(&mut *tx)
-        .await?;
+        let deleted: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM replay_sessions WHERE project_id=$1 AND session_id=$2 AND window_id=$3 AND deleted_at IS NOT NULL)")
+            .bind(input.project_id).bind(&input.session_id).bind(&input.window_id).fetch_one(&mut *tx).await?;
+        if deleted { return Ok(PersistOutcome::Inactive); }
+
+        let overlap_exists: bool = sqlx::query_scalar(ACCEPTED_CHUNK)
+            .bind(input.project_id).bind(&input.session_id).bind(&input.window_id)
+            .bind(&input.batch_id).bind(input.sequence).bind(input.storage_generation)
+            .fetch_one(&mut *tx).await?;
         if overlap_exists {
+            if input.is_final { crate::controls::record_chunk(&mut tx, &input, Acceptance::Duplicate, grace_seconds).await?; }
             tx.commit().await?;
             return Ok::<PersistOutcome, sqlx::Error>(PersistOutcome::Duplicate);
         }
@@ -288,7 +270,7 @@ pub async fn store_replay_chunk(
                 os,
                 has_errors,
                 has_poor_vitals,
-                is_complete,
+                finalization_state,
                 finalized_at,
                 finalize_after
             ) VALUES (
@@ -296,7 +278,7 @@ pub async fn store_replay_chunk(
                 COALESCE(timezone('UTC', to_timestamp($7::double precision / 1000.0)), timezone('UTC', to_timestamp($6::double precision / 1000.0))),
                 COALESCE(timezone('UTC', to_timestamp($8::double precision / 1000.0)), timezone('UTC', to_timestamp($7::double precision / 1000.0)), timezone('UTC', to_timestamp($6::double precision / 1000.0))),
                 $6, $7, $8, $9, $10, 1, $11, $12, $13, $14, $15, $16, $17, $18, $19, false, false,
-                false, NULL, NOW() + make_interval(secs => $20::integer)
+                'open', NULL, NOW() + make_interval(secs => $20::integer)
             )
             ON CONFLICT (project_id, session_id, window_id) DO UPDATE
             SET
@@ -335,7 +317,7 @@ pub async fn store_replay_chunk(
                 browser = COALESCE(EXCLUDED.browser, replay_sessions.browser),
                 country = COALESCE(EXCLUDED.country, replay_sessions.country),
                 os = COALESCE(EXCLUDED.os, replay_sessions.os),
-                is_complete = false,
+                finalization_state = 'open',
                 finalized_at = NULL,
                 finalize_after = EXCLUDED.finalize_after,
                 updated_at = NOW()
@@ -364,7 +346,7 @@ pub async fn store_replay_chunk(
         .execute(&mut *tx)
         .await?;
 
-        crate::controls::record_chunk(&mut tx, input.project_id, input.storage_generation, &input.session_id, &input.window_id, last_sequence, input.is_final, true, grace_seconds).await?;
+        crate::controls::record_chunk(&mut tx, &input, Acceptance::Chunk, grace_seconds).await?;
 
         crate::clicks::refresh(&mut tx, input.project_id, &input.session_id, &input.window_id, input.storage_generation, click_analysis).await?;
 
@@ -419,37 +401,25 @@ pub async fn store_replay_chunk(
 
 pub async fn record_terminal_hint(
     pool: &sqlx::PgPool,
-    project_id: Uuid,
-    session_id: &str,
-    window_id: &str,
-    storage_generation: i32,
-    sequence: i64,
+    input: &ReplayChunk,
+    acceptance: Acceptance,
     grace_seconds: i32,
 ) -> Result<(), ReplayStorageError> {
     let mut tx = pool.begin().await?;
-    if !replay_storage_generation_is_active(&mut *tx, project_id, storage_generation).await? {
+    if !replay_storage_generation_is_active(&mut *tx, input.project_id, input.storage_generation)
+        .await?
+    {
         return Ok(());
     }
     crate::controls::lock_stream(
         &mut tx,
-        project_id,
-        storage_generation,
-        session_id,
-        window_id,
+        input.project_id,
+        input.storage_generation,
+        &input.session_id,
+        &input.window_id,
     )
     .await?;
-    crate::controls::record_chunk(
-        &mut tx,
-        project_id,
-        storage_generation,
-        session_id,
-        window_id,
-        sequence,
-        true,
-        false,
-        grace_seconds,
-    )
-    .await?;
+    crate::controls::record_chunk(&mut tx, input, acceptance, grace_seconds).await?;
     tx.commit().await?;
     Ok(())
 }

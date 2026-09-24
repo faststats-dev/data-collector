@@ -106,6 +106,7 @@ struct ReplayRequest {
     flush_reason: Option<String>,
     batch_id: Option<String>,
     sequence: u64,
+    sequence_contract_version: Option<u32>,
     url: String,
     #[serde(alias = "anonymousId")]
     identifier: Option<Uuid>,
@@ -128,6 +129,7 @@ fn build_replay_chunk(
         flush_reason,
         batch_id,
         sequence,
+        sequence_contract_version,
         url,
         identifier,
         mut events,
@@ -136,6 +138,12 @@ fn build_replay_chunk(
     let window_id = normalize_window_id(window_id, &session_id);
     let sequence =
         i64::try_from(sequence).map_err(|_| "sequence exceeds bigint range".to_string())?;
+
+    if sequence > replay_message::coverage::MAX_SEQUENCE
+        || sequence_contract_version.is_some_and(|v| v != 1)
+    {
+        return Err("Invalid replay sequence contract".into());
+    }
 
     let server_id = match context.cookieless_mode {
         Some(true) => crate::utils::cookieless_server_id(client_ip, user_agent, context.project_id),
@@ -155,7 +163,7 @@ fn build_replay_chunk(
     events.retain(rrweb_types::is_valid_event);
     let dropped_event_count = received_event_count - events.len();
 
-    if events.is_empty() && !is_final {
+    if events.is_empty() && (!is_final || received_event_count > 0) {
         return Err("No valid events".to_string());
     }
 
@@ -171,6 +179,7 @@ fn build_replay_chunk(
             flush_reason,
             batch_id,
             sequence,
+            sequence_contract_version,
             first_sequence: None,
             last_sequence: None,
             client_batch_count: 1,

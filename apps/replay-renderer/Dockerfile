@@ -10,7 +10,8 @@ ARG PLAYWRIGHT_VERSION=1.58.2
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/browsers
 WORKDIR /opt/player
 COPY apps/replay-renderer/player/package.json apps/replay-renderer/player/package-lock.json ./
-RUN npm ci --ignore-scripts --no-audit --no-fund && \
+RUN --mount=type=cache,target=/root/.npm,sharing=locked \
+    npm ci --ignore-scripts --no-audit --no-fund && \
     npx --yes playwright@${PLAYWRIGHT_VERSION} install --with-deps --only-shell chromium && \
     apt-get update && apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core && \
     rm -rf /var/lib/apt/lists/* && \

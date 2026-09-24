@@ -80,7 +80,7 @@ pub(crate) async fn reconcile(
         if attempted == 100 {
             break;
         }
-        last = Some(key.clone());
+        last = Some(key);
         let mut tx = pool.begin().await?;
         let claimed: Option<String> = sqlx::query_scalar("SELECT key FROM replay_objects WHERE bucket=$1 AND key=$2 AND created_at<now()-interval '24 hours' AND retry_at<=now() FOR UPDATE SKIP LOCKED")
             .bind(bucket).bind(key).fetch_optional(&mut *tx).await?;
@@ -118,7 +118,7 @@ pub(crate) async fn reconcile(
         }
         tx.commit().await?;
     }
-    if keys.len() < 1000 && last.as_ref() == keys.last() {
+    if keys.len() < 1000 && last == keys.last() {
         last = None;
     }
     sqlx::query("UPDATE replay_object_inventory SET cleanup_after=$2 WHERE bucket=$1")

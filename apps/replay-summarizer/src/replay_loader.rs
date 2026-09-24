@@ -3,7 +3,7 @@ use anyhow::{Context, Result, bail, ensure};
 use futures_util::future::try_join_all;
 use serde::Deserialize;
 use serde_json::value::RawValue;
-use std::io::Read;
+use std::io::{BufReader, Read};
 
 pub struct LoadedReplay {
     pub events: Vec<Box<RawValue>>,
@@ -51,7 +51,7 @@ pub async fn load(
                     "compressed chunk exceeds input budget"
                 )));
             }
-            if wave.len() == 4 || bytes + size > input.max_decoded_bytes {
+            if wave.len() == 4 || size > input.max_decoded_bytes - bytes {
                 break;
             }
             bytes += size;
@@ -133,7 +133,7 @@ pub fn decode_chunk(bytes: &[u8], encoding: &str, remaining: usize) -> Result<(V
         _ => bail!("Unsupported replay encoding: {encoding}"),
     };
     let limit = remaining as u64 + 1;
-    let mut reader = reader.take(limit);
+    let mut reader = BufReader::new(reader).take(limit);
     let result = serde_json::from_reader::<_, Vec<Box<RawValue>>>(&mut reader);
     let decoded_bytes = (limit - reader.limit()) as usize;
     ensure!(

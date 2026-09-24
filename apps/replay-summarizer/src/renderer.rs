@@ -60,6 +60,7 @@ impl Client {
             body.len() <= protocol::MAX_INPUT,
             "render request exceeds limit"
         );
+        drop(request);
         let mut response = self
             .client
             .post(format!("{}/v1/render", self.url.trim_end_matches('/')))
@@ -70,6 +71,7 @@ impl Client {
             .await?
             .error_for_status()?;
         let mut pending = Vec::new();
+        let mut video = Vec::new();
         let mut file = tokio::fs::File::create(output).await?;
         let mut size = 0usize;
         while let Some(chunk) = tokio::time::timeout(Duration::from_secs(30), response.chunk())
@@ -91,13 +93,14 @@ impl Client {
                 match message {
                     Message::Progress => {}
                     Message::Video { data } => {
-                        let bytes = STANDARD.decode(data)?;
+                        video.clear();
+                        STANDARD.decode_vec(data, &mut video)?;
                         ensure!(
-                            bytes.len() <= 48 * 1024 && size + bytes.len() <= protocol::MAX_VIDEO,
+                            video.len() <= 48 * 1024 && size + video.len() <= protocol::MAX_VIDEO,
                             "oversized renderer video"
                         );
-                        file.write_all(&bytes).await?;
-                        size += bytes.len();
+                        file.write_all(&video).await?;
+                        size += video.len();
                     }
                     Message::Complete { mut report } => {
                         ensure!(

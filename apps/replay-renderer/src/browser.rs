@@ -22,6 +22,7 @@ pub(crate) struct Browser {
     session: String,
     id: u64,
     context: Option<String>,
+    buffer: Vec<u8>,
     _process: Process,
     _profile: TempDir,
 }
@@ -112,6 +113,7 @@ impl Browser {
             session: String::new(),
             id: 0,
             context: None,
+            buffer: Vec::new(),
             _process: process,
             _profile: profile,
         };
@@ -162,6 +164,7 @@ impl Browser {
                 json!({"browserContextId":context}),
             )?;
         }
+        self.buffer = Vec::new();
         Ok(())
     }
     pub fn call(&mut self, method: &str, params: Value) -> Result<Value> {
@@ -170,21 +173,26 @@ impl Browser {
         if !self.session.is_empty() {
             request["sessionId"] = json!(self.session);
         }
-        serde_json::to_writer(self.socket.get_mut(), &request)?;
-        self.socket.get_mut().write_all(&[0])?;
-        self.socket.get_mut().flush()?;
+        // Serialize before writing: JSON serialization otherwise makes tiny socket writes.
+        self.buffer.clear();
+        serde_json::to_writer(&mut self.buffer, &request)?;
+        self.buffer.push(0);
+        self.socket.get_mut().write_all(&self.buffer)?;
         let deadline = Instant::now() + Duration::from_secs(60);
         loop {
             ensure!(Instant::now() < deadline, "CDP command timed out: {method}");
-            let mut bytes = Vec::new();
+            self.buffer.clear();
             self.socket
                 .by_ref()
                 .take(64 * 1024 * 1024 + 1)
-                .read_until(0, &mut bytes)
+                .read_until(0, &mut self.buffer)
                 .with_context(|| format!("CDP {method}"))?;
-            ensure!(bytes.len() <= 64 * 1024 * 1024, "CDP message exceeds limit");
-            ensure!(bytes.pop() == Some(0), "Chromium closed the CDP pipe");
-            let mut response: Value = serde_json::from_slice(&bytes)?;
+            ensure!(
+                self.buffer.len() <= 64 * 1024 * 1024,
+                "CDP message exceeds limit"
+            );
+            ensure!(self.buffer.pop() == Some(0), "Chromium closed the CDP pipe");
+            let mut response: Value = serde_json::from_slice(&self.buffer)?;
             if response["id"].as_u64() != Some(self.id) {
                 continue;
             }
@@ -196,20 +204,73 @@ impl Browser {
     }
 
     pub fn eval(&mut self, expression: String) -> Result<Value> {
-        let result = self.call(
+        let mut result = self.call(
             "Runtime.evaluate",
             json!({"expression":expression,"returnByValue":true,"awaitPromise":true}),
         )?;
         if let Some(error) = result.get("exceptionDetails") {
             bail!("player JavaScript: {error}");
         }
-        Ok(result["result"]["value"].clone())
+        Ok(result["result"]["value"].take())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::Browser;
+    use super::*;
+
+    #[test]
+    fn cdp_handles_large_messages_notifications_and_repeated_calls() {
+        let (socket, peer) = UnixStream::pair().unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let payload = "\"\\\n".repeat(10_000);
+        let expected = payload.clone();
+        let worker = std::thread::spawn(move || {
+            let mut peer = BufReader::new(peer);
+            for id in 1..=3 {
+                let mut bytes = Vec::new();
+                peer.read_until(0, &mut bytes).unwrap();
+                assert_eq!(bytes.pop(), Some(0));
+                let request: Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(request["id"], id);
+                assert_eq!(request["sessionId"], "test-session");
+                assert_eq!(request["params"]["expression"], expected);
+                let result = match id {
+                    1 => json!({"result":{"value":expected}}),
+                    2 => json!({"result":{"type":"undefined"}}),
+                    _ => json!({"exceptionDetails":{"text":"test error"}}),
+                };
+                peer.get_mut()
+                    .write_all(b"{\"method\":\"Page.loadEventFired\"}\0")
+                    .unwrap();
+                let mut response = serde_json::to_vec(&json!({"id":id,"result":result})).unwrap();
+                response.push(0);
+                peer.get_mut().write_all(&response).unwrap();
+            }
+        });
+        let mut browser = Browser {
+            socket: BufReader::new(socket),
+            session: "test-session".into(),
+            id: 0,
+            context: None,
+            buffer: Vec::new(),
+            _process: Process(Command::new("true").spawn().unwrap()),
+            _profile: tempfile::tempdir().unwrap(),
+        };
+        assert_eq!(browser.eval(payload.clone()).unwrap(), payload);
+        assert_eq!(browser.eval(payload.clone()).unwrap(), Value::Null);
+        assert!(
+            browser
+                .eval(payload)
+                .unwrap_err()
+                .to_string()
+                .contains("test error")
+        );
+        worker.join().unwrap();
+    }
 
     #[test]
     fn launch_error_includes_executable_and_os_error() {

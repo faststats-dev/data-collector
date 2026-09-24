@@ -156,7 +156,7 @@ pub async fn store_replay_chunk(
             tx.commit().await?;
             return Ok(PersistOutcome::Duplicate);
         }
-        tokio::time::timeout(Duration::from_secs(30), objects.put(bucket, &object_key, compressed))
+        tokio::time::timeout(Duration::from_secs(30), objects.put(bucket, &object_key, compressed, &checksum))
             .await.map_err(|_| ReplayStorageError::Upload("Upload deadline exceeded".into()))?
             .map_err(ReplayStorageError::Upload)?;
 

@@ -49,14 +49,10 @@ async fn finalize_batch(pool: &PgPool) -> Result<(), sqlx::Error> {
         let Some(row) = row else {
             continue;
         };
-        // No retained envelope attests its initial sequence or coalesced interior.
-        // Its only honest backfill result is unknown, regardless of old booleans.
-        // Per-session version is a transactional, restartable checkpoint.
         let legacy = row.try_get::<i32, _>("coverage_version")? == 0;
         let due = row.try_get::<bool, _>("due")?;
         if legacy {
-            // This is state reconciliation, not a snapshot backfill. The old
-            // protocol cannot prove an initial sequence, so retain uncertainty.
+            // The old protocol cannot prove an initial sequence; retain uncertainty.
             sqlx::query(r#"
                 INSERT INTO replay_recording_controls(project_id,storage_generation,session_id,window_id,coverage)
                 VALUES($1,$2,$3,$4,'{"ranges":[],"terminal":null,"unknown":"legacy_contract"}')

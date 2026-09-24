@@ -1,4 +1,6 @@
+use crate::summarize::{PainPoint, ReplaySummary};
 use anyhow::{Context, Result, ensure};
+use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use sqlx::{Postgres, Row, Transaction};
@@ -11,17 +13,6 @@ const DECISION_MODEL: &str = "typesafe/jev-1.13";
 const MATCH_THRESHOLD: f64 = 0.8;
 
 #[derive(Debug, Clone)]
-struct Point {
-    id: Uuid,
-    description: String,
-    evidence: Option<String>,
-    surface: Option<String>,
-    action: Option<String>,
-    failure: Option<String>,
-    consequence: Option<String>,
-}
-
-#[derive(Debug, Clone)]
 struct PreparedPoint {
     id: Uuid,
     description: String,
@@ -29,7 +20,7 @@ struct PreparedPoint {
     vector: Vec<f64>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct Prepared {
     project_id: Uuid,
     model_version: String,
@@ -45,7 +36,7 @@ impl Prepared {
     }
 }
 
-fn canonical(point: &Point) -> String {
+fn canonical(point: &PainPoint) -> String {
     let mut s = String::new();
     for (name, value) in [
         ("surface", point.surface.as_deref()),
@@ -60,7 +51,7 @@ fn canonical(point: &Point) -> String {
     s.push_str(&format!(
         "problem: {}\nevidence: {}",
         point.description.trim(),
-        point.evidence.as_deref().unwrap_or("").trim()
+        point.evidence.trim()
     ));
     s.chars()
         .take(6000)
@@ -89,7 +80,7 @@ fn parse_batch(body: &serde_json::Value, count: usize) -> Result<Vec<Vec<f64>>> 
         embedding: Vec<f64>,
     }
     let mut data: Vec<Embedding> =
-        serde_json::from_value(body["data"].clone()).context("invalid embedding response")?;
+        Vec::deserialize(&body["data"]).context("invalid embedding response")?;
     ensure!(data.len() == count, "embedding vector count mismatch");
     data.sort_unstable_by_key(|row| row.index);
     let out = data
@@ -109,27 +100,8 @@ fn parse_batch(body: &serde_json::Value, count: usize) -> Result<Vec<Vec<f64>>> 
     Ok(out)
 }
 
-pub(crate) async fn prepare_new(
-    project: Uuid,
-    summary: &crate::summarize::ReplaySummary,
-) -> Result<Prepared> {
-    let points = summary
-        .pain_points
-        .iter()
-        .map(|point| Point {
-            id: Uuid::new_v4(),
-            description: point.description.clone(),
-            evidence: Some(point.evidence.clone()),
-            surface: point.surface.clone(),
-            action: point.action.clone(),
-            failure: point.failure.clone(),
-            consequence: point.consequence.clone(),
-        })
-        .collect();
-    prepare(project, points).await
-}
-
-async fn prepare(project_id: Uuid, points: Vec<Point>) -> Result<Prepared> {
+pub(crate) async fn prepare_new(project_id: Uuid, summary: &ReplaySummary) -> Result<Prepared> {
+    let points = &summary.pain_points;
     let model =
         std::env::var("REPLAY_INSIGHTS_EMBED_MODEL").unwrap_or_else(|_| DEFAULT_EMBED_MODEL.into());
     let model_version = format!("{model}+{PREP_VERSION}");
@@ -164,12 +136,12 @@ async fn prepare(project_id: Uuid, points: Vec<Point>) -> Result<Prepared> {
         })
         .collect::<Result<Vec<_>>>()?;
     let points = points
-        .into_iter()
+        .iter()
         .zip(texts)
         .zip(vectors)
         .map(|((point, text), vector)| PreparedPoint {
-            id: point.id,
-            description: point.description,
+            id: Uuid::new_v4(),
+            description: point.description.clone(),
             text,
             vector,
         })

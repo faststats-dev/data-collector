@@ -215,7 +215,7 @@ pub async fn replay(
         Ok(b) => b,
         Err(e) => return error_response(StatusCode::BAD_REQUEST, &e),
     };
-    let parsed: ReplayRequest = match serde_json::from_slice(&body) {
+    let mut parsed: ReplayRequest = match serde_json::from_slice(&body) {
         Ok(p) => p,
         Err(e) => {
             warn!(
@@ -226,7 +226,7 @@ pub async fn replay(
             return error_response(StatusCode::BAD_REQUEST, &format!("Invalid JSON: {}", e));
         }
     };
-    let body_token = parsed.token.clone();
+    let body_token = std::mem::take(&mut parsed.token);
     let request_origin = get_request_origin(&headers);
     let country = get_country(&headers);
 

@@ -270,26 +270,12 @@ async fn prepare_insights_with_lease(
     let mut attempts = 0;
     loop {
         attempts += 1;
-        // Renew before every potentially slow provider attempt; unlike renderer
-        // progress this stage has no 60-second no-progress deadline.
+        // run_job keeps renewing the lease while this attempt is pending.
         anyhow::ensure!(
             jobs::renew(pool, claim, "grouping").await?,
             "summary lease became stale during grouping"
         );
-        let operation = insights::prepare_new(claim.project_id, summary);
-        tokio::pin!(operation);
-        let mut heartbeat = tokio::time::interval(LEASE_RENEWAL_INTERVAL);
-        heartbeat.tick().await;
-        let result = loop {
-            tokio::select! {
-                result = &mut operation => break result,
-                _ = heartbeat.tick() => anyhow::ensure!(
-                    jobs::renew(pool, claim, "grouping").await?,
-                    "summary lease became stale during grouping"
-                ),
-            }
-        };
-        match result {
+        match insights::prepare_new(claim.project_id, summary).await {
             Ok(value) => return Ok(value),
             Err(error) if attempts < 3 && insights::is_transient(&error) => {
                 tracing::warn!(%error, attempts, "transient inline grouping failure");

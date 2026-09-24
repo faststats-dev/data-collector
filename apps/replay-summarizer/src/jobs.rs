@@ -318,9 +318,9 @@ pub async fn finish(
     if updated && state == "succeeded" {
         let report = report.as_ref().context("missing summary report")?;
         let summary: crate::summarize::ReplaySummary =
-            serde_json::from_value(report["summary"].clone())?;
+            crate::summarize::ReplaySummary::deserialize(&report["summary"])?;
         let metadata: crate::summarize::SummaryMetadata =
-            serde_json::from_value(report["metadata"].clone())?;
+            crate::summarize::SummaryMetadata::deserialize(&report["metadata"])?;
         // Publish the entity and its evidence in the same fenced transaction as job success.
         let id = Uuid::new_v4();
         sqlx::query(r#"

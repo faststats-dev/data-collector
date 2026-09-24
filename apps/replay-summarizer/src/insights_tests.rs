@@ -59,11 +59,12 @@ fn matching_requires_a_decision_not_just_similar_vectors() {
 }
 
 #[test]
-fn legacy_null_evidence() {
-    let point = Point {
-        id: Uuid::nil(),
+fn canonical_trims_and_normalizes_fields() {
+    let point = PainPoint {
+        timestamp_ms: 0,
+        confidence: 0.8,
         description: " Button BROKE ".into(),
-        evidence: None,
+        evidence: String::new(),
         surface: Some(" Checkout ".into()),
         action: None,
         failure: None,

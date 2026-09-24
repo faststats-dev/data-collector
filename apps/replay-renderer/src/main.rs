@@ -102,7 +102,8 @@ fn sandbox_check() -> Result<()> {
 
 fn render_job() -> Result<()> {
     sandbox::restrict()?;
-    let request: Request = serde_json::from_reader(std::fs::File::open("input.json")?)?;
+    let request: Request =
+        serde_json::from_reader(std::io::BufReader::new(std::fs::File::open("input.json")?))?;
     request.validate()?;
     let replay = Replay::from_events(request.events)?;
     ensure!(

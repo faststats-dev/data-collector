@@ -7,6 +7,7 @@ use aws_sdk_s3::{
 };
 use replay_message::ReplayChunk;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row};
 use std::{process::Command, time::Duration};
 use uuid::Uuid;
@@ -150,7 +151,12 @@ async fn immutable_uploads_reconciliation_and_generation_fences() -> Result<()> 
         .into_bytes();
     assert!(
         objects
-            .put(bucket, &key, b"overwrite".to_vec())
+            .put(
+                bucket,
+                &key,
+                b"overwrite".to_vec(),
+                &hex::encode(Sha256::digest(b"overwrite"))
+            )
             .await
             .is_err()
     );

@@ -48,8 +48,13 @@ impl ObjectStore {
         &self.bucket
     }
 
-    pub async fn put(&self, bucket: &str, key: &str, body: Vec<u8>) -> Result<(), String> {
-        let checksum = hex::encode(Sha256::digest(&body));
+    pub async fn put(
+        &self,
+        bucket: &str,
+        key: &str,
+        body: Vec<u8>,
+        checksum: &str,
+    ) -> Result<(), String> {
         let result = self
             .client
             .put_object()

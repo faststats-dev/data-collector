@@ -177,23 +177,24 @@ async fn handle_message(
                     .await
                     .map_err(|e| e.to_string())?;
                 }
-            } else if storage::store_replay_chunk(
-                objects,
-                pool,
-                *chunk,
-                config.final_idle_seconds,
-                config.final_grace_seconds,
-            )
-            .await
-            .or_else(|error| match error {
-                storage::ReplayStorageError::Conflict => {
-                    tracing::error!("Rejected replay content conflict; see replay_chunk_conflicts");
-                    metrics::counter!("replay_content_conflicts_total").increment(1);
-                    Ok(false)
-                }
-                error => Err(error.to_string()),
-            })? {
-                metrics::counter!("replay_first_sessions_total").increment(1);
+            } else {
+                storage::store_replay_chunk(
+                    objects,
+                    pool,
+                    *chunk,
+                    config.final_idle_seconds,
+                    config.final_grace_seconds,
+                )
+                .await
+                .or_else(|error| match error {
+                    storage::ReplayStorageError::Conflict => {
+                        tracing::error!(
+                            "Rejected replay content conflict; see replay_chunk_conflicts"
+                        );
+                        Ok(false)
+                    }
+                    error => Err(error.to_string()),
+                })?;
             }
         }
         ReplayCommand::SessionPatch(patch) => crate::controls::patch(pool, &patch)

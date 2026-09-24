@@ -226,7 +226,6 @@ pub async fn refresh(
             Some(state)
         }
         _ => {
-            metrics::counter!("replay_click_analysis_rebuilds_total").increment(1);
             let rows = sqlx::query_scalar::<_, Option<sqlx::types::Json<ClickAnalysis>>>(
                 "SELECT click_analysis FROM replay_snapshots WHERE project_id=$1 AND session_id=$2 AND window_id=$3 AND storage_generation=$4"
             ).bind(project).bind(session).bind(window).bind(generation).fetch_all(&mut **tx).await?;

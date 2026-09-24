@@ -100,8 +100,6 @@ async fn finalize_batch(pool: &PgPool) -> Result<(), sqlx::Error> {
             backfill = legacy,
             "Replay recording finalized or reclassified"
         );
-        metrics::counter!("replay_finalizations_total", "backfill"=>legacy.to_string())
-            .increment(1);
     }
     Ok(())
 }

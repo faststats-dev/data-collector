@@ -3184,7 +3184,6 @@ dependencies = [
  "dotenvy",
  "futures-util",
  "hex",
- "metrics",
  "rdkafka",
  "replay-message",
  "serde",

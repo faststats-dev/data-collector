@@ -304,6 +304,137 @@ async fn immutable_uploads_reconciliation_and_generation_fences() -> Result<()> 
         .execute(&pool)
         .await?;
     assert!(!save(&objects, &pool, chunk(second, 3, "soft-deleted")).await?);
+    synchronous_size_routes_and_retry(&objects, &pool, second).await?;
     pool.close().await;
+    Ok(())
+}
+
+// Exercise the actual upsert, detector and rollback against the exported schema.
+async fn synchronous_size_routes_and_retry(
+    objects: &ObjectStore,
+    pool: &PgPool,
+    project: Uuid,
+) -> Result<()> {
+    let routes = [
+        (Some(3000), "/z"),
+        (Some(1000), "/b"),
+        (Some(1000), "/a"),
+        (Some(3000), "/zz"),
+        (None, "/0"),
+        (None, "/zzz"),
+    ];
+    for (case, order) in [[0, 1, 2, 3, 4, 5], [5, 4, 3, 2, 1, 0], [4, 1, 3, 5, 2, 0]]
+        .iter()
+        .enumerate()
+    {
+        let session = format!("route-order-{case}");
+        for &index in order {
+            let (timestamp, route) = routes[index];
+            let mut input = chunk(project, index as i64, "");
+            input.session_id = session.clone();
+            input.events = vec![
+                json!({"type":4,"timestamp":timestamp,"data":{"href":route,"padding":"x".repeat(1000)}}),
+            ];
+            save(objects, pool, input.clone()).await?;
+            assert!(!save(objects, pool, input).await?);
+        }
+        let (entry, exit, chunks, total): (String, String, i32, i64) = sqlx::query_as(
+            "SELECT entry_route,exit_route,chunk_count,total_bytes FROM replay_sessions WHERE project_id=$1 AND session_id=$2")
+            .bind(project).bind(&session).fetch_one(pool).await?;
+        assert_eq!((entry.as_str(), exit.as_str(), chunks), ("/a", "/zz", 6));
+        let rows = sqlx::query("SELECT s3_key,compressed_bytes,uncompressed_bytes FROM replay_snapshots WHERE project_id=$1 AND session_id=$2")
+            .bind(project).bind(&session).fetch_all(pool).await?;
+        let mut compressed_total = 0;
+        for row in rows {
+            let bytes = objects
+                .client
+                .get_object()
+                .bucket(objects.bucket())
+                .key(row.try_get::<String, _>("s3_key")?)
+                .send()
+                .await?
+                .body
+                .collect()
+                .await?
+                .into_bytes();
+            let compressed: i64 = row.try_get("compressed_bytes")?;
+            let decoded: i64 = row.try_get("uncompressed_bytes")?;
+            assert_eq!(compressed, bytes.len() as i64);
+            assert_eq!(
+                decoded,
+                zstd::stream::decode_all(bytes.as_ref())?.len() as i64
+            );
+            assert!(decoded > compressed);
+            compressed_total += compressed;
+        }
+        assert_eq!(total, compressed_total);
+        let usage: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM replay_usage_sessions WHERE project_id=$1 AND session_id=$2",
+        )
+        .bind(project)
+        .bind(&session)
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(usage, 1);
+    }
+    // An overlapping chunk cannot replace either outer event-time endpoint.
+    for (case, order) in [[0, 1], [1, 0]].iter().enumerate() {
+        let session = format!("overlap-{case}");
+        for &index in order {
+            let (from, to, route) = if index == 0 {
+                (1000, 4000, "/outer")
+            } else {
+                (2000, 3000, "/inner")
+            };
+            let mut input = chunk(project, index, "");
+            input.session_id = session.clone();
+            input.events = vec![
+                json!({"type":4,"timestamp":from,"data":{"href":route}}),
+                json!({"type":3,"timestamp":to,"data":{}}),
+            ];
+            save(objects, pool, input).await?;
+        }
+        let endpoints: (String, String) = sqlx::query_as("SELECT entry_route,exit_route FROM replay_sessions WHERE project_id=$1 AND session_id=$2")
+            .bind(project).bind(&session).fetch_one(pool).await?;
+        assert_eq!(endpoints, ("/outer".into(), "/outer".into()));
+    }
+    // Entirely undated recordings use the same lexical rule across chunks.
+    for (case, order) in [["/z", "/a", "/m"], ["/m", "/a", "/z"]].iter().enumerate() {
+        let session = format!("undated-{case}");
+        for (sequence, route) in order.iter().enumerate() {
+            let mut input = chunk(project, sequence as i64, "");
+            input.session_id = session.clone();
+            input.events = vec![json!({"type":4,"data":{"href":route}})];
+            save(objects, pool, input).await?;
+        }
+        let endpoints: (String, String) = sqlx::query_as("SELECT entry_route,exit_route FROM replay_sessions WHERE project_id=$1 AND session_id=$2")
+            .bind(project).bind(&session).fetch_one(pool).await?;
+        assert_eq!(endpoints, ("/a".into(), "/z".into()));
+    }
+    // Late overlapping chunks still use synchronous, exact rage-click rebuilding.
+    let mut clicks = chunk(project, 0, "");
+    clicks.session_id = "synchronous-clicks".into();
+    clicks.events = vec![
+        json!({"type":3,"timestamp":1500,"_faststatsSeqId":3,"data":{"source":2,"type":2,"id":10,"x":20,"y":20}}),
+    ];
+    save(objects, pool, clicks.clone()).await?;
+    clicks.sequence = 1;
+    clicks.batch_id = Some("clicks-1".into());
+    clicks.events = [1100,1300].iter().enumerate().map(|(i,t)| json!({"type":3,"timestamp":t,"_faststatsSeqId":i+1,"data":{"source":2,"type":2,"id":10,"x":20,"y":20}})).collect();
+    // Fail after snapshot/session/click writes, proving all are rolled back.
+    sqlx::raw_sql("CREATE FUNCTION fail_usage() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected usage failure'; END $$; CREATE TRIGGER fail_usage BEFORE INSERT ON replay_usage_sessions FOR EACH ROW EXECUTE FUNCTION fail_usage()")
+        .execute(pool).await?;
+    assert!(save(objects, pool, clicks.clone()).await.is_err());
+    let before: (i32,i32,i32) = sqlx::query_as("SELECT chunk_count,click_count,rage_click_count FROM replay_sessions WHERE project_id=$1 AND session_id='synchronous-clicks'")
+        .bind(project).fetch_one(pool).await?;
+    assert_eq!(before, (1, 1, 0));
+    sqlx::query("DROP TRIGGER fail_usage ON replay_usage_sessions")
+        .execute(pool)
+        .await?;
+    assert!(!save(objects, pool, clicks.clone()).await?); // Existing billed session.
+    assert!(!save(objects, pool, clicks).await?); // Duplicate cannot count again.
+    let after: (i32,i32,i32) = sqlx::query_as("SELECT chunk_count,click_count,rage_click_count FROM replay_sessions WHERE project_id=$1 AND session_id='synchronous-clicks'")
+        .bind(project).fetch_one(pool).await?;
+    assert_eq!(after, (2, 3, 1));
     Ok(())
 }

@@ -26,15 +26,20 @@ use tokio::{
 };
 
 const ROOT: &str = "/tmp/replay-renderer";
+const MODE: &str = "REPLAY_RENDERER_INTERNAL_MODE";
 
 fn main() -> Result<()> {
-    match std::env::args().nth(1).as_deref() {
-        Some("--render-job") => return render_job(),
-        Some("--sandbox-check") => {
+    ensure!(
+        std::env::args_os().len() == 1,
+        "renderer takes no arguments"
+    );
+    match std::env::var(MODE).ok().as_deref() {
+        Some("render-job") => return render_job(),
+        Some("sandbox-check") => {
             sandbox::restrict()?;
             return sandbox_check();
         }
-        Some("--serve-clean") => {}
+        Some("serve-clean") => {}
         None => {
             // Re-exec before starting threads to discard inherited app secrets.
             let token =
@@ -47,16 +52,16 @@ fn main() -> Result<()> {
                 .env("LANG", "C.UTF-8")
                 .env("PORT", port)
                 .env("REPLAY_RENDER_TOKEN", token)
-                .arg("--serve-clean")
+                .env(MODE, "serve-clean")
                 .exec();
             return Err(error.into());
         }
-        _ => anyhow::bail!("unsupported renderer command"),
+        _ => anyhow::bail!("unsupported renderer mode"),
     }
     sandbox::protect_service()?;
     let status = std::process::Command::new(std::env::current_exe()?)
         .env_clear()
-        .arg("--sandbox-check")
+        .env(MODE, "sandbox-check")
         .status()?;
     ensure!(
         status.success(),
@@ -283,8 +288,8 @@ async fn run(
     tokio::fs::write(temporary.path().join("input.json"), body).await?;
     let mut command = tokio::process::Command::new(std::env::current_exe()?);
     command
-        .arg("--render-job")
         .env_clear()
+        .env(MODE, "render-job")
         .env("PATH", "/usr/local/bin:/usr/bin:/bin")
         .env("LANG", "C.UTF-8")
         .env("HOME", temporary.path())

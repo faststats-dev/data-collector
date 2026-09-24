@@ -54,8 +54,7 @@ correct replay time.
 
 Output is published only after encoding succeeds, without overwriting existing
 files. The report contains the output path, frame count, video duration and stage
-timings. A local `render-replay` CLI also accepts recordings and explicit asset
-paths. The encoding code supports discarding output for benchmarks.
+timings. The encoding code supports discarding output for benchmarks.
 
 ## Isolation and cleanup
 

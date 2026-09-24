@@ -17,7 +17,7 @@ const processes = fs.readdirSync('/proc').filter(id => /^\d+$/.test(id)).flatMap
     try { return [{id: Number(id), cmd: fs.readFileSync('/proc/'+id+'/cmdline', 'utf8')}]; }
     catch { return []; }
 });
-const jobs = processes.filter(p => p.cmd.startsWith('/usr/local/bin/replay-renderer\u0000--render-job'));
+const jobs = processes.filter(p => p.id !== 1 && p.cmd.startsWith('/usr/local/bin/replay-renderer\u0000'));
 "#;
 const TOKEN: &str = "renderer-integration-test-token-0123456789";
 
@@ -89,7 +89,13 @@ async fn wait_clean(container: &Container) -> Result<()> {
 async fn renderer_isolation_and_cleanup() -> Result<()> {
     let image = std::env::var("REPLAY_RENDERER_TEST_IMAGE")
         .unwrap_or_else(|_| "faststats-replay-renderer:test".into());
-    docker(&["run", "--rm", &image, "--sandbox-check"])?;
+    docker(&[
+        "run",
+        "--rm",
+        "-e",
+        "REPLAY_RENDERER_INTERNAL_MODE=sandbox-check",
+        &image,
+    ])?;
     let container = Container::start(
         &image,
         &[

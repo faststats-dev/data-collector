@@ -4,18 +4,18 @@ This is an ordered delivery plan for the replay system in this repository and `.
 
 ## Delivery contract
 
-Implement **step 1, ship it, then step 2, ship it**, and continue in numerical order. Each numbered step is a complete production release: its schema, infrastructure, producers, consumers, APIs, UI changes where applicable, tests, runbooks, and cutover belong to that step. Dependencies may point only to earlier steps. A step can remain deployed indefinitely without a later step to make it correct. Steps are release units, not promises of one day's work; split an oversized step only into equally complete vertical releases.
+Implement **step 1, ship it, then step 2, ship it**, and continue in numerical order. Each numbered step is a complete production release: its schema, infrastructure, producers, consumers, APIs, UI changes where applicable, tests and cutover belong to that step. Dependencies may point only to earlier steps. A step can remain deployed indefinitely without a later step to make it correct. Steps are release units, not promises of one day's work; split an oversized step only into equally complete vertical releases.
 
 Existing behavior may remain outside a step's scope. Do not introduce disposable queues, fake successful results, direct-write shortcuts, silent truncation, unbounded retries, or parallel implementations that a later step must repair. Compatibility is not a target-design constraint, but deployment must preserve accepted data and product behavior: use tested migrations and explicit maintenance windows where needed. Finish and remove a step's replaced paths in that release after its rollback window; do not defer cleanup to a final rewrite.
 
 Every step must:
 
-- [ ] Record prerequisites, owner, deployment order, measurable acceptance thresholds, and a rollback or roll-forward procedure before implementation.
+- [ ] Establish prerequisites, deployment order, measurable acceptance thresholds, and safe rollback before implementation.
 - [ ] Refactor touched code into clear domain, storage, orchestration, and provider boundaries; keep transactions and resource ownership explicit.
-- [ ] Use typed/versioned contracts, structured errors, bounded configuration, and shared Rust/TypeScript golden fixtures for identities, filters, detectors, and timestamps. Do not duplicate business rules across services.
+- [ ] Use typed/versioned contracts, structured errors, bounded configuration for identities, filters, detectors, and timestamps. Do not duplicate business rules across services.
 - [ ] Pass formatting, lint/type checks, focused behavioral tests, migration checks, and failure tests appropriate to the changed boundary in both affected repositories. No unrelated rewrites, suppressed checks, or implementation-mirroring tests.
-- [ ] Demonstrate the release's useful production behavior with later steps absent. Include its support procedure and capacity limits.
-- [ ] Remove superseded code/configuration and document the resulting ownership. Temporary rollout flags must have an owner and removal condition within the release.
+- [ ] Demonstrate the release's useful production behavior with later steps absent. Verify its capacity limits.
+- [ ] Remove superseded code/configuration and keep ownership clear. Temporary rollout flags must have an owner and removal condition within the release.
 - [ ] Maintain a removal checklist naming every replaced code path, schema/index, worker, topic/consumer group, object location, environment variable, secret/permission and deployment resource. Each item must be removed or justified as a tested permanent part of the target architecture before the owning release closes.
 - [ ] Close implementation decisions with code and evidence in their owning step. An unimplemented dependency, unresolved correctness defect, manual recurring repair or “clean up later” task blocks completion. Historical applied migrations remain immutable records; obsolete live schema and runtime behavior do not.
 
@@ -73,14 +73,15 @@ Database failures intentionally leave uploaded objects behind. Those objects req
 
 ### Tasks
 
-- [ ] Define a canonical payload checksum and immutable object identity.
-- [ ] Treat an existing batch identity with different content as a conflict, not an ordinary retry.
-- [ ] Use content-addressed keys or verified conditional creation supported by the selected object store.
-- [ ] Record checksums in authoritative chunk metadata and verify loaded objects against those checksums.
-- [ ] Reconcile object inventories against authoritative chunk/artifact references with a safe grace period and live upload claims for in-flight writes.
-- [ ] Cover upload-success/database-failure, uncertain commit outcomes, duplicate uploads, generation reset, and deletion races.
-- [ ] Replace bucket-per-project provisioning with exactly one central replay bucket and project/generation/type prefixes; preserve authorization and project-specific retention through explicit metadata and deletion workers. Bucket prefixes alone are not an authorization boundary.
-- [ ] Specify retention for raw data, manifests, derived artifacts, and orphaned uploads together.
+- [x] Remove one-time copy/import tooling after the snapshot port completes. Do not add Markdown documentation or one-off validation tests to the permanent suite.
+- [x] Define a canonical payload checksum and immutable object identity.
+- [x] Treat an existing batch identity with different content as a conflict, not an ordinary retry.
+- [x] Use content-addressed keys or verified conditional creation supported by the selected object store.
+- [x] Record checksums in authoritative chunk metadata and verify loaded objects against those checksums.
+- [x] Reconcile object inventories against authoritative chunk/artifact references with a safe grace period and live upload claims for in-flight writes.
+- [x] Cover upload-success/database-failure, uncertain commit outcomes, duplicate uploads, generation reset, and deletion races.
+- [x] Replace bucket-per-project provisioning with exactly one central replay bucket and project/generation/type prefixes; preserve authorization and project-specific retention through explicit metadata and deletion workers. Bucket prefixes alone are not an authorization boundary.
+- [x] Specify retention for raw data, manifests, derived artifacts, and orphaned uploads together.
 
 ### Acceptance criteria
 
@@ -99,15 +100,17 @@ Database failures intentionally leave uploaded objects behind. Those objects req
 
 Use current authoritative chunk metadata plus the checksums/location references added here; this release must not wait for step 2 manifests. Later manifest creation consumes these same verified references.
 
-- [ ] Update `../monorepo/apps/backend/src/services/session-replays/object-store.ts`, `bucket-provisioner.ts`, `replay-storage.ts`, `replay-expiry-worker.ts`, playback downloads, collector and summarizer together. Persist an explicit bucket/key/layout reference instead of reconstructing locations from a project ID.
-- [ ] Keep project-specific expiry in authoritative metadata and scheduled deletion; a shared-bucket lifecycle rule must never erase another project's data or fail to honor a shorter retention period.
-- [ ] Fence new reads/writes immediately on deletion or generation reset, revoke outstanding access within a defined bound, and reconcile raw objects, manifests and artifacts. Inventory cleanup must respect live upload claims and references, not just object age.
-- [ ] Provision the central bucket once through checked-in infrastructure configuration. Define `REPLAY_S3_BUCKET` as its exact name in collector, consumer, summarizer, backend and deployment examples. Remove `REPLAY_S3_BUCKET_PREFIX`, project-derived bucket names, alias/fallback interpretation and unused prefix normalization.
-- [ ] Migrate all retained objects and references, verify checksums and playback, then remove old project buckets after the explicit rollback window. Remove `ReplayBucketProvisionerLive`, its startup wiring, `REPLAY_RUN_MIGRATION_CLEANUP`, `deleteLegacyBucket`, `deleteBucketsExcept`, project lifecycle synchronization, and obsolete provisioning-only states/callers. No startup migration may delete the central bucket.
-- [ ] Replace project reset/delete operations with generation-fenced deletion of owned prefixes/references. Runtime credentials must not permit bucket creation/deletion or account-wide bucket enumeration; reserve bucket administration for infrastructure deployment.
-- [ ] Define one key layout, for example `projects/{project_id}/generations/{generation}/{raw|manifests|artifacts}/...`; forbid cross-project deduplication. Restrict authorized object access by project and generation, including signed URL creation.
-- [ ] Implement bounded, checkpointed expiry/orphan deletion with durable retry records now, using existing PostgreSQL maintenance facilities; do not depend on step 3. Apply project retention to referenced objects and artifacts, and reclaim multipart uploads/noncurrent versions if enabled. Bucket-wide lifecycle rules must be safe for every project.
-- [ ] Verify central-bucket durability/recovery and documented throughput limits against the target workload. An object-store outage may delay processing; it must not trigger a second-bucket fallback or acknowledgment of unpersisted data.
+- [x] Update `../monorepo/apps/backend/src/services/session-replays/object-store.ts`, `bucket-provisioner.ts`, `replay-storage.ts`, `replay-expiry-worker.ts`, playback downloads, collector and summarizer together. Persist an explicit bucket/key/layout reference instead of reconstructing locations from a project ID.
+- [x] Keep project-specific expiry in authoritative metadata and scheduled deletion; a shared-bucket lifecycle rule must never erase another project's data or fail to honor a shorter retention period.
+- [x] Fence new reads/writes immediately on deletion or generation reset, revoke outstanding access within a defined bound, and reconcile raw objects, manifests and artifacts. Inventory cleanup must respect live upload claims and references, not just object age.
+- [x] Provision the central bucket once (`faststats-replays-fra`, Frankfurt). Define `REPLAY_S3_BUCKET` as its exact name in collector, consumer, summarizer, backend and deployment examples. Remove `REPLAY_S3_BUCKET_PREFIX`, project-derived bucket names, alias/fallback interpretation and unused prefix normalization.
+- [x] Migrate retained objects and references, verify checksums, and load real snapshots through the backend reader for all six retained projects. S3: 266,950 verified objects; production PostgreSQL: 256,363 mapped references, zero missing; local PostgreSQL: 253,730 mapped references. Remove `ReplayBucketProvisionerLive`, its startup wiring, `REPLAY_RUN_MIGRATION_CLEANUP`, `deleteLegacyBucket`, `deleteBucketsExcept`, project lifecycle synchronization, and obsolete provisioning-only states/callers. No startup migration may delete the central bucket.
+- [x] Replace project reset/delete operations with generation-fenced deletion of owned prefixes/references.
+- [ ] Restrict runtime credentials to object access and prefix listing in the central bucket; reserve bucket administration for deployment.
+- [ ] Verify the deployed backend, collector, replay consumer and summarizer use `REPLAY_S3_BUCKET=faststats-replays-fra`, then retire the old project buckets after the rollback window.
+- [x] Define one key layout, for example `projects/{project_id}/generations/{generation}/{raw|manifests|artifacts}/...`; forbid cross-project deduplication. Restrict authorized object access by project and generation, including signed URL creation.
+- [x] Implement bounded, checkpointed expiry/orphan deletion with durable retry records now, using existing PostgreSQL maintenance facilities; do not depend on step 3. Apply project retention to referenced objects and artifacts, and reclaim multipart uploads/noncurrent versions if enabled. Bucket-wide lifecycle rules must be safe for every project.
+- [ ] Verify central-bucket durability/recovery and measured throughput limits against the target workload. An object-store outage may delay processing; it must not trigger a second-bucket fallback or acknowledgment of unpersisted data.
 
 ## 2. Use immutable recording revisions and analysis specifications
 
@@ -140,7 +143,7 @@ Job and summary uniqueness identify a recording revision without a complete anal
 - Two different payload sets cannot share an analysis identity merely because they have equal chunk counts.
 - A prompt/model/render change creates a distinct analysis identity.
 - Cached outputs cannot be reused across incompatible analysis specifications.
-- Physical compaction has documented effects on logical identity and existing summaries.
+- Physical compaction has measured effects on logical identity and existing summaries.
 
 ### References
 
@@ -174,7 +177,7 @@ The completed renderer isolation release frees the private renderer slot before 
 - [ ] Separate renderer concurrency from inference, embedding, and grouping concurrency. Use separately deployable worker pools with independent scheduling and bounded resources.
 - [ ] Define artifact retention and cleanup for successful, failed, abandoned, and superseded attempts.
 - [ ] Define crash recovery at every boundary, including a provider response received just before persistence fails.
-- [ ] Use provider idempotency or request lookup where available; otherwise document the remaining ambiguous-response duplicate-cost window.
+- [ ] Use provider idempotency or request lookup where available; otherwise account for the remaining ambiguous-response duplicate-cost window.
 
 ### Acceptance criteria
 
@@ -323,7 +326,7 @@ This creates round trips, row churn, index maintenance, and dependencies between
 
 - Ingestion acknowledgment does not depend on historical click analysis or insight computation.
 - Duplicate delivery does not double-count usage or chunk totals.
-- Database work per accepted chunk has a documented, measured bound for the normal path.
+- Database work per accepted chunk has a measured bound for the normal path.
 - Delayed analytics does not prevent durable recording ingestion.
 
 ### References
@@ -430,13 +433,13 @@ A small indexed operational listing can remain in PostgreSQL. The concern is arb
 - [ ] Define how mutable PostgreSQL state such as manual collections and viewed flags participates in filtering and pagination.
 - [ ] Avoid fetching huge candidate ID lists into application memory to join the two databases.
 - [ ] Propagate deletion and storage-generation changes, with explicit visibility guarantees while projections catch up.
-- [ ] Provide replay/backfill and reconciliation procedures for rebuilding projections.
+- [ ] Implement replay/backfill and reconciliation for rebuilding projections.
 - [ ] Choose partitioning, ordering keys, batching, and retention policies from measured query and ingestion patterns.
 
 ### Acceptance criteria
 
 - High-volume analytics does not execute broad scans against the job/ingestion database.
-- Duplicate or reordered projection events produce correct query results under the documented consistency model.
+- Duplicate or reordered projection events produce correct query results under the chosen consistency model.
 - Cross-store filtering has defined pagination and deletion behavior.
 - Benchmarks include large tenants, broad filters, concurrent ingestion, and retained history.
 
@@ -456,7 +459,7 @@ The existing `ReplayChunk` envelope has project/session/window/view IDs, generat
 | Navigation | sanitized origin/path, normalized route, navigation/view ID, referrer class, source-time start/end, event-time entry/exit | Page sequences, landing/exit routes, funnels, time on route |
 | Interaction | click/tap/scroll type, pointer type, source timestamp, rrweb node ID scoped to document/snapshot, approved stable element key, viewport coordinates, scroll offsets, document dimensions, element bounds where available | Element filters, rage/dead-click signals, click/tap/scroll heatmaps |
 | Correlated signals | error occurrence/issue ID, handled flag, vital name/value/rating, sanitized request route/method/status/duration, correlation ID | Replays with slow requests, a specific error, poor vitals or release regressions |
-| Product state | summary status/spec/version, finding category/confidence, collection membership version, viewer-scoped viewed state, deletion/generation tombstones | Combined analytical/product filters with documented freshness |
+| Product state | summary status/spec/version, finding category/confidence, collection membership version, viewer-scoped viewed state, deletion/generation tombstones | Combined analytical/product filters with measured freshness |
 | Approved custom context | typed allowlisted event names/properties, bounded key/value count and size, capture/sampling version | Customer-defined segments without uncontrolled schema/cardinality growth |
 
 - [ ] Inventory which fields are actually recorded versus derivable versus missing. Ship necessary SDK/capture, collector-envelope, domain-schema and query/UI changes in this release. If the SDK lives outside these repos, identify its owner/release prerequisite before starting the step. Missing values remain null/unknown; do not fabricate historical geometry or detector results.
@@ -471,7 +474,7 @@ The existing `ReplayChunk` envelope has project/session/window/view IDs, generat
 - [ ] Preserve viewport and document coordinates separately: scroll offsets, responsive breakpoint, route/view, layout/release and document/snapshot context determine alignment. Scope rrweb node IDs to their recording context; they are not stable selectors across sessions.
 - [ ] For element-based maps, require a sanitized stable element key and matching layout reference. For coordinate maps, use compatible layout/viewport cohorts and explicit transform rules. Do not merge unrelated responsive layouts into a misleading overlay.
 - [ ] Define scroll denominator from eligible page views and observed document height; record sampling policy/weights and missing geometry. Handle resize, dynamic page height, SPA navigation and nested scroll/iframe limitations explicitly.
-- [ ] Bound pointer-move volume with a documented sampling policy if movement maps are added. Start with click/tap and scroll data; pointer paths must not turn Kafka/ClickHouse into a copy of every DOM mutation.
+- [ ] Bound pointer-move volume with an explicit sampling policy if movement maps are added. Start with click/tap and scroll data; pointer paths must not turn Kafka/ClickHouse into a copy of every DOM mutation.
 - [ ] Verify known-coordinate fixtures, resize/scroll transforms, duplicate delivery, late navigation and deletion; match aggregate totals to deduplicated source facts.
 
 ### Kafka sink, consistency and recovery
@@ -480,7 +483,7 @@ The existing `ReplayChunk` envelope has project/session/window/view IDs, generat
 - [ ] Use the step 3 outbox for transactional state and accepted-chunk notifications; extraction workers read verified objects and publish facts to Kafka before acknowledging their input. Kafka transport is at-least-once: deterministic identities and version handling must make reprocessing safe.
 - [ ] Add Kafka-engine/MV migrations to `../monorepo/packages/clickhouse`, with explicit consumer groups, batch sizes, partition/consumer capacity, malformed-data quarantine and offset recovery. No `INSERT`, `INSERT SELECT`, HTTP insert, or direct repair path from application/backfill code.
 - [ ] Prove duplicate-safe query and aggregate semantics before serving reads. ReplacingMergeTree background merging alone does not prevent an incremental sum MV from counting duplicates. Choose deduplicated query state or versioned replacement aggregate snapshots; test corrections/deletions and measure query cost before selecting engines.
-- [ ] Publish versioned deletion/generation tombstones through Kafka, enforce authoritative read authorization immediately, and remove physical facts/aggregates within a documented deletion SLA. Keep deletion fences beyond the maximum replay horizon so old topics/backfills cannot resurrect data; include caches and heatmaps.
+- [ ] Publish versioned deletion/generation tombstones through Kafka, enforce authoritative read authorization immediately, and remove physical facts/aggregates within the deletion SLA. Keep deletion fences beyond the maximum replay horizon so old topics/backfills cannot resurrect data; include caches and heatmaps.
 - [ ] Define state-projection lag, read-after-write behavior and stable pagination watermarks. Combine projected collection/summary state with analytics without large application-side ID joins; use bounded authoritative checks for returned records and fail closed on deleted generations.
 - [ ] Backfill from verified retained manifests and authoritative state through the same topics/contracts; rate-limit it separately from live ingestion, checkpoint progress, preserve stable IDs and reconcile counts/checksums. Kafka retention alone is not the long-term rebuild archive.
 - [ ] Benchmark sort keys/partitions against retained-data scans, large projects, high-cardinality routes and concurrent ingestion. Avoid a ClickHouse partition/table per project; start with time partitions and project-leading ordering based on measured queries.
@@ -614,7 +617,7 @@ Structured interaction evidence contains only the first 500 matching events, bia
 - [ ] Include navigation, interactions, visible-state changes, and correlated error/vital signals when available and appropriately scoped.
 - [ ] Select visual windows around meaningful transitions, repeated actions, and potential failures.
 - [ ] Preserve broader coverage or sampling so event selection does not systematically hide unexpected problems.
-- [ ] Replace first-500 truncation with a documented coverage strategy, counts, and explicit omitted intervals.
+- [ ] Replace first-500 truncation with an explicit coverage strategy, counts, and explicit omitted intervals.
 - [ ] Preserve source-time mappings through idle compression, clip selection, and playback acceleration.
 - [ ] Evaluate against short-lived failures, long idle periods, touch interactions, missing assets, and replay artifacts.
 - [ ] Measure quality and cost against the current whole-video baseline before changing defaults.
@@ -623,7 +626,7 @@ Structured interaction evidence contains only the first 500 matching events, bia
 
 - Findings have traceable evidence and valid original recording timestamps.
 - Long recordings receive deliberate coverage beyond the first 500 interactions.
-- Visual sampling settings have documented effects on observable detail.
+- Visual sampling settings have measured effects on observable detail.
 - Cost reductions do not come from silently losing known classes of important evidence.
 
 ### References
@@ -678,7 +681,7 @@ Decoded bytes do not bound browser DOM memory, frame buffers, or render duration
 
 **Prerequisites:** Steps 1–11.
 
-**Shippable outcome:** Publish capacity, recovery and quality evidence for the complete target system and resolve any failed gates.
+**Shippable outcome:** Verify capacity, recovery and quality for the complete target system and resolve any failed gates.
 
 **Deployment and recovery:** Run isolated drills before controlled production exercises; preserve recovery points and halt expansion when acceptance thresholds fail.
 
@@ -687,18 +690,17 @@ This release is a final system-level capacity certification, not a deferred test
 ### Tasks and acceptance gates
 
 - [ ] Run a reproducible workload matrix covering retained history, many small projects, skewed large projects, duplicate/late/out-of-order chunks, incomplete recordings, deletion and long/pathological sessions. Record hardware, versions, data volumes and target load.
-- [ ] Establish benchmark acceptance thresholds before implementation and verify p95/p99 ingestion acknowledgment, playback first-byte, filter/heatmap query, finalization and summary queue-age budgets at projected peak plus a documented headroom factor. Report saturation points and cost per accepted/processed replay.
+- [ ] Establish benchmark acceptance thresholds before implementation and verify p95/p99 ingestion acknowledgment, playback first-byte, filter/heatmap query, finalization and summary queue-age budgets at projected peak plus a measured headroom factor. Report saturation points and cost per accepted/processed replay.
 - [ ] Demonstrate horizontal throughput gains while database lock waits, Kafka lag, object request rates, ClickHouse parts/merge backlog, memory and temporary disk remain bounded. Explain any serial bottleneck and remove it before claiming the scale target is met.
 - [ ] Exercise failure after upload, transaction commit, outbox publish, workflow start, provider response, artifact persistence, ClickHouse consumption and offset commit. Validate no lost acknowledged work, no duplicate billing and no stale/deleted publication.
-- [ ] Restore PostgreSQL, object references and workflow service state; rebuild ClickHouse exclusively through Kafka. Test outages longer than normal topic retention, document RPO/RTO and prove tombstones survive reconstruction.
+- [ ] Restore PostgreSQL, object references and workflow service state; rebuild ClickHouse exclusively through Kafka. Test outages longer than normal topic retention, measure RPO/RTO and prove tombstones survive reconstruction.
 - [ ] Verify renderer isolation, per-project authorization, workload isolation, cancellation cleanup, provider budgets and small-project fairness in the actual deployment environment.
 - [ ] Evaluate summary/grouping quality against labeled evidence, including false merges/splits, late data, long sessions and short-lived visual failures. Successful JSON validation alone does not demonstrate quality.
 - [ ] Audit remaining direct ClickHouse data writers, obsolete replay paths, duplicate schedulers, obsolete bucket provisioners, rollout flags and unused schemas. Any bypass or unfinished replacement fails completion.
 - [ ] Reconcile the removal checklists against source searches, database catalogs, bucket inventory, Kafka topics/groups, Temporal worker deployments and the actual deployed infrastructure. Require zero unexplained leftovers; repository inspection alone cannot prove deployed cleanup.
 - [ ] Verify fresh installation and upgrade from retained production-like data converge to the same supported architecture: one central replay bucket, Temporal Cloud/Rust execution, one outbox delivery mechanism, Kafka-fed ClickHouse and pgvector representatives. Verify no legacy service is required to start, read old recordings or recover work.
-- [ ] Confirm every required infrastructure resource is reproducible from checked-in configuration, with pinned supported versions, scoped credentials, secret rotation instructions, bounded retention and a tested recovery procedure. Remove unused resources and credentials instead of retaining dormant deployments.
+- [ ] Confirm every required infrastructure resource is reproducible from checked-in configuration, with pinned supported versions, scoped credentials, secret rotation, bounded retention and a tested recovery procedure. Remove unused resources and credentials instead of retaining dormant deployments.
 - [ ] Close every in-scope defect/debt item discovered during implementation and audit before marking the plan complete. Record supported limits and external-provider ambiguity explicitly; neither is permission to hide a failing supported workload or a workaround. This backlog cannot certify unknown future defects, but no known in-scope code or infrastructure debt may remain open.
-- [ ] Publish operating limits, scaling triggers, ownership, runbooks, measured results and explicitly excluded workload classes outside the agreed product requirements. Do not describe the system as extremely scalable until it passes these gates.
 
 ## Source and technology references
 

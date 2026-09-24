@@ -2,33 +2,26 @@ use aws_sdk_s3::Client;
 use aws_sdk_s3::config::{Builder, Credentials, Region};
 use aws_sdk_s3::error::DisplayErrorContext;
 use aws_sdk_s3::primitives::ByteStream;
-use uuid::Uuid;
+use sha2::{Digest, Sha256};
 
+#[derive(Clone)]
 pub struct ObjectStore {
-    client: Client,
-    bucket_prefix: String,
+    pub(crate) client: Client,
+    bucket: String,
 }
 
 impl ObjectStore {
     pub fn from_env() -> Result<Self, String> {
-        let bucket_prefix = std::env::var("REPLAY_S3_BUCKET_PREFIX")
-            .ok()
-            .or_else(|| std::env::var("REPLAY_S3_BUCKET").ok());
+        let bucket =
+            std::env::var("REPLAY_S3_BUCKET").map_err(|_| "REPLAY_S3_BUCKET must be set")?;
+        if bucket.trim().is_empty() {
+            return Err("REPLAY_S3_BUCKET must not be empty".into());
+        }
         let endpoint = std::env::var("REPLAY_S3_ENDPOINT")
             .ok()
             .filter(|value| !value.trim().is_empty());
         let access_key = std::env::var("REPLAY_S3_ACCESS_KEY_ID").ok();
         let secret_key = std::env::var("REPLAY_S3_SECRET_ACCESS_KEY").ok();
-        if bucket_prefix.is_none()
-            && endpoint.is_none()
-            && access_key.is_none()
-            && secret_key.is_none()
-        {
-            return Err("Replay S3 configuration must be set".into());
-        }
-
-        let bucket_prefix =
-            normalize_bucket_prefix(&bucket_prefix.ok_or("REPLAY_S3_BUCKET_PREFIX must be set")?)?;
         let access_key = access_key.ok_or("REPLAY_S3_ACCESS_KEY_ID must be set")?;
         let secret_key = secret_key.ok_or("REPLAY_S3_SECRET_ACCESS_KEY must be set")?;
         let region = std::env::var("REPLAY_S3_REGION").unwrap_or_else(|_| "us-east-1".into());
@@ -47,30 +40,52 @@ impl ObjectStore {
         }
         Ok(Self {
             client: Client::from_conf(config.build()),
-            bucket_prefix,
+            bucket,
         })
     }
 
-    pub fn bucket(&self, project_id: Uuid) -> String {
-        format!("{}-{}", self.bucket_prefix, project_id)
+    pub fn bucket(&self) -> &str {
+        &self.bucket
     }
 
     pub async fn put(&self, bucket: &str, key: &str, body: Vec<u8>) -> Result<(), String> {
-        self.client
+        let checksum = hex::encode(Sha256::digest(&body));
+        let result = self
+            .client
             .put_object()
             .bucket(bucket)
             .key(key)
+            .if_none_match("*")
             .content_type("application/json")
             .content_encoding("zstd")
             .body(ByteStream::from(body))
             .send()
-            .await
-            .map_err(|error| {
-                format!(
-                    "PutObject to bucket {bucket} failed: {}",
-                    DisplayErrorContext(error)
-                )
-            })?;
+            .await;
+        if let Err(error) = result {
+            if error
+                .as_service_error()
+                .is_some_and(|e| e.meta().code() == Some("PreconditionFailed"))
+            {
+                let response = self
+                    .client
+                    .get_object()
+                    .bucket(bucket)
+                    .key(key)
+                    .send()
+                    .await
+                    .map_err(|e| format!("Verify existing object: {e}"))?;
+                let mut stream = response.body;
+                let mut digest = Sha256::new();
+                while let Some(bytes) = stream.try_next().await.map_err(|e| e.to_string())? {
+                    digest.update(&bytes);
+                }
+                if hex::encode(digest.finalize()) != checksum {
+                    return Err("Existing immutable object checksum mismatch".into());
+                }
+            } else {
+                return Err(format!("PutObject failed: {}", DisplayErrorContext(error)));
+            }
+        }
         Ok(())
     }
 
@@ -91,43 +106,9 @@ impl ObjectStore {
     }
 }
 
-fn normalize_bucket_prefix(value: &str) -> Result<String, String> {
-    let normalized = value
-        .trim()
-        .to_ascii_lowercase()
-        .chars()
-        .map(|character| {
-            if character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-' {
-                character
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>()
-        .trim_matches('-')
-        .chars()
-        .take(26)
-        .collect::<String>();
-    if normalized.len() < 3 {
-        return Err("REPLAY_S3_BUCKET_PREFIX must contain at least 3 valid characters".into());
-    }
-    Ok(normalized)
-}
-
 #[cfg(test)]
-mod tests {
-    use super::normalize_bucket_prefix;
-
-    #[test]
-    fn normalizes_project_bucket_prefixes() {
-        assert_eq!(
-            normalize_bucket_prefix(" FastStats_Replays ").unwrap(),
-            "faststats-replays"
-        );
-        assert_eq!(
-            normalize_bucket_prefix("abcdefghijklmnopqrstuvwxyz-more").unwrap(),
-            "abcdefghijklmnopqrstuvwxyz"
-        );
-        assert!(normalize_bucket_prefix("__").is_err());
+impl ObjectStore {
+    pub(crate) fn for_test(client: Client, bucket: String) -> Self {
+        Self { client, bucket }
     }
 }

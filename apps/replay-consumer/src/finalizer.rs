@@ -8,14 +8,12 @@ async fn finalize_batch(pool: &PgPool) -> Result<(), sqlx::Error> {
     // Inactive projects must not pin the front of either candidate index.
     let mut candidates = sqlx::query(r#"
         SELECT s.project_id,s.session_id,s.window_id
-        FROM replay_sessions s JOIN project p ON p.id=s.project_id AND p.replay_storage_state='active'
-        WHERE s.deleted_at IS NULL AND s.coverage_version=0
+        FROM replay_sessions s JOIN project p ON p.id=s.project_id WHERE s.deleted_at IS NULL AND s.coverage_version=0
         ORDER BY s.id LIMIT 25
     "#).fetch_all(pool).await?;
     candidates.extend(sqlx::query(r#"
         SELECT s.project_id,s.session_id,s.window_id
-        FROM replay_sessions s JOIN project p ON p.id=s.project_id AND p.replay_storage_state='active'
-        WHERE s.deleted_at IS NULL AND s.coverage_version=1 AND s.finalize_after<=NOW()
+        FROM replay_sessions s JOIN project p ON p.id=s.project_id WHERE s.deleted_at IS NULL AND s.coverage_version=1 AND s.finalize_after<=NOW()
         ORDER BY s.finalize_after LIMIT 75
     "#).fetch_all(pool).await?);
     for candidate in candidates {
@@ -26,8 +24,12 @@ async fn finalize_batch(pool: &PgPool) -> Result<(), sqlx::Error> {
         sqlx::query("SET LOCAL statement_timeout='5s'")
             .execute(&mut *tx)
             .await?;
-        let generation: Option<i32> = sqlx::query_scalar("SELECT replay_storage_generation FROM project WHERE id=$1 AND replay_storage_state='active' FOR SHARE")
-            .bind(project).fetch_optional(&mut *tx).await?;
+        let generation: Option<i32> = sqlx::query_scalar(
+            "SELECT replay_storage_generation FROM project WHERE id=$1 FOR SHARE",
+        )
+        .bind(project)
+        .fetch_optional(&mut *tx)
+        .await?;
         let Some(generation) = generation else {
             continue;
         };
@@ -140,7 +142,3 @@ pub async fn run(pool: sqlx::PgPool) {
     };
     tokio::join!(scan, cleanup);
 }
-
-#[cfg(test)]
-#[path = "completeness_tests.rs"]
-mod tests;

@@ -34,7 +34,7 @@ pub async fn load(
     if input.protocol != 1 || input.max_decoded_bytes == 0 {
         return Err(Failure::input(anyhow::anyhow!("unsupported render input")));
     }
-    let bucket = objects.bucket(input.project_id);
+
     let mut chunks = input.chunks.into_iter().peekable();
     let mut events = vec![];
     let mut decoded = 0;
@@ -57,16 +57,32 @@ pub async fn load(
             bytes += size;
             wave.push(chunks.next().unwrap());
         }
-        let bodies =
-            try_join_all(wave.iter().map(|chunk| {
-                objects.get(&bucket, &chunk.key, chunk.compressed_bytes.max(1) as usize)
-            }))
+        let bodies = try_join_all(wave.iter().map(|chunk| async {
+            ensure!(
+                chunk.key.starts_with(&format!(
+                    "projects/{}/generations/{}/raw/",
+                    input.project_id, chunk.generation
+                )),
+                "Replay object ownership mismatch"
+            );
+            tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                objects.get(
+                    &chunk.bucket,
+                    &chunk.key,
+                    &chunk.checksum,
+                    chunk.compressed_bytes.max(1) as usize,
+                ),
+            )
             .await
-            .map_err(|error| Failure {
-                code: "object_store",
-                error,
-                retryable: true,
-            })?;
+            .context("Replay download deadline exceeded")?
+        }))
+        .await
+        .map_err(|error| Failure {
+            code: "object_store",
+            error,
+            retryable: true,
+        })?;
         for (chunk, body) in wave.into_iter().zip(bodies) {
             let remaining = input.max_decoded_bytes - decoded;
             let (mut part, size) = tokio::task::spawn_blocking(move || {

@@ -12,21 +12,22 @@ const ZSTD_COMPRESSION_LEVEL: i32 = 3;
 const REPLAY_COMPRESSION_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub(crate) const ACCEPTED_CHUNK: &str = r#"
-    SELECT EXISTS (
-        SELECT 1 FROM replay_snapshots
-        WHERE project_id=$1 AND session_id=$2 AND window_id=$3 AND storage_generation=$6
-          AND (($4::text IS NOT NULL AND batch_id=$4) OR sequence=$5)
-    )
+    SELECT checksum_sha256 FROM replay_snapshots
+    WHERE project_id=$1 AND session_id=$2 AND window_id=$3 AND storage_generation=$6
+      AND (($4::text IS NOT NULL AND batch_id=$4) OR sequence=$5)
 "#;
 
 enum PersistOutcome {
     Stored { first_for_billing: bool },
     Duplicate,
     Inactive,
+    Conflict,
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum ReplayStorageError {
+    #[error("Replay batch identity has conflicting content (durably recorded)")]
+    Conflict,
     #[error("Failed to serialize replay chunk: {0}")]
     Serialization(#[from] serde_json::Error),
     #[error("Failed to compress replay chunk: {0}")]
@@ -68,23 +69,6 @@ pub async fn store_replay_chunk(
         return Ok(false);
     }
 
-    // Only accepted identities establish a retry. Legacy range endpoints do
-    // not prove their interiors and must never suppress a missing singleton.
-    let already_stored: bool = sqlx::query_scalar(ACCEPTED_CHUNK)
-        .bind(input.project_id)
-        .bind(&input.session_id)
-        .bind(&input.window_id)
-        .bind(&input.batch_id)
-        .bind(input.sequence)
-        .bind(input.storage_generation)
-        .fetch_one(pool)
-        .await?;
-    if already_stored {
-        if input.is_final {
-            record_terminal_hint(pool, &input, Acceptance::Duplicate, grace_seconds).await?;
-        }
-        return Ok(false);
-    }
     if !input.events.is_sorted_by_key(replay_event_order) {
         input.events.sort_by_cached_key(replay_event_order);
     }
@@ -102,28 +86,35 @@ pub async fn store_replay_chunk(
 
     let click_analysis = crate::clicks::extract(&input.events);
     let route_metadata = replay_route_metadata(&input.events, input.url.as_deref());
-    let object_key = replay_object_key(
-        input.storage_generation,
-        &input.session_id,
-        &input.window_id,
-        input.batch_id.as_deref(),
-        input.sequence,
-        first_event_timestamp_ms.unwrap_or(0),
-    );
     let compressed = compress_replay_events(std::mem::take(&mut input.events)).await?;
+    let checksum = hex::encode(Sha256::digest(&compressed));
+    // A fresh physical identity prevents a timed-out DELETE from a prior
+    // abandoned attempt from later deleting an accepted retry with equal bytes.
+    let object_key = replay_object_key(
+        input.project_id,
+        input.storage_generation,
+        &checksum,
+        snapshot_id,
+    );
     let compressed_bytes = i64::try_from(compressed.len()).unwrap_or(i64::MAX);
 
     // This column historically stores compressed size; keep existing accounting.
     let uncompressed_bytes = compressed_bytes;
 
-    let bucket = objects.bucket(input.project_id);
-    objects
-        .put(&bucket, &object_key, compressed)
-        .await
-        .map_err(ReplayStorageError::Upload)?;
-
+    let bucket = objects.bucket();
+    // A committed registry entry survives failed/uncertain metadata commits. Its
+    // row lock is the live upload claim: reclamation must take the same lock.
+    sqlx::query("INSERT INTO replay_objects(bucket,key) VALUES($1,$2) ON CONFLICT DO NOTHING")
+        .bind(bucket)
+        .bind(&object_key)
+        .execute(pool)
+        .await?;
     let result = async {
         let mut tx = pool.begin().await?;
+        sqlx::raw_sql("SET LOCAL lock_timeout='5s'; SET LOCAL statement_timeout='35s'; SET LOCAL idle_in_transaction_session_timeout='40s'").execute(&mut *tx).await?;
+        let claimed: Option<String> = sqlx::query_scalar("SELECT key FROM replay_objects WHERE bucket=$1 AND key=$2 FOR UPDATE")
+            .bind(bucket).bind(&object_key).fetch_optional(&mut *tx).await?;
+        if claimed.is_none() { return Err(ReplayStorageError::Upload("Object claim was reclaimed; retry".into())); }
 
         if !replay_storage_generation_is_active(
             &mut *tx,
@@ -133,7 +124,7 @@ pub async fn store_replay_chunk(
         .await?
         {
             tx.commit().await?;
-            return Ok::<PersistOutcome, sqlx::Error>(PersistOutcome::Inactive);
+            return Ok::<PersistOutcome, ReplayStorageError>(PersistOutcome::Inactive);
         }
 
         crate::controls::lock_stream(
@@ -145,19 +136,29 @@ pub async fn store_replay_chunk(
         )
         .await?;
 
-        let deleted: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM replay_sessions WHERE project_id=$1 AND session_id=$2 AND window_id=$3 AND deleted_at IS NOT NULL)")
-            .bind(input.project_id).bind(&input.session_id).bind(&input.window_id).fetch_one(&mut *tx).await?;
-        if deleted { return Ok(PersistOutcome::Inactive); }
+        if crate::controls::is_deleted(&mut tx, input.project_id, input.storage_generation, &input.session_id, &input.window_id).await? {
+            return Ok(PersistOutcome::Inactive);
+        }
 
-        let overlap_exists: bool = sqlx::query_scalar(ACCEPTED_CHUNK)
+        let accepted: Vec<String> = sqlx::query_scalar(ACCEPTED_CHUNK)
             .bind(input.project_id).bind(&input.session_id).bind(&input.window_id)
             .bind(&input.batch_id).bind(input.sequence).bind(input.storage_generation)
-            .fetch_one(&mut *tx).await?;
-        if overlap_exists {
+            .fetch_all(&mut *tx).await?;
+        if !accepted.is_empty() {
+            if accepted.iter().any(|hash| hash != &checksum) {
+                sqlx::query("INSERT INTO replay_chunk_conflicts(project_id,storage_generation,session_id,window_id,sequence,batch_id,checksum_sha256) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING")
+                    .bind(input.project_id).bind(input.storage_generation).bind(&input.session_id).bind(&input.window_id)
+                    .bind(input.sequence).bind(&input.batch_id).bind(&checksum).execute(&mut *tx).await?;
+                tx.commit().await?;
+                return Ok(PersistOutcome::Conflict);
+            }
             if input.is_final { crate::controls::record_chunk(&mut tx, &input, Acceptance::Duplicate, grace_seconds).await?; }
             tx.commit().await?;
-            return Ok::<PersistOutcome, sqlx::Error>(PersistOutcome::Duplicate);
+            return Ok(PersistOutcome::Duplicate);
         }
+        tokio::time::timeout(Duration::from_secs(30), objects.put(bucket, &object_key, compressed))
+            .await.map_err(|_| ReplayStorageError::Upload("Upload deadline exceeded".into()))?
+            .map_err(ReplayStorageError::Upload)?;
 
         let insert_result = sqlx::query(
             r#"
@@ -189,12 +190,12 @@ pub async fn store_replay_chunk(
                 routes,
                 route_count,
                 route_spans,
-                click_analysis
+                click_analysis, s3_bucket, checksum_sha256, storage_layout
             )
             VALUES (
                 $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
                 $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24,
-                $25, $26, $27, $28
+                $25, $26, $27, $28, $29, $30, 1
             )
             ON CONFLICT DO NOTHING
             "#,
@@ -227,12 +228,14 @@ pub async fn store_replay_chunk(
         .bind(i32::try_from(route_metadata.routes.len()).unwrap_or(i32::MAX))
         .bind(sqlx::types::Json(&route_metadata.route_spans))
         .bind(sqlx::types::Json(&click_analysis))
+        .bind(bucket)
+        .bind(&checksum)
         .execute(&mut *tx)
         .await?;
 
         if insert_result.rows_affected() == 0 {
             tx.commit().await?;
-            return Ok::<PersistOutcome, sqlx::Error>(PersistOutcome::Duplicate);
+            return Ok::<PersistOutcome, ReplayStorageError>(PersistOutcome::Duplicate);
         }
 
         let initial_actual_duration_ms = match (first_event_timestamp_ms, last_event_timestamp_ms)
@@ -366,7 +369,7 @@ pub async fn store_replay_chunk(
         .is_some();
 
         tx.commit().await?;
-        Ok::<PersistOutcome, sqlx::Error>(PersistOutcome::Stored { first_for_billing })
+        Ok::<PersistOutcome, ReplayStorageError>(PersistOutcome::Stored { first_for_billing })
     }
     .await;
 
@@ -381,21 +384,10 @@ pub async fn store_replay_chunk(
             );
             Ok(first_for_billing)
         }
-        Ok(PersistOutcome::Duplicate) => {
-            // The winning transaction references the same object; keep it.
-            Ok(false)
-        }
-        Ok(PersistOutcome::Inactive) => {
-            objects
-                .delete(&bucket, &object_key)
-                .await
-                .map_err(ReplayStorageError::Upload)?;
-            Ok(false)
-        }
-        Err(error) => {
-            // Keep the object: another transaction may reference it, or a retry may reuse it.
-            Err(ReplayStorageError::Database(error))
-        }
+        Ok(PersistOutcome::Duplicate) => Ok(false),
+        Ok(PersistOutcome::Inactive) => Ok(false),
+        Ok(PersistOutcome::Conflict) => Err(ReplayStorageError::Conflict),
+        Err(error) => Err(error),
     }
 }
 
@@ -439,8 +431,7 @@ where
         FROM project
         WHERE id = $1
           AND replay_storage_generation = $2
-          AND replay_storage_state = 'active'
-        FOR SHARE
+          FOR SHARE
         "#,
     )
     .bind(project_id)
@@ -450,25 +441,8 @@ where
     Ok(row.is_some())
 }
 
-fn replay_object_key(
-    storage_generation: i32,
-    session_id: &str,
-    window_id: &str,
-    batch_id: Option<&str>,
-    sequence: i64,
-    first_event_timestamp_ms: i64,
-) -> String {
-    let mut hasher = Sha256::new();
-    if let Some(batch_id) = batch_id {
-        hasher.update(batch_id.as_bytes());
-    } else {
-        hasher.update(window_id.as_bytes());
-        hasher.update(sequence.to_be_bytes());
-    }
-    let identity = hex::encode(hasher.finalize());
-    format!(
-        "{storage_generation}/{session_id}/{window_id}/{first_event_timestamp_ms}-{identity}.json.zst"
-    )
+fn replay_object_key(project: Uuid, generation: i32, checksum: &str, attempt: Uuid) -> String {
+    format!("projects/{project}/generations/{generation}/raw/{checksum}-{attempt}.json.zst")
 }
 
 // Bound metric label cardinality; unrecognized reasons become "unknown".
@@ -527,7 +501,13 @@ fn zstd_json_value_array(events: &[Value]) -> Result<Vec<u8>, ReplayStorageError
 }
 
 async fn compress_replay_events(events: Vec<Value>) -> Result<Vec<u8>, ReplayStorageError> {
-    let task = tokio::task::spawn_blocking(move || zstd_json_value_array(&events));
+    let task = tokio::task::spawn_blocking(move || {
+        let mut events = events;
+        for event in &mut events {
+            event.sort_all_objects();
+        }
+        zstd_json_value_array(&events)
+    });
     tokio::time::timeout(REPLAY_COMPRESSION_TIMEOUT, task)
         .await
         .map_err(|_| ReplayStorageError::CompressionTimeout)?
@@ -671,25 +651,6 @@ mod tests {
                 events
             );
         }
-    }
-
-    #[test]
-    fn replay_object_keys_are_generation_scoped() {
-        let key = replay_object_key(7, "session-1", "window-1", Some("batch-1"), 3, 1234);
-        assert!(key.starts_with("7/session-1/window-1/1234-"));
-        assert!(key.ends_with(".json.zst"));
-    }
-
-    #[test]
-    fn object_keys_preserve_batch_and_sequence_identity() {
-        assert_eq!(
-            replay_object_key(7, "session-1", "window-1", Some("batch-1"), 3, 1234),
-            "7/session-1/window-1/1234-8f5815465303ca0a3b700c07068ef3ef0bf6f4d8a6cd60bf7220cd3d33e7c77e.json.zst"
-        );
-        assert_eq!(
-            replay_object_key(7, "session-1", "window-1", None, 3, 1234),
-            "7/session-1/window-1/1234-4070b5f677fec2a932773f091193ed1c4c3d5bbfba5924104aed48c8ab939bf4.json.zst"
-        );
     }
 
     #[test]

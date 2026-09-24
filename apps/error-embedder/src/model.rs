@@ -80,11 +80,15 @@ impl Model {
             .unwrap_or_else(|_| "2".into())
             .parse()?;
         ensure!(threads > 0, "EMBED_THREADS must be positive");
-        let mut builder = Session::builder()?.with_intra_threads(threads)?;
+        let mut builder = Session::builder()?
+            .with_intra_threads(threads)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
         if precision == "fp16" {
             // Keep weights compressed until use; constant folding would expand
             // FP16 casts at startup, defeating the memory saving on CPU.
-            builder = builder.with_optimization_level(GraphOptimizationLevel::Disable)?;
+            builder = builder
+                .with_optimization_level(GraphOptimizationLevel::Disable)
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
         }
         let session = builder.commit_from_file(model_path)?;
         Ok(Self {

@@ -24,6 +24,18 @@ pub async fn lock_stream(
     Ok(())
 }
 
+/// Caller holds the project generation and stream locks.
+pub async fn is_deleted(
+    tx: &mut Transaction<'_, Postgres>,
+    project: Uuid,
+    generation: i32,
+    session: &str,
+    window: &str,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM replay_deleted_recordings WHERE project_id=$1 AND storage_generation=$2 AND session_id=$3 AND window_id=$4) OR EXISTS(SELECT 1 FROM replay_sessions WHERE project_id=$1 AND session_id=$3 AND window_id=$4 AND deleted_at IS NOT NULL)")
+        .bind(project).bind(generation).bind(session).bind(window).fetch_one(&mut **tx).await
+}
+
 /// Caller holds the project generation share lock and recording advisory lock.
 /// Data contributes coverage only after its metadata insert succeeds.
 pub async fn record_chunk(
@@ -35,9 +47,15 @@ pub async fn record_chunk(
     use replay_message::coverage::Coverage;
     let started = std::time::Instant::now();
     let has_data = acceptance == Acceptance::Chunk;
-    let deleted: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM replay_sessions WHERE project_id=$1 AND session_id=$2 AND window_id=$3 AND deleted_at IS NOT NULL)")
-        .bind(chunk.project_id).bind(&chunk.session_id).bind(&chunk.window_id).fetch_one(&mut **tx).await?;
-    if deleted {
+    if is_deleted(
+        tx,
+        chunk.project_id,
+        chunk.storage_generation,
+        &chunk.session_id,
+        &chunk.window_id,
+    )
+    .await?
+    {
         return Ok(());
     }
     sqlx::query("INSERT INTO replay_recording_controls(project_id,storage_generation,session_id,window_id) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING")
@@ -120,12 +138,18 @@ pub async fn record_chunk(
 
 pub async fn patch(pool: &PgPool, patch: &ReplaySessionPatch) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin().await?;
-    let generation = sqlx::query_scalar::<_, i32>("SELECT replay_storage_generation FROM project WHERE id=$1 AND replay_storage_state='active' FOR SHARE")
-        .bind(patch.project_id).fetch_optional(&mut *tx).await?;
+    let generation = sqlx::query_scalar::<_, i32>(
+        "SELECT replay_storage_generation FROM project WHERE id=$1 FOR SHARE",
+    )
+    .bind(patch.project_id)
+    .fetch_optional(&mut *tx)
+    .await?;
     let Some(generation) = generation else {
         return Ok(());
     };
-    if patch.storage_generation.is_some_and(|g| g != generation) {
+    // Legacy signals belong only to the initial generation; never relabel
+    // a delayed generation-less signal after a reset.
+    if patch.storage_generation.unwrap_or(1) != generation {
         return Ok(());
     }
     lock_stream(
@@ -136,11 +160,20 @@ pub async fn patch(pool: &PgPool, patch: &ReplaySessionPatch) -> Result<(), sqlx
         &patch.window_id,
     )
     .await?;
+    if is_deleted(
+        &mut tx,
+        patch.project_id,
+        generation,
+        &patch.session_id,
+        &patch.window_id,
+    )
+    .await?
+    {
+        return Ok(());
+    }
     sqlx::query(r#"
         INSERT INTO replay_recording_controls (project_id,storage_generation,session_id,window_id,has_errors,has_poor_vitals)
-        SELECT $1,$2,$3,$4,$5,$6 WHERE NOT EXISTS (
-            SELECT 1 FROM replay_sessions WHERE project_id=$1 AND session_id=$3 AND window_id=$4 AND deleted_at IS NOT NULL
-        )
+        VALUES($1,$2,$3,$4,$5,$6)
         ON CONFLICT (project_id,storage_generation,session_id,window_id) DO UPDATE SET
             has_errors = replay_recording_controls.has_errors OR EXCLUDED.has_errors,
             has_poor_vitals = replay_recording_controls.has_poor_vitals OR EXCLUDED.has_poor_vitals,

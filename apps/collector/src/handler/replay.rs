@@ -255,13 +255,6 @@ pub async fn replay(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    if !context.replay_storage_active {
-        return error_response(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Replay storage is resetting",
-        );
-    }
-
     let (chunk, dropped_event_count) =
         match build_replay_chunk(&context, parsed, client_ip, user_agent, country.as_deref()) {
             Ok(value) => value,

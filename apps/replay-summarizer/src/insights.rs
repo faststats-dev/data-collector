@@ -221,8 +221,7 @@ pub(crate) async fn save(tx: &mut Transaction<'_, Postgres>, prepared: &Prepared
                 JOIN replay_sessions s ON s.project_id = rs.project_id
                   AND s.session_id = rs.session_id AND s.window_id = rs.window_id
                 WHERE m.insight_id = i.id AND e.project_id = $1 AND rs.project_id = $1
-                  AND e.model_version = $2 AND pr.replay_storage_state = 'active'
-                  AND rs.storage_generation = pr.replay_storage_generation
+                  AND e.model_version = $2 AND rs.storage_generation = pr.replay_storage_generation
                   AND rs.chunk_count = s.chunk_count AND rs.completeness_revision = s.completeness_revision AND s.deleted_at IS NULL
                 ORDER BY m.created_at, m.pain_point_id LIMIT 1
             ) anchor ON true
@@ -289,7 +288,7 @@ pub(crate) async fn save(tx: &mut Transaction<'_, Postgres>, prepared: &Prepared
         .bind(point.id)
         .bind(prepared.project_id)
         .bind(&prepared.model_version)
-        .bind(format!("{:x}", Sha256::digest(point.text.as_bytes())))
+        .bind(hex::encode(Sha256::digest(point.text.as_bytes())))
         .bind(&point.text)
         .bind(&point.vector)
         .execute(&mut **tx)
@@ -370,20 +369,6 @@ async fn decide(
 pub(crate) fn is_transient(error: &anyhow::Error) -> bool {
     let message = format!("{error:#}");
     message.contains("transient") || message.contains("HTTP 429") || message.contains("HTTP 5")
-}
-
-#[cfg(test)]
-pub(crate) fn test_prepared(project_id: Uuid, point_id: Option<Uuid>) -> Prepared {
-    Prepared {
-        project_id,
-        model_version: "test".into(),
-        points: vec![PreparedPoint {
-            id: point_id.unwrap_or_else(Uuid::new_v4),
-            description: "Test insight".into(),
-            text: "test".into(),
-            vector: normalize(vec![1.; 1024]).unwrap(),
-        }],
-    }
 }
 
 #[cfg(test)]

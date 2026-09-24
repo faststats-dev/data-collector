@@ -35,9 +35,12 @@ pub async fn run(config: Config) -> Result<(), String> {
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .map_err(|e| e.to_string())?;
     let mut finalizer = tokio::spawn(crate::finalizer::run(pool.clone()));
+    let mut reconciliation =
+        tokio::spawn(crate::reconciliation::run(pool.clone(), objects.clone()));
     info!(topic = config.topic, "Replay consumer started");
     loop {
         tokio::select! {
+            result = &mut reconciliation => return Err(format!("Reconciliation stopped: {result:?}")),
             result = &mut finalizer => return Err(format!("Finalizer stopped: {result:?}")),
             message = consumer.recv() => {
                 let message = message.map_err(|e| e.to_string())?;
@@ -182,8 +185,14 @@ async fn handle_message(
                 config.final_grace_seconds,
             )
             .await
-            .map_err(|e| e.to_string())?
-            {
+            .or_else(|error| match error {
+                storage::ReplayStorageError::Conflict => {
+                    tracing::error!("Rejected replay content conflict; see replay_chunk_conflicts");
+                    metrics::counter!("replay_content_conflicts_total").increment(1);
+                    Ok(false)
+                }
+                error => Err(error.to_string()),
+            })? {
                 metrics::counter!("replay_first_sessions_total").increment(1);
             }
         }

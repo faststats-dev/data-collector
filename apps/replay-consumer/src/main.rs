@@ -4,6 +4,7 @@ mod consumer;
 mod controls;
 mod finalizer;
 mod object_store;
+mod reconciliation;
 mod storage;
 
 #[tokio::main]
@@ -18,3 +19,10 @@ async fn main() -> Result<(), String> {
 
     consumer::run(config::Config::from_env()?).await
 }
+
+#[cfg(test)]
+mod storage_tests;
+
+#[cfg(test)]
+#[path = "../../../tests/support/docker.rs"]
+mod docker;

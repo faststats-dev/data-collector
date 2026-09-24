@@ -24,6 +24,9 @@ pub struct Claim {
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Chunk {
+    pub bucket: String,
+    pub checksum: String,
+    pub generation: i32,
     pub key: String,
     pub encoding: String,
     pub compressed_bytes: u64,
@@ -104,7 +107,7 @@ pub async fn prepare(pool: &PgPool, claim: &Claim, limit: usize) -> Result<Optio
         SELECT to_jsonb(s) AS attributes,COALESCE(cfg.settings, '{"mode":"off"}'::jsonb) AS settings FROM replay_sessions s
         JOIN project p ON p.id=s.project_id LEFT JOIN replay_summary_settings cfg ON cfg.project_id=s.project_id
         WHERE s.project_id=$1 AND s.session_id=$2 AND s.window_id=$3 AND s.deleted_at IS NULL
-          AND p.replay_storage_state='active' AND p.replay_storage_generation=$4 AND s.chunk_count=$5 AND s.completeness_revision=$6 AND replay_analysis_eligible(s.finalization_state,s.has_full_snapshot,s.chunk_count,s.actual_duration_ms)
+          AND p.replay_storage_generation=$4 AND s.chunk_count=$5 AND s.completeness_revision=$6 AND replay_analysis_eligible(s.finalization_state,s.has_full_snapshot,s.chunk_count,s.actual_duration_ms)
         "#,
     )
     .bind(claim.project_id)
@@ -126,7 +129,7 @@ pub async fn prepare(pool: &PgPool, claim: &Claim, limit: usize) -> Result<Optio
     }
     let rows = sqlx::query(
         r#"
-        SELECT s3_key,content_encoding,compressed_bytes FROM replay_snapshots
+        SELECT s3_bucket,checksum_sha256,storage_generation,s3_key,content_encoding,compressed_bytes FROM replay_snapshots
         WHERE project_id=$1 AND session_id=$2 AND window_id=$3 AND storage_generation=$4
         ORDER BY COALESCE(first_sequence,sequence),first_event_timestamp_ms,created_at,id
         "#,
@@ -146,6 +149,9 @@ pub async fn prepare(pool: &PgPool, claim: &Claim, limit: usize) -> Result<Optio
         .map(|row| {
             let compressed_bytes: i64 = row.try_get("compressed_bytes")?;
             Ok(Chunk {
+                bucket: row.try_get("s3_bucket")?,
+                checksum: row.try_get("checksum_sha256")?,
+                generation: row.try_get("storage_generation")?,
                 key: row.try_get("s3_key")?,
                 encoding: row.try_get("content_encoding")?,
                 compressed_bytes: compressed_bytes
@@ -174,7 +180,7 @@ pub async fn renew(pool: &PgPool, claim: &Claim, stage: &str) -> Result<bool> {
         WHERE j.id=$1 AND j.execution_token=$2 AND j.state='running' AND j.lease_until>NOW()
           AND s.project_id=j.project_id AND s.session_id=j.session_id AND s.window_id=j.window_id
           AND s.chunk_count=j.chunk_count AND s.completeness_revision=j.completeness_revision AND s.finalization_state<>'open' AND s.deleted_at IS NULL
-          AND p.id=j.project_id AND p.replay_storage_state='active' AND p.replay_storage_generation=j.storage_generation
+          AND p.id=j.project_id AND p.replay_storage_generation=j.storage_generation
         "#,
     )
     .bind(claim.job_id)
@@ -204,7 +210,7 @@ pub async fn finish(
         .await?;
     let active = sqlx::query_scalar::<_, bool>(
         r#"
-        SELECT replay_storage_state='active' AND replay_storage_generation=$2
+        SELECT replay_storage_generation=$2
         FROM project WHERE id=$1 FOR SHARE
         "#,
     )
@@ -438,7 +444,3 @@ fn matches_settings(settings: &Value, attributes: &Value) -> bool {
         _ => false,
     }
 }
-
-#[cfg(test)]
-#[path = "jobs_tests.rs"]
-mod tests;

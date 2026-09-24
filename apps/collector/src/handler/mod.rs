@@ -146,7 +146,6 @@ pub struct IpRule {
 pub struct ProjectContext {
     pub project_id: Uuid,
     pub replay_storage_generation: i32,
-    pub replay_storage_active: bool,
     pub allowed_hostnames: Vec<String>,
     pub datasources: HashMap<String, DataSource>,
     pub error_tracking_enabled: bool,
@@ -168,7 +167,7 @@ pub async fn load_project_context(
         r#"
         SELECT p.id, p.allowed_hostnames, p.error_tracking_enabled,
                p.web_vitals_enabled, p.session_replays_enabled, p.cookieless_mode,
-               p.replay_storage_generation, p.replay_storage_state::text AS replay_storage_state,
+               p.replay_storage_generation,
                d.reference_id, d.data_type::text, d.regex, d.allow_negative,
                d.allow_float, d.min_value, d.max_value, d.metric_shape::text
         FROM project p
@@ -226,7 +225,6 @@ pub async fn load_project_context(
     let ctx = Arc::new(ProjectContext {
         project_id,
         replay_storage_generation: first.get("replay_storage_generation"),
-        replay_storage_active: first.get::<String, _>("replay_storage_state") == "active",
         allowed_hostnames: first
             .try_get::<sqlx::types::Json<Vec<String>>, _>("allowed_hostnames")
             .ok()

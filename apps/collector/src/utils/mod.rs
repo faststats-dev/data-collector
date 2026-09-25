@@ -17,7 +17,9 @@ fn hash_parts_to_uuid(parts: &[&[u8]]) -> Uuid {
     }
 
     let hash = hasher.finalize();
-    Uuid::from_slice(&hash[..16]).unwrap()
+    let mut bytes = [0; 16];
+    bytes.copy_from_slice(&hash[..16]);
+    Uuid::from_bytes(bytes)
 }
 
 /// SHA256 hash the server_id with the project_id to produce a deterministic UUID.

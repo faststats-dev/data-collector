@@ -35,13 +35,7 @@ impl Config {
 }
 
 pub fn render_speed() -> Result<f64> {
-    let speed: f64 = match std::env::var("REPLAY_RENDER_SPEED") {
-        Ok(value) => value
-            .parse()
-            .map_err(|error| anyhow::anyhow!("Invalid REPLAY_RENDER_SPEED: {error}"))?,
-        Err(std::env::VarError::NotPresent) => 1.0,
-        Err(error) => return Err(error).context("Invalid REPLAY_RENDER_SPEED"),
-    };
+    let speed: f64 = optional("REPLAY_RENDER_SPEED", 1.0)?;
     ensure!(
         speed.is_finite() && (0.1..=64.0).contains(&speed),
         "REPLAY_RENDER_SPEED must be between 0.1 and 64"

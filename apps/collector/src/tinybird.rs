@@ -156,15 +156,12 @@ impl TinybirdClient {
         Ok(())
     }
 
-    pub async fn insert_web_events(&self, events: &[&WebEventRow]) -> Result<(), TinybirdError> {
+    pub async fn insert_web_events(&self, events: &[WebEventRow]) -> Result<(), TinybirdError> {
         self.send_batch("web_events", events).await
     }
 
-    pub async fn insert_mods_events(&self, events: &[&ModsEventRow]) -> Result<(), TinybirdError> {
-        let v2_events: Vec<_> = events
-            .iter()
-            .map(|event| ModsEventV2Row::from(*event))
-            .collect();
+    pub async fn insert_mods_events(&self, events: &[ModsEventRow]) -> Result<(), TinybirdError> {
+        let v2_events: Vec<_> = events.iter().map(ModsEventV2Row::from).collect();
         let (v1_result, v2_result) = tokio::join!(
             self.send_batch("mods_events", events),
             self.send_batch("mods_events_v2", &v2_events),
@@ -175,12 +172,12 @@ impl TinybirdClient {
 
     pub async fn insert_error_occurrences_v3(
         &self,
-        rows: &[&ErrorOccurrenceV3Row],
+        rows: &[ErrorOccurrenceV3Row],
     ) -> Result<(), TinybirdError> {
         self.send_batch("error_tracking_v3", rows).await
     }
 
-    pub async fn insert_web_vitals(&self, rows: &[&WebVitalRow]) -> Result<(), TinybirdError> {
+    pub async fn insert_web_vitals(&self, rows: &[WebVitalRow]) -> Result<(), TinybirdError> {
         self.send_batch("web_vitals", rows).await
     }
 }

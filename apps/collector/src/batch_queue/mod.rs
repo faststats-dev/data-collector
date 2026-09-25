@@ -364,17 +364,12 @@ impl BatchQueue {
             web_vitals,
         } = batch;
 
-        let web_event_rows: Vec<_> = web_events.iter().collect();
-        let mods_event_rows: Vec<_> = mods_events.iter().collect();
-        let error_occurrence_v3_rows: Vec<_> = error_occurrences_v3.iter().collect();
-        let web_vital_rows: Vec<_> = web_vitals.iter().collect();
-
         let (web_events_res, mods_events_res, error_occurrences_v3_res, web_vitals_res) = tokio::join!(
-            self.tinybird.insert_web_events(&web_event_rows),
-            self.tinybird.insert_mods_events(&mods_event_rows),
+            self.tinybird.insert_web_events(&web_events),
+            self.tinybird.insert_mods_events(&mods_events),
             self.tinybird
-                .insert_error_occurrences_v3(&error_occurrence_v3_rows),
-            self.tinybird.insert_web_vitals(&web_vital_rows),
+                .insert_error_occurrences_v3(&error_occurrences_v3),
+            self.tinybird.insert_web_vitals(&web_vitals),
         );
 
         let (retryable, permanent) =
@@ -409,9 +404,10 @@ impl BatchQueue {
     }
 
     async fn publish_kafka_with_retry(&self, payload: collector_message::Payload) {
+        let message = collector_message::Message::new(payload);
         let mut retry_count = 0u32;
         loop {
-            match self.event_publisher.publish(payload.clone()).await {
+            match self.event_publisher.publish(&message).await {
                 Ok(()) => return,
                 Err(error) => {
                     retry_count += 1;

@@ -82,9 +82,8 @@ pub(crate) async fn upsert_person_and_alias(
         .iter()
         .map(|alias| alias.trim())
         .filter(|alias| !alias.is_empty())
-        .map(str::to_owned)
         .collect::<Vec<_>>();
-    aliases.push(distinct_id.to_owned());
+    aliases.push(distinct_id);
     aliases.sort();
     aliases.dedup();
 

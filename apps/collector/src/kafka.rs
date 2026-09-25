@@ -130,8 +130,7 @@ impl EventPublisher {
         Self { publisher, topics }
     }
 
-    pub async fn publish(&self, payload: collector_message::Payload) -> Result<(), String> {
-        let message = collector_message::Message::new(payload);
+    pub async fn publish(&self, message: &collector_message::Message) -> Result<(), String> {
         let topic = match &message.payload {
             collector_message::Payload::WebEvent(_) => &self.topics.web_events,
             collector_message::Payload::ModsEvent(_) => &self.topics.mods_events,
@@ -139,7 +138,7 @@ impl EventPublisher {
             collector_message::Payload::WebVital(_) => &self.topics.web_vitals,
         };
         let key = message.key();
-        let bytes = serde_json::to_vec(&message).map_err(|error| error.to_string())?;
+        let bytes = serde_json::to_vec(message).map_err(|error| error.to_string())?;
         self.publisher.publish(topic, &key, &bytes).await
     }
 }

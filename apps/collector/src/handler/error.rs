@@ -1,7 +1,5 @@
-use super::{
-    check_ip_allowed, error_response, get_authorization, get_client_ip, load_project_context,
-    queue_error_response, success_response,
-};
+use super::auth::{check_ip_allowed, get_authorization, load_project_context};
+use super::{error_response, get_client_ip, queue_error_response, success_response};
 use crate::batch_queue::QueuedEvent;
 use crate::error_tracking::parse_optional_language;
 use crate::error_tracking::v3::{OccurrenceInput, build_occurrence, empty_context};

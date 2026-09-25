@@ -1,8 +1,5 @@
 use chrono::{DateTime, Utc};
-pub use collector_message::{
-    ErrorOccurrence as ErrorOccurrenceV3Row, ModsEvent as ModsEventRow, WebEvent as WebEventRow,
-    WebVital as WebVitalRow,
-};
+use collector_message::{ErrorOccurrence, ModsEvent, WebEvent, WebVital};
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use reqwest::Client;
@@ -42,8 +39,8 @@ struct ModsEventV2Row<'a> {
     created_at: DateTime<Utc>,
 }
 
-impl<'a> From<&'a ModsEventRow> for ModsEventV2Row<'a> {
-    fn from(row: &'a ModsEventRow) -> Self {
+impl<'a> From<&'a ModsEvent> for ModsEventV2Row<'a> {
+    fn from(row: &'a ModsEvent) -> Self {
         Self {
             id: row.id,
             project_id: row.project_id,
@@ -156,11 +153,11 @@ impl TinybirdClient {
         Ok(())
     }
 
-    pub async fn insert_web_events(&self, events: &[WebEventRow]) -> Result<(), TinybirdError> {
+    pub async fn insert_web_events(&self, events: &[WebEvent]) -> Result<(), TinybirdError> {
         self.send_batch("web_events", events).await
     }
 
-    pub async fn insert_mods_events(&self, events: &[ModsEventRow]) -> Result<(), TinybirdError> {
+    pub async fn insert_mods_events(&self, events: &[ModsEvent]) -> Result<(), TinybirdError> {
         let v2_events: Vec<_> = events.iter().map(ModsEventV2Row::from).collect();
         let (v1_result, v2_result) = tokio::join!(
             self.send_batch("mods_events", events),
@@ -172,12 +169,12 @@ impl TinybirdClient {
 
     pub async fn insert_error_occurrences_v3(
         &self,
-        rows: &[ErrorOccurrenceV3Row],
+        rows: &[ErrorOccurrence],
     ) -> Result<(), TinybirdError> {
         self.send_batch("error_tracking_v3", rows).await
     }
 
-    pub async fn insert_web_vitals(&self, rows: &[WebVitalRow]) -> Result<(), TinybirdError> {
+    pub async fn insert_web_vitals(&self, rows: &[WebVital]) -> Result<(), TinybirdError> {
         self.send_batch("web_vitals", rows).await
     }
 }
@@ -188,7 +185,7 @@ mod tests {
 
     #[test]
     fn mods_event_v2_uses_v2_field_names_and_native_json() {
-        let row = ModsEventRow {
+        let row = ModsEvent {
             id: Uuid::new_v4(),
             project_id: Uuid::new_v4(),
             server_id: Uuid::new_v4(),

@@ -1,18 +1,19 @@
+use super::auth::{ProjectContext, authenticate_project, check_ip_allowed};
 use super::{
-    MODS_EVENT_FIELDS, ProjectContext, authenticate_project, build_mods_event_row,
-    check_ip_allowed, error_response, extract_known_fields, get_client_ip, get_country,
+    error_response, extract_known_fields, extract_optional_string, get_client_ip, get_country,
     queue_error_response, success_response,
 };
 use crate::batch_queue::QueuedEvent;
 use crate::error_tracking::ErrorLanguage;
 use crate::error_tracking::v3::{OccurrenceInput, build_occurrence, mods_context};
 use crate::models::{AppState, Request};
-use crate::tinybird::{ErrorOccurrenceV3Row, ModsEventRow};
 use crate::validation::validate_and_filter_payload;
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
+use collector_message::{ErrorOccurrence, ModsEvent};
+use serde_json::Value;
 use sqlx::types::Uuid;
 use std::collections::HashMap;
 
@@ -63,8 +64,8 @@ pub async fn collect(
 }
 
 pub(crate) struct BuiltCollectEvents {
-    pub event: ModsEventRow,
-    pub errors: Vec<ErrorOccurrenceV3Row>,
+    pub event: ModsEvent,
+    pub errors: Vec<ErrorOccurrence>,
     pub warnings: HashMap<String, String>,
 }
 
@@ -126,4 +127,110 @@ pub(crate) fn build_collect_events(
         errors: occurrences,
         warnings,
     })
+}
+
+fn extract_optional_f64(data: &mut HashMap<String, Value>, key: &str) -> Option<f64> {
+    data.remove(key).and_then(|v| v.as_f64())
+}
+
+fn extract_optional_u16(data: &mut HashMap<String, Value>, key: &str) -> Option<u16> {
+    data.remove(key).and_then(|v| value_as_u16(&v))
+}
+
+fn value_as_u16(v: &Value) -> Option<u16> {
+    match v {
+        Value::Number(n) => n
+            .as_u64()
+            .or_else(|| n.as_i64().and_then(|i| u64::try_from(i).ok()))
+            .or_else(|| {
+                n.as_f64().and_then(|f| {
+                    if f.is_finite() && f >= 0.0 && f <= u16::MAX as f64 && f.fract() == 0.0 {
+                        Some(f as u64)
+                    } else {
+                        None
+                    }
+                })
+            })
+            .and_then(|u| u16::try_from(u).ok()),
+        _ => None,
+    }
+}
+
+fn extract_optional_bool(data: &mut HashMap<String, Value>, key: &str) -> Option<bool> {
+    data.remove(key).and_then(|v| v.as_bool())
+}
+
+const MODS_EVENT_FIELDS: &[&str] = &[
+    "player_count",
+    "online_mode",
+    "client",
+    "plugin_version",
+    "minecraft_version",
+    "game_version",
+    "server_type",
+    "platform_version",
+    "java_version",
+    "java_vendor",
+    "os_name",
+    "os_arch",
+    "os_version",
+    "core_count",
+];
+
+fn build_mods_event_row(
+    project_id: Uuid,
+    server_id: Uuid,
+    country: Option<&str>,
+    known: &mut HashMap<String, Value>,
+    custom: &HashMap<String, Value>,
+) -> ModsEvent {
+    ModsEvent {
+        id: Uuid::new_v4(),
+        project_id,
+        server_id,
+        player_count: extract_optional_f64(known, "player_count"),
+        online_mode: extract_optional_bool(known, "online_mode"),
+        client: extract_optional_bool(known, "client"),
+        plugin_version: extract_optional_string(known, "plugin_version"),
+        minecraft_version: extract_optional_string(known, "game_version")
+            .or_else(|| extract_optional_string(known, "minecraft_version")),
+        server_type: extract_optional_string(known, "server_type"),
+        platform_version: extract_optional_string(known, "platform_version"),
+        java_version: extract_optional_string(known, "java_version"),
+        java_vendor: extract_optional_string(known, "java_vendor"),
+        os_name: extract_optional_string(known, "os_name"),
+        os_arch: extract_optional_string(known, "os_arch"),
+        os_version: extract_optional_string(known, "os_version"),
+        core_count: extract_optional_u16(known, "core_count"),
+        country: country.map(str::to_owned),
+        custom: serde_json::to_string(custom).expect("JSON values are serializable"),
+        created_at: chrono::Utc::now(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mods_event_accepts_version_aliases_platform_version_and_client() {
+        let mut known = HashMap::from([
+            ("minecraft_version".to_string(), Value::from("legacy")),
+            ("game_version".to_string(), Value::from("canonical")),
+            ("platform_version".to_string(), Value::from("platform")),
+            ("client".to_string(), Value::from(true)),
+        ]);
+
+        let row = build_mods_event_row(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            None,
+            &mut known,
+            &HashMap::new(),
+        );
+
+        assert_eq!(row.minecraft_version.as_deref(), Some("canonical"));
+        assert_eq!(row.platform_version.as_deref(), Some("platform"));
+        assert_eq!(row.client, Some(true));
+    }
 }

@@ -1,7 +1,5 @@
-use super::{
-    authenticate_project, check_ip_allowed, error_response, get_client_ip, get_request_origin,
-    success_response, validate_hostname,
-};
+use super::auth::{authenticate_project, check_ip_allowed, validate_hostname};
+use super::{error_response, get_client_ip, get_request_origin, success_response};
 use crate::identity::{PersonPatch, upsert_person_and_alias};
 use crate::models::AppState;
 use axum::body::Bytes;

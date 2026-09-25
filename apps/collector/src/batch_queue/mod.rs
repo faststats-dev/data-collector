@@ -1,12 +1,14 @@
+mod tinybird;
+
 use crate::error_tracking::ErrorLanguage;
 use crate::error_tracking::mapping::MappingResolver;
-use crate::tinybird::{
-    ErrorOccurrenceV3Row, ModsEventRow, TinybirdClient, WebEventRow, WebVitalRow,
-};
+use crate::tinybird::TinybirdClient;
+use collector_message::{ErrorOccurrence, ModsEvent, WebEvent, WebVital};
 use futures_util::StreamExt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
+use tinybird::Batch;
 use tokio::sync::Mutex;
 use tokio::sync::Notify;
 use tokio::sync::mpsc;
@@ -25,17 +27,17 @@ const KAFKA_PUBLISH_CONCURRENCY: usize = 100;
 #[derive(Debug)]
 pub enum QueuedEvent {
     WebEvent {
-        row: Box<WebEventRow>,
+        row: Box<WebEvent>,
     },
     ModsEvent {
-        row: ModsEventRow,
+        row: ModsEvent,
     },
     ErrorOccurrenceV3 {
-        row: Box<ErrorOccurrenceV3Row>,
+        row: Box<ErrorOccurrence>,
         language: ErrorLanguage,
     },
     WebVital {
-        row: WebVitalRow,
+        row: WebVital,
     },
 }
 
@@ -57,88 +59,12 @@ pub enum QueueError {
     Closed,
 }
 
-#[derive(Debug, Default)]
-struct TinybirdBatch {
-    web_events: Vec<WebEventRow>,
-    mods_events: Vec<ModsEventRow>,
-    error_occurrences_v3: Vec<ErrorOccurrenceV3Row>,
-    web_vitals: Vec<WebVitalRow>,
-}
-
-impl TinybirdBatch {
-    fn is_empty(&self) -> bool {
-        self.web_events.is_empty()
-            && self.mods_events.is_empty()
-            && self.error_occurrences_v3.is_empty()
-            && self.web_vitals.is_empty()
-    }
-
-    fn total_count(&self) -> usize {
-        self.web_events.len()
-            + self.mods_events.len()
-            + self.error_occurrences_v3.len()
-            + self.web_vitals.len()
-    }
-
-    fn push(&mut self, event: QueuedEvent) {
-        match event {
-            QueuedEvent::WebEvent { row } => self.web_events.push(*row),
-            QueuedEvent::ModsEvent { row } => self.mods_events.push(row),
-            QueuedEvent::ErrorOccurrenceV3 { row, .. } => self.error_occurrences_v3.push(*row),
-            QueuedEvent::WebVital { row } => self.web_vitals.push(row),
-        }
-    }
-}
-
-#[derive(Debug, Default)]
-struct TinybirdBatchSendResult {
-    retryable: TinybirdBatch,
-    permanent_failure_count: usize,
-    errors: Vec<String>,
-}
-
-impl TinybirdBatchSendResult {
-    fn error_summary(&self) -> String {
-        if self.errors.is_empty() {
-            "unknown error".to_string()
-        } else {
-            self.errors.join("; ")
-        }
-    }
-}
-
-fn classify_delivery<T>(
-    outcome: Result<(), crate::tinybird::TinybirdError>,
-    rows: Vec<T>,
-    datasource: &'static str,
-    errors: &mut Vec<String>,
-) -> (Vec<T>, usize) {
-    let Err(error) = outcome else {
-        return (Vec::new(), 0);
-    };
-    let permanence = if error.is_transient() {
-        "transient"
-    } else {
-        "permanent"
-    };
-    errors.push(format!(
-        "{datasource} rows={} {permanence}: {error}",
-        rows.len()
-    ));
-    if error.is_transient() {
-        (rows, 0)
-    } else {
-        let count = rows.len();
-        (Vec::new(), count)
-    }
-}
-
 pub struct BatchQueue {
     tinybird: TinybirdClient,
     mappings: Option<MappingResolver>,
     event_publisher: crate::kafka::EventPublisher,
     sender: mpsc::Sender<QueuedEvent>,
-    tinybird_batch: Mutex<TinybirdBatch>,
+    tinybird_batch: Mutex<Batch>,
     tinybird_flush_lock: Mutex<()>,
     pending_kafka: AtomicUsize,
     kafka_drained: Notify,
@@ -158,7 +84,7 @@ impl BatchQueue {
             mappings,
             event_publisher,
             sender,
-            tinybird_batch: Mutex::new(TinybirdBatch::default()),
+            tinybird_batch: Mutex::new(Batch::default()),
             tinybird_flush_lock: Mutex::new(()),
             pending_kafka: AtomicUsize::new(0),
             kafka_drained: Notify::new(),
@@ -295,112 +221,7 @@ impl BatchQueue {
         let total = batch.total_count();
         info!("Flushing in-memory batch of {} events", total);
 
-        self.send_tinybird_batch_with_retry(batch).await;
-    }
-
-    fn calculate_retry_delay(retry_count: u32) -> Duration {
-        let base = INITIAL_RETRY_DELAY.as_millis() as u64;
-        let capped =
-            (base * 2u64.saturating_pow(retry_count)).min(MAX_RETRY_DELAY.as_millis() as u64);
-        let jitter = (capped / 4).saturating_sub((retry_count as u64 * 7919) % (capped / 2).max(1));
-        Duration::from_millis(capped.saturating_sub(jitter))
-    }
-
-    async fn send_tinybird_batch_with_retry(&self, batch: TinybirdBatch) {
-        let mut retry_count = 0u32;
-        let mut current_batch = batch;
-
-        loop {
-            let result = self.send_tinybird_batch(current_batch).await;
-
-            if result.permanent_failure_count > 0 {
-                let error_summary = result.error_summary();
-                error!(
-                    errors = %error_summary,
-                    "Dropping {} events after a permanent delivery failure",
-                    result.permanent_failure_count,
-                );
-            }
-
-            if result.retryable.is_empty() {
-                return;
-            }
-            retry_count += 1;
-
-            if retry_count >= MAX_RETRIES {
-                let error_summary = result.error_summary();
-                error!(
-                    errors = %error_summary,
-                    "Dropping {} events after {} delivery attempts",
-                    result.retryable.total_count(),
-                    retry_count
-                );
-                return;
-            }
-
-            let error_summary = result.error_summary();
-            current_batch = result.retryable;
-
-            let delay = Self::calculate_retry_delay(retry_count);
-            warn!(
-                errors = %error_summary,
-                "Batch send failed (attempt {}), retrying {} events in {:?}",
-                retry_count,
-                current_batch.total_count(),
-                delay
-            );
-
-            tokio::time::sleep(delay).await;
-        }
-    }
-
-    async fn send_tinybird_batch(&self, batch: TinybirdBatch) -> TinybirdBatchSendResult {
-        let mut result = TinybirdBatchSendResult::default();
-
-        let TinybirdBatch {
-            web_events,
-            mods_events,
-            error_occurrences_v3,
-            web_vitals,
-        } = batch;
-
-        let (web_events_res, mods_events_res, error_occurrences_v3_res, web_vitals_res) = tokio::join!(
-            self.tinybird.insert_web_events(&web_events),
-            self.tinybird.insert_mods_events(&mods_events),
-            self.tinybird
-                .insert_error_occurrences_v3(&error_occurrences_v3),
-            self.tinybird.insert_web_vitals(&web_vitals),
-        );
-
-        let (retryable, permanent) =
-            classify_delivery(web_events_res, web_events, "web_events", &mut result.errors);
-        result.retryable.web_events = retryable;
-        result.permanent_failure_count += permanent;
-
-        let (retryable, permanent) = classify_delivery(
-            mods_events_res,
-            mods_events,
-            "mods_events",
-            &mut result.errors,
-        );
-        result.retryable.mods_events = retryable;
-        result.permanent_failure_count += permanent;
-
-        let (retryable, permanent) = classify_delivery(
-            error_occurrences_v3_res,
-            error_occurrences_v3,
-            "error_tracking_v3",
-            &mut result.errors,
-        );
-        result.retryable.error_occurrences_v3 = retryable;
-        result.permanent_failure_count += permanent;
-
-        let (retryable, permanent) =
-            classify_delivery(web_vitals_res, web_vitals, "web_vitals", &mut result.errors);
-        result.retryable.web_vitals = retryable;
-        result.permanent_failure_count += permanent;
-
-        result
+        tinybird::send_with_retry(&self.tinybird, batch).await;
     }
 
     async fn publish_kafka_with_retry(&self, payload: collector_message::Payload) {
@@ -419,7 +240,7 @@ impl BatchQueue {
                         );
                         return;
                     }
-                    let delay = Self::calculate_retry_delay(retry_count);
+                    let delay = calculate_retry_delay(retry_count);
                     warn!(
                         %error,
                         "Kafka delivery failed (attempt {}), retrying in {:?}",
@@ -449,54 +270,26 @@ impl BatchQueue {
     }
 }
 
+fn calculate_retry_delay(retry_count: u32) -> Duration {
+    let base = INITIAL_RETRY_DELAY.as_millis() as u64;
+    let capped = (base * 2u64.saturating_pow(retry_count)).min(MAX_RETRY_DELAY.as_millis() as u64);
+    let jitter = (capped / 4).saturating_sub((retry_count as u64 * 7919) % (capped / 2).max(1));
+    Duration::from_millis(capped.saturating_sub(jitter))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn classifies_delivery_per_datasource() {
-        let mut errors = Vec::new();
-        let (retryable, permanent) =
-            classify_delivery(Ok(()), vec![1, 2], "successful_source", &mut errors);
-        assert!(retryable.is_empty());
-        assert_eq!(permanent, 0);
-        assert!(errors.is_empty());
-
-        let (retryable, permanent) = classify_delivery(
-            Err(crate::tinybird::TinybirdError::Api {
-                status: 503,
-                message: "unavailable".into(),
-            }),
-            vec![1, 2],
-            "transient_source",
-            &mut errors,
-        );
-        assert_eq!(retryable, vec![1, 2]);
-        assert_eq!(permanent, 0);
-
-        let (retryable, permanent) = classify_delivery(
-            Err(crate::tinybird::TinybirdError::Api {
-                status: 400,
-                message: "invalid".into(),
-            }),
-            vec![3, 4, 5],
-            "permanent_source",
-            &mut errors,
-        );
-        assert!(retryable.is_empty());
-        assert_eq!(permanent, 3);
-        assert_eq!(errors.len(), 2);
-    }
 
     mod retry_delay {
         use super::*;
 
         #[test]
         fn grows_exponentially_and_stays_capped() {
-            let initial = BatchQueue::calculate_retry_delay(0);
-            let next = BatchQueue::calculate_retry_delay(1);
-            let later = BatchQueue::calculate_retry_delay(2);
-            let capped = BatchQueue::calculate_retry_delay(10);
+            let initial = calculate_retry_delay(0);
+            let next = calculate_retry_delay(1);
+            let later = calculate_retry_delay(2);
+            let capped = calculate_retry_delay(10);
 
             assert!(initial >= Duration::from_millis(750));
             assert!(initial <= Duration::from_millis(1_250));

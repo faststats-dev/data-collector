@@ -1,8 +1,8 @@
 use crate::error_tracking::mapping::MappingResolver;
 use crate::models::{Error, ErrorTracking};
-use crate::tinybird::{ErrorOccurrenceV3Row, ModsEventRow, WebEventRow};
 use crate::utils::sha256_hex;
 use chrono::Utc;
+use collector_message::{ErrorOccurrence, ModsEvent, WebEvent};
 use serde::Serialize;
 use serde_json::{Map, Value};
 use std::collections::HashMap;
@@ -23,7 +23,7 @@ pub struct OccurrenceInput<'a> {
     pub context: &'a Value,
 }
 
-pub fn build_occurrence(input: OccurrenceInput<'_>, error: ErrorTracking) -> ErrorOccurrenceV3Row {
+pub fn build_occurrence(input: OccurrenceInput<'_>, error: ErrorTracking) -> ErrorOccurrence {
     let ErrorTracking {
         error:
             Error {
@@ -46,7 +46,7 @@ pub fn build_occurrence(input: OccurrenceInput<'_>, error: ErrorTracking) -> Err
     let error_message = message.unwrap_or_default();
     let source_stack = stacktrace.as_str();
 
-    ErrorOccurrenceV3Row {
+    ErrorOccurrence {
         timestamp: Utc::now(),
         project_id: input.project_id,
         // TODO(error-tracking-v3): use the request environment after production validation.
@@ -78,9 +78,9 @@ pub fn build_occurrence(input: OccurrenceInput<'_>, error: ErrorTracking) -> Err
 
 pub async fn enrich_with_mapping(
     resolver: &MappingResolver,
-    mut row: ErrorOccurrenceV3Row,
+    mut row: ErrorOccurrence,
     language: ErrorLanguage,
-) -> ErrorOccurrenceV3Row {
+) -> ErrorOccurrence {
     let mapped = resolver
         .apply(language, row.project_id, &row.release, &row.stacktrace)
         .await;
@@ -105,11 +105,11 @@ fn exact_hash(error_type: &str, message: &str, stacktrace: &str) -> String {
     ])
 }
 
-pub fn web_context(row: &WebEventRow, properties: &HashMap<String, Value>) -> Value {
+pub fn web_context(row: &WebEvent, properties: &HashMap<String, Value>) -> Value {
     row_context(row, "properties", properties)
 }
 
-pub fn mods_context(row: &ModsEventRow, custom: &HashMap<String, Value>) -> Value {
+pub fn mods_context(row: &ModsEvent, custom: &HashMap<String, Value>) -> Value {
     row_context(row, "custom", custom)
 }
 

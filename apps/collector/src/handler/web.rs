@@ -1,7 +1,7 @@
+use super::auth::{authenticate_project, check_ip_allowed, validate_hostname};
 use super::{
-    EncodingQuery, WEB_EVENT_FIELDS, authenticate_project, check_ip_allowed, decompress_body,
-    error_response, extract_known_fields, get_client_ip, get_country, get_request_origin,
-    queue_error_response, success_response, validate_hostname,
+    EncodingQuery, decompress_body, error_response, extract_known_fields, extract_optional_string,
+    get_client_ip, get_country, get_request_origin, queue_error_response, success_response,
 };
 use crate::batch_queue::QueuedEvent;
 use crate::error_tracking::ErrorLanguage;
@@ -12,6 +12,7 @@ use axum::body::Bytes;
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
+use collector_message::WebEvent;
 use serde_json::Value;
 use sqlx::types::Uuid;
 use std::collections::HashMap;
@@ -147,7 +148,7 @@ pub async fn web(
     let has_errors = errors.as_ref().is_some_and(|items| !items.is_empty());
 
     let fallback_identity = resolved_user_id.to_string();
-    let event_row = super::build_web_event_row(
+    let event_row = build_web_event_row(
         ctx.project_id,
         &mut known,
         session_id.clone(),
@@ -237,5 +238,112 @@ pub(crate) async fn stamp_person_identity(
             known.insert("person_id".into(), Value::String(distinct_id));
             known.insert("is_identified".into(), Value::Bool(false));
         }
+    }
+}
+
+fn property_duration_ms(properties: &HashMap<String, Value>, key: &str) -> Option<u64> {
+    let value = properties.get(key)?;
+    value.as_u64().or_else(|| {
+        value.as_f64().and_then(|duration| {
+            if duration.is_finite()
+                && duration >= 0.0
+                && duration < u64::MAX as f64
+                && duration.fract() == 0.0
+            {
+                Some(duration as u64)
+            } else {
+                None
+            }
+        })
+    })
+}
+
+// Extract row fields before validating custom properties.
+const WEB_EVENT_FIELDS: &[&str] = &[
+    "event",
+    "browser",
+    "browser_version",
+    "device",
+    "os",
+    "os_version",
+    "referrer",
+    "utm_source",
+    "utm_medium",
+    "utm_campaign",
+    "utm_term",
+    "utm_content",
+    "title",
+    "page",
+    "url",
+    "cookieless",
+];
+
+fn build_web_event_row(
+    project_id: Uuid,
+    known: &mut HashMap<String, Value>,
+    session_id: Option<String>,
+    country: Option<String>,
+    properties: &HashMap<String, Value>,
+) -> WebEvent {
+    WebEvent {
+        id: Uuid::new_v4(),
+        project_id,
+        user_id: extract_optional_string(known, "user_id"),
+        person_id: extract_optional_string(known, "person_id"),
+        external_id: extract_optional_string(known, "external_id"),
+        is_identified: known
+            .remove("is_identified")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false),
+        session_id,
+        event: extract_optional_string(known, "event"),
+        browser: extract_optional_string(known, "browser"),
+        browser_version: extract_optional_string(known, "browser_version"),
+        device: extract_optional_string(known, "device"),
+        os: extract_optional_string(known, "os"),
+        os_version: extract_optional_string(known, "os_version"),
+        referrer: extract_optional_string(known, "referrer"),
+        utm_source: extract_optional_string(known, "utm_source"),
+        utm_medium: extract_optional_string(known, "utm_medium"),
+        utm_campaign: extract_optional_string(known, "utm_campaign"),
+        utm_term: extract_optional_string(known, "utm_term"),
+        utm_content: extract_optional_string(known, "utm_content"),
+        title: extract_optional_string(known, "title"),
+        page: extract_optional_string(known, "page"),
+        url: extract_optional_string(known, "url"),
+        country,
+        cookieless: known.remove("cookieless").and_then(|value| value.as_bool()),
+        time_on_page: property_duration_ms(properties, "time_on_page"),
+        session_duration: property_duration_ms(properties, "session_duration"),
+        properties: serde_json::to_string(properties).expect("JSON values are serializable"),
+        created_at: chrono::Utc::now(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn web_event_promotes_valid_durations_without_removing_properties() {
+        let properties = HashMap::from([
+            ("time_on_page".to_string(), Value::from(3_000)),
+            ("session_duration".to_string(), Value::from(11_000)),
+        ]);
+        let mut known = HashMap::new();
+
+        let row = build_web_event_row(
+            Uuid::new_v4(),
+            &mut known,
+            Some("session".to_string()),
+            None,
+            &properties,
+        );
+
+        assert_eq!(row.time_on_page, Some(3_000));
+        assert_eq!(row.session_duration, Some(11_000));
+        let serialized: Value = serde_json::from_str(&row.properties).unwrap();
+        assert_eq!(serialized["time_on_page"], Value::from(3_000));
+        assert_eq!(serialized["session_duration"], Value::from(11_000));
     }
 }

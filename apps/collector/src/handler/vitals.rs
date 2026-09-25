@@ -1,15 +1,15 @@
+use super::auth::{authenticate_project, check_ip_allowed, validate_hostname};
 use super::{
-    EncodingQuery, authenticate_project, check_ip_allowed, decompress_body, error_response,
-    get_client_ip, get_country, get_request_origin, queue_error_response, success_response,
-    validate_hostname,
+    EncodingQuery, decompress_body, error_response, get_client_ip, get_country, get_request_origin,
+    queue_error_response, success_response,
 };
 use crate::batch_queue::QueuedEvent;
 use crate::models::AppState;
-use crate::tinybird::WebVitalRow;
 use axum::body::Bytes;
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
+use collector_message::WebVital;
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -51,7 +51,7 @@ pub(crate) fn build_web_vital_rows(
     request: &WebVitalRequest,
     country: Option<&str>,
     ua_info: Option<&UserAgentInfo>,
-) -> Result<Vec<WebVitalRow>, &'static str> {
+) -> Result<Vec<WebVital>, &'static str> {
     if request.vitals.is_empty() {
         return Err("No vitals provided");
     }
@@ -87,7 +87,7 @@ pub(crate) fn build_web_vital_rows(
     Ok(request
         .vitals
         .iter()
-        .map(|vital| WebVitalRow {
+        .map(|vital| WebVital {
             id: Uuid::new_v4(),
             project_id,
             metric: vital.metric.clone(),

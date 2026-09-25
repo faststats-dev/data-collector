@@ -1,7 +1,7 @@
+use super::auth::{ProjectContext, authenticate_project, check_ip_allowed, validate_hostname};
 use super::{
-    EncodingQuery, ProjectContext, authenticate_project, check_ip_allowed, decompress_body,
-    error_response, get_client_ip, get_country, get_request_origin, success_response,
-    validate_hostname,
+    EncodingQuery, decompress_body, error_response, get_client_ip, get_country, get_request_origin,
+    success_response,
 };
 use crate::models::AppState;
 use axum::body::Bytes;

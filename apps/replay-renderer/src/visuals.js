@@ -1,6 +1,14 @@
 // Reuse identical captures only while the page and its resources remain static.
 (() => {
   let dirty = true, safePreviously = false, initialized = false, safetyDirty = true;
+  let pendingOperation = false;
+  const pending = element => {
+    // Conservative hints, not a claim that all pending operations are observable.
+    if (!element.getClientRects?.().length) return false;
+    if (element.matches('progress, [role="progressbar"], [aria-busy="true"], [data-loading="true"], [data-state="loading"], [class*="spinner" i], [class*="loading" i]')) return true;
+    const text = (element.textContent || '').trim();
+    return text.length <= 160 && /\b(loading|please wait|processing|saving|uploading|downloading|connecting|pending)\b/i.test(text);
+  };
   let sheets = new WeakMap();
   const documents = new WeakSet(), staticImages = new Map(), failedLinks = new WeakSet();
   const invalidate = event => {
@@ -72,7 +80,10 @@
     if (doc.querySelector('video, canvas, animate, animateMotion, animateTransform, set, link[rel~="stylesheet"][href^="data:"]') ||
         (doc.getAnimations ? doc.getAnimations() : [...doc.querySelectorAll('*')].flatMap(e => e.getAnimations())).some(a => a.playState === 'running' || a.pending) ||
         doc.activeElement?.matches('input, textarea, [contenteditable]')) safe = false;
-    for (const element of doc.querySelectorAll('*')) if (element.shadowRoot && !inspect(element.shadowRoot)) safe = false;
+    for (const element of doc.querySelectorAll('*')) {
+      if (window.__skipInactivity && pending(element)) pendingOperation = true;
+      if (element.shadowRoot && !inspect(element.shadowRoot)) safe = false;
+    }
     for (const img of (doc.images || doc.querySelectorAll('img'))) {
       if (!img.complete || (img.naturalWidth && !staticImage(img.currentSrc || img.src))) safe = false;
     }
@@ -95,6 +106,7 @@
     // Register observers immediately, then inspect resources only before reuse.
     // Dirty frames always need a capture.
     if (!initialized || (!dirty && safetyDirty)) {
+      pendingOperation = false;
       safePreviously = inspect(document);
       initialized = true;
       safetyDirty = false;
@@ -105,6 +117,7 @@
     dirty = false;
     return result;
   };
+  window.__idleSafe = () => safePreviously && !safetyDirty && !pendingOperation;
 })();
 
 // Preserve every rrweb RAF/timer tick. Cross CDP on visual changes or at most one
@@ -113,7 +126,7 @@ window.__advanceUntilCapture = async (start, stop, fps, speed, duration) => {
   for (let index = start; index < stop; index++) {
     window.__advance(Math.min(index * 1000 * speed / fps, duration));
     await Promise.resolve();
-    if (window.__captureNeeded()) return { index, dirty: true };
+    if (window.__captureNeeded()) return { index, dirty: true, idleSafe: false };
   }
-  return { index: stop - 1, dirty: false };
+  return { index: stop - 1, dirty: false, idleSafe: window.__idleSafe() };
 };

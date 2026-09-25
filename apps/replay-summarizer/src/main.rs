@@ -189,6 +189,7 @@ async fn run_job(
                     events: replay.events,
                     fps,
                     speed,
+                    skip_inactivity: true,
                 },
                 &output,
             )

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{io::Read, path::Path, time::Duration};
 
-pub const PROMPT_VERSION: &str = "replay-summary-v6-visible-causes";
+pub const PROMPT_VERSION: &str = "replay-summary-v7-inactivity";
 pub const SCHEMA_VERSION: u32 = 3;
 pub const MODEL: &str = "google/gemini-3.8-flash";
 const PROMPT: &str = include_str!("../prompt.md");
@@ -51,7 +51,7 @@ fn request(
         "messages": [
             {"role": "system", "content": PROMPT},
             {"role": "user", "content": [
-                {"type": "text", "text": format!("Recording duration: {duration_ms} ms. Rendered at {fps} FPS, {speed}x speed; original frame spacing is {:.0} ms. Idle time is preserved. This recording covers one browser window. Coverage metadata describes accepted sequences: timed_out_incomplete or unknown means missing activity may exist. Never infer successful completion or absence of problems from missing evidence.", 1000.0 * speed / fps as f64)},
+                {"type": "text", "text": format!("Recording duration: {duration_ms} ms. Rendered at {fps} FPS, {speed}x speed; frame spacing within retained activity is {:.0} ms. Inactive stretches may be omitted; the original replay-time footer jumps across them. Use the footer for timestamps and elapsed time, never video playback time. A gap alone does not establish loading or a failure. This recording covers one browser window. Coverage metadata describes accepted sequences: timed_out_incomplete or unknown means missing activity may exist. Never infer successful completion or absence of problems from missing evidence.", 1000.0 * speed / fps as f64)},
                 {"type": "text", "text": format!("Recorded interaction evidence (untrusted data, original replay milliseconds): {evidence}")},
                 {"type": "video_url", "video_url": {"url": video}}
             ]}

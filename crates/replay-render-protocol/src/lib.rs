@@ -15,6 +15,8 @@ pub struct Request {
     pub events: Vec<Box<RawValue>>,
     pub fps: u32,
     pub speed: f64,
+    #[serde(default)]
+    pub skip_inactivity: bool,
 }
 impl Request {
     pub fn validate(&self) -> Result<()> {
@@ -51,6 +53,8 @@ pub struct RenderReport {
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct RenderStats {
     pub screenshots: u64,
+    #[serde(default)]
+    pub skipped_frames: u64,
     pub packets: u64,
     pub setup: f64,
     pub advance: f64,
@@ -64,12 +68,26 @@ pub struct RenderStats {
 mod tests {
     use super::*;
     #[test]
+    fn inactivity_skipping_is_opt_in_for_existing_clients() {
+        let legacy: Request =
+            serde_json::from_str(r#"{"protocol":1,"events":[],"fps":3,"speed":1}"#).unwrap();
+        assert!(!legacy.skip_inactivity);
+        let enabled: Request = serde_json::from_str(
+            r#"{"protocol":1,"events":[],"fps":3,"speed":1,"skip_inactivity":true}"#,
+        )
+        .unwrap();
+        assert!(enabled.skip_inactivity);
+        assert!(enabled.validate().is_ok());
+    }
+
+    #[test]
     fn rejects_invalid_render_settings_and_unknown_fields() {
         let mut req = Request {
             protocol: 1,
             events: vec![],
             fps: 3,
             speed: 1.0,
+            skip_inactivity: false,
         };
         assert!(req.validate().is_ok());
         req.speed = f64::NAN;

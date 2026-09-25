@@ -50,16 +50,31 @@ impl Encoder {
         width: u32,
         height: u32,
         timestamp: Option<(f64, u64)>,
+        skip_inactivity: bool,
     ) -> Result<Self> {
         // Respect container CPU limits; FFmpeg's auto mode may see all host CPUs.
         let threads = thread::available_parallelism()
             .map(|count| count.get())
             .unwrap_or(1)
             .to_string();
-        let mut filter = format!("pad=ceil(iw/2)*2:ceil(ih/2)*2,format=yuv420p,fps={fps}");
+        let mut filter = "pad=ceil(iw/2)*2:ceil(ih/2)*2,format=yuv420p".to_owned();
+        if !skip_inactivity {
+            filter.push_str(&format!(",fps={fps}"));
+        }
         if let Some((speed, duration)) = timestamp {
-            // Apply after CFR expansion so even reused pixels carry the right time.
-            filter.push_str(&format!(r",pad=iw:ih+36:0:0:black,drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf:fontsize=20:fontcolor=white:x=8:y=h-28:text='Replay ms %{{eif\:min(n*1000*{speed}/{fps}\,{duration})\:d}}'"));
+            // Input PTS still carries original replay time. In compact mode burn
+            // the footer BEFORE retiming; otherwise expand reused frames first.
+            let clock = if skip_inactivity {
+                format!("t*1000*{speed}")
+            } else {
+                format!("n*1000*{speed}/{fps}")
+            };
+            filter.push_str(&format!(r",pad=iw:ih+36:0:0:black,drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf:fontsize=20:fontcolor=white:x=8:y=h-28:text='Replay ms %{{eif\:min({clock}\,{duration})\:d}}'"));
+        }
+        if skip_inactivity {
+            // Every retained frame is sent explicitly. Close gaps without
+            // interpolating or accelerating any retained activity.
+            filter.push_str(&format!(",settb=1/{fps},setpts=N,fps={fps}"));
         }
         let mut process = Process(
             Command::new(executable)

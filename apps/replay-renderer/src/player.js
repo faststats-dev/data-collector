@@ -1,6 +1,8 @@
 window.__replayer = new rrweb.Replayer(window.__replayEvents, {
   root: document.body,
   speed: 1,
+  // Rust removes safe idle frames after stepping the original clock. rrweb's
+  // own speed changes would break the original-time footer and evidence mapping.
   skipInactive: false,
   showWarning: false,
   showDebug: false,

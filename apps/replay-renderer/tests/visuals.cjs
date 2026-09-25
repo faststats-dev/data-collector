@@ -129,3 +129,36 @@ test('resources introduced by CSSOM stay unsafe after the deferred check', () =>
   assert.equal(c.__captureNeeded(), true);
   assert.equal(c.__captureNeeded(), true);
 });
+
+test('loading hints prevent inactivity skipping even when pixels are static', () => {
+  for (const hint of ['text', 'semantic']) {
+    const { c, doc, mutate } = setup();
+    c.__skipInactivity = true;
+    const element = {
+      getClientRects: () => [{}],
+      matches: () => hint === 'semantic',
+      textContent: hint === 'text' ? 'Please wait, saving changes…' : '',
+    };
+    doc.elements = [element];
+    c.__captureNeeded();
+    assert.equal(c.__captureNeeded(), false); // frame reuse is still safe
+    assert.equal(c.__idleSafe(), false); // removing the wait is not
+    element.matches = () => false;
+    element.textContent = 'Saved';
+    mutate(); c.__captureNeeded(); c.__captureNeeded();
+    assert.equal(c.__idleSafe(), true);
+  }
+});
+
+test('pending states inside iframes and shadow roots prevent skipping', () => {
+  for (const nested of ['frame', 'shadow']) {
+    const { c, doc } = setup();
+    c.__skipInactivity = true;
+    const child = setup().doc;
+    child.elements = [{ getClientRects: () => [{}], matches: () => true, textContent: '' }];
+    if (nested === 'frame') doc.frames = [{ contentDocument: child }];
+    else { child.ownerDocument = doc; doc.elements = [{ shadowRoot: child }]; }
+    c.__captureNeeded(); c.__captureNeeded();
+    assert.equal(c.__idleSafe(), false);
+  }
+});

@@ -7,7 +7,8 @@ The renderer does not access storage, databases or model providers.
 
 ## Request handling
 
-`POST /v1/render` accepts versioned JSON events, frame rate and playback speed,
+`POST /v1/render` accepts versioned JSON events, frame rate, playback speed and
+optional `skip_inactivity` (defaults to false for existing clients),
 authenticated with a bearer token. It streams NDJSON progress messages, video
 chunks and a completion report. Shared types live in `crates/replay-render-protocol`.
 
@@ -30,7 +31,8 @@ Event payloads stay as raw JSON in Rust. They are transferred to Chromium in
 batches, where rrweb rebuilds the DOM and applies mutations, scrolls and pointer
 movements. The largest recorded metadata dimensions define the capture viewport.
 
-Replay time comes from the frame index:
+Original replay time comes from the source frame index (not the compacted
+output frame index):
 
 ```text
 replay_time_ms = min(frame_index × 1000 × speed / fps, replay_duration_ms)
@@ -49,8 +51,17 @@ A bounded writer thread streams timestamped JPEGs through Matroska to FFmpeg.
 Backpressure limits how far capture can advance. FFmpeg expands unchanged
 intervals, pads odd dimensions and encodes `yuv420p` H.264 using x264, CRF 23,
 `veryfast` and `zerolatency`. Thread budgets follow available CPU parallelism.
-The timestamp footer is applied after frame expansion so reused frames show the
-correct replay time.
+With `skip_inactivity`, every source tick still executes. After five seconds of
+static, safe frames, intervening frames are omitted, retaining the last static
+frame before activity resumes and the terminal state. Recorded activity, visual
+changes, loading text/indicators, and uncertain or dynamic resources prevent
+skipping. Loading detection uses DOM hints and cannot prove the absence of a
+pending operation in arbitrary applications.
+
+In compact mode the timestamp footer is burned from original input timestamps
+before FFmpeg closes the gaps. Retained frames remain at the requested speed;
+the footer jumps over omitted time. Without skipping, the footer is applied
+after frame expansion. Reports include `stats.skipped_frames`.
 
 Output is published only after encoding succeeds, without overwriting existing
 files. The report contains the output path, frame count, video duration and stage

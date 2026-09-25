@@ -33,8 +33,14 @@ local checks for text lengths, array sizes and recording-duration bounds.
 
 The default is 3 FPS at 1× playback for all recording lengths, preserving one
 rendered frame every 333 ms of original activity. `REPLAY_RENDER_FPS` and
-`REPLAY_RENDER_SPEED` can override these settings. Idle time is retained, and the selected settings are saved with the
-summary. Higher frame density does not guarantee the provider examines every frame.
+`REPLAY_RENDER_SPEED` can override these settings. Inactivity skipping is enabled:
+after five seconds without recorded activity or visual changes, safe static frames
+are omitted until activity resumes. The preceding state and terminal frame are
+retained. Visible loading hints and uncertain/dynamic resources prevent skipping.
+The original-time footer jumps across omitted stretches; the model is instructed
+to use that footer for timestamps and elapsed waits. Detection is conservative
+but cannot identify every application-specific pending operation.
+The selected render settings and skipped-frame count are saved with the job report. Higher frame density does not guarantee the provider examines every frame.
 Real-time playback increases processing cost and video size for long recordings;
 the existing 64 MiB video limit still applies.
 

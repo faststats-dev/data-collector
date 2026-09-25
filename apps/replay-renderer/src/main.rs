@@ -118,6 +118,7 @@ fn render_job() -> Result<()> {
         output: "replay.mp4".into(),
         fps: request.fps,
         speed: request.speed,
+        skip_inactivity: request.skip_inactivity,
         max_duration_ms: None,
         timestamp_overlay: true,
     };

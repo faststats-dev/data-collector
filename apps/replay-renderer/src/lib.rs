@@ -4,12 +4,14 @@
 
 mod browser;
 mod encoder;
+mod inactivity;
 mod matroska;
 mod replay;
 use anyhow::{Context, Result, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use browser::Browser;
 use encoder::Encoder;
+use inactivity::Inactivity;
 pub use replay::{FramePlan, Replay};
 pub use replay_render_protocol::{RenderReport, RenderStats};
 use serde_json::json;
@@ -25,6 +27,8 @@ pub struct RenderOptions {
     pub output: PathBuf,
     pub fps: u32,
     pub speed: f64,
+    /// Omit safe static stretches after five seconds, preserving original time.
+    pub skip_inactivity: bool,
     /// Optional replay-time limit, useful for previews.
     pub max_duration_ms: Option<u64>,
     /// Burn original replay milliseconds into a footer after frame reuse/encoding.
@@ -155,6 +159,10 @@ fn render_inner(
     ))?;
     browser.load_events(events)?;
     browser.eval(include_str!("player.js").into())?;
+    browser.eval(format!(
+        "window.__skipInactivity = {};",
+        options.skip_inactivity
+    ))?;
     browser.eval(include_str!("visuals.js").into())?;
     // Fail before starting FFmpeg if this Chromium build lacks beginFrame support.
     browser.call(
@@ -170,6 +178,7 @@ fn render_inner(
         options
             .timestamp_overlay
             .then_some((options.speed, plan.duration_ms)),
+        options.skip_inactivity,
     )?;
     let mut jpeg = Vec::new();
     let mut next_jpeg = Vec::new();
@@ -177,12 +186,13 @@ fn render_inner(
     let mut pixels_changed = true;
     stats.setup = start.elapsed().as_secs_f64();
     let mut index = 0;
+    let mut inactivity = Inactivity::default();
     let mut last_progress = std::time::Instant::now();
     progress("capture", 0, plan.frame_count);
     while index < plan.frame_count {
         let tick = std::time::Instant::now();
         // Visit every virtual tick; bound idle batches to one output second.
-        let stop = if pixels_changed || jpeg.is_empty() {
+        let stop = if options.skip_inactivity || pixels_changed || jpeg.is_empty() {
             index + 1
         } else {
             (index + options.fps as u64).min(plan.frame_count)
@@ -204,7 +214,8 @@ fn render_inner(
             .context("invalid visual invalidation status")?;
         stats.advance += tick.elapsed().as_secs_f64();
         let tick = std::time::Instant::now();
-        if dirty || pixels_changed || jpeg.is_empty() {
+        let captured = dirty || pixels_changed || jpeg.is_empty();
+        if captured {
             stats.screenshots += 1;
             let frame = browser.call(
                 "HeadlessExperimental.beginFrame",
@@ -226,11 +237,27 @@ fn render_inner(
         }
         stats.capture += tick.elapsed().as_secs_f64();
         let tick = std::time::Instant::now();
-        let mut buffer = encoder.buffer()?;
-        matroska::frame_prefix(&mut buffer, index, options.fps, jpeg.len());
-        buffer.extend_from_slice(&jpeg);
-        encoder.submit(buffer)?;
-        stats.packets += 1;
+        // Recorded visual activity, pixel changes, detected pending operations
+        // and uncertain resources prevent skipping. Retain the last idle frame
+        // before activity resumes so a cut does not hide its preceding state.
+        let decision = inactivity.select(
+            index,
+            plan.replay_time_ms(index),
+            !options.skip_inactivity
+                || dirty
+                || pixels_changed
+                || !step["idleSafe"].as_bool().unwrap_or(false),
+            index + 1 == plan.frame_count,
+        );
+        if let Some(tail) = decision.tail {
+            let previous = if captured { &next_jpeg } else { &jpeg };
+            submit_frame(&encoder, tail, options.fps, previous)?;
+            stats.packets += 1;
+        }
+        if decision.keep {
+            submit_frame(&encoder, index, options.fps, &jpeg)?;
+            stats.packets += 1;
+        }
         stats.encoder_wait += tick.elapsed().as_secs_f64();
         index += 1;
         if last_progress.elapsed().as_secs_f64() >= 1.0 {
@@ -250,6 +277,12 @@ fn render_inner(
     browser.release_page()?;
     session.uses += 1;
     stats.total = start.elapsed().as_secs_f64();
+    let frames = if options.skip_inactivity {
+        stats.packets
+    } else {
+        plan.frame_count
+    };
+    stats.skipped_frames = plan.frame_count - frames;
     if std::env::var_os("RRWEB2VIDEO_PROFILE").is_some() {
         eprintln!("PROFILE {}", serde_json::to_string(&stats)?);
     }
@@ -259,8 +292,15 @@ fn render_inner(
         } else {
             options.output.clone()
         },
-        frames: plan.frame_count,
-        video_duration_seconds: plan.frame_count as f64 / options.fps as f64,
+        frames,
+        video_duration_seconds: frames as f64 / options.fps as f64,
         stats,
     })
+}
+
+fn submit_frame(encoder: &Encoder, index: u64, fps: u32, jpeg: &[u8]) -> Result<()> {
+    let mut buffer = encoder.buffer()?;
+    matroska::frame_prefix(&mut buffer, index, fps, jpeg.len());
+    buffer.extend_from_slice(jpeg);
+    encoder.submit(buffer)
 }

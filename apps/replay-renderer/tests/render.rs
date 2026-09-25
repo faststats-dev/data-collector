@@ -19,6 +19,7 @@ fn fixture_renders_to_h264_with_expected_frames() {
         output: temp.path().join("test.mp4"),
         fps: 5,
         speed: 8.0,
+        skip_inactivity: false,
         max_duration_ms: Some(3200),
         timestamp_overlay: false,
     };
@@ -67,6 +68,7 @@ fn discard_encodes_without_creating_a_video_file() {
         output: temp.path().join("must-not-exist.mp4"),
         fps: 5,
         speed: 8.0,
+        skip_inactivity: false,
         max_duration_ms: None,
         timestamp_overlay: false,
     };
@@ -88,6 +90,7 @@ fn warm_session_handles_separate_recordings_and_recovers_after_failure() {
         output: "/dev/null".into(),
         fps: 3,
         speed: 8.0,
+        skip_inactivity: false,
         max_duration_ms: None,
         timestamp_overlay: false,
     };
@@ -136,6 +139,7 @@ fn warm_session_saves_timestamped_video_with_original_replay_time() {
         output: temp.path().join("summary.mp4"),
         fps: 3,
         speed: 8.0,
+        skip_inactivity: false,
         max_duration_ms: None,
         timestamp_overlay: true,
     };
@@ -174,4 +178,94 @@ fn warm_session_saves_timestamped_video_with_original_replay_time() {
     assert_eq!(hashes.len(), 3);
     assert_ne!(hashes[0], hashes[1]);
     assert_ne!(hashes[1], hashes[2]);
+}
+
+#[test]
+#[ignore = "requires chrome-headless-shell, FFmpeg, ffprobe, and local npm assets"]
+fn inactivity_compacts_static_time_but_preserves_loading_and_original_footer() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let temp = tempfile::tempdir().unwrap();
+    let mut events: Vec<serde_json::Value> = serde_json::from_slice(&common::recording()).unwrap();
+    events[2] = serde_json::json!({
+        "type": 3, "timestamp": 31_000,
+        "data": {"source": 0, "texts": [{"id": 5, "value": "Activity resumed"}],
+                 "attributes": [], "removes": [], "adds": []}
+    });
+    let mut options = RenderOptions {
+        chromium: std::env::var_os("RRWEB2VIDEO_CHROMIUM").unwrap().into(),
+        ffmpeg: "ffmpeg".into(),
+        rrweb_js: root.join("player/node_modules/rrweb/dist/rrweb.umd.min.cjs"),
+        rrweb_css: root.join("player/node_modules/rrweb/dist/style.css"),
+        output: temp.path().join("compact.mp4"),
+        fps: 3,
+        speed: 1.0,
+        skip_inactivity: true,
+        max_duration_ms: None,
+        timestamp_overlay: true,
+    };
+    let replay = || Replay::from_slice(&serde_json::to_vec(&events).unwrap()).unwrap();
+    let compact = render(&replay(), &options).unwrap();
+    assert!(compact.frames >= 16 && compact.frames < 30, "{compact:?}");
+    assert_eq!(compact.frames + compact.stats.skipped_frames, 91);
+    let probe = Command::new("ffprobe")
+        .args(["-v", "error", "-show_streams", "-of", "json"])
+        .arg(&compact.output)
+        .output()
+        .unwrap();
+    assert!(probe.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&probe.stdout).unwrap();
+    assert_eq!(value["streams"][0]["nb_frames"], compact.frames.to_string());
+    let actual_seconds = value["streams"][0]["duration"]
+        .as_str()
+        .unwrap()
+        .parse::<f64>()
+        .unwrap();
+    assert!((actual_seconds - compact.video_duration_seconds).abs() < 0.001);
+
+    options.skip_inactivity = false;
+    options.output = temp.path().join("full.mp4");
+    let full = render(&replay(), &options).unwrap();
+    assert_eq!(full.frames, 91);
+    fn last_footer(path: &std::path::Path) -> Vec<u8> {
+        let output = Command::new("ffmpeg")
+            .args(["-v", "error", "-i"])
+            .arg(path)
+            .args([
+                "-vf",
+                "crop=320:36:0:240",
+                "-pix_fmt",
+                "gray",
+                "-f",
+                "rawvideo",
+                "pipe:1",
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        output.stdout[output.stdout.len() - 320 * 36..].to_vec()
+    }
+    // Both terminal footers must read original time 30000, not compacted time.
+    // Allow small differences from H.264's distinct preceding-frame histories.
+    let expected = last_footer(&full.output);
+    let actual = last_footer(&compact.output);
+    let mean_error = expected
+        .iter()
+        .zip(&actual)
+        .map(|(&a, &b)| (a as f64 - b as f64).abs())
+        .sum::<f64>()
+        / expected.len() as f64;
+    assert!(mean_error < 2.0, "terminal footer differs: {mean_error}");
+
+    // A static loading message must retain the entire 30-second wait.
+    events[1]["data"]["node"]["childNodes"][0]["childNodes"][1]["childNodes"][0]["textContent"] =
+        serde_json::json!("Loading, please wait");
+    options.skip_inactivity = true;
+    options.output = temp.path().join("loading.mp4");
+    let loading = render(
+        &Replay::from_slice(&serde_json::to_vec(&events).unwrap()).unwrap(),
+        &options,
+    )
+    .unwrap();
+    assert_eq!(loading.frames, 91);
+    assert_eq!(loading.stats.skipped_frames, 0);
 }

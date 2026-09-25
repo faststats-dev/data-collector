@@ -31,10 +31,16 @@ The default summary model is `google/gemini-3.8-flash`. The instructions in
 charts, to reduce false bug reports. Responses use a structured schema, with
 local checks for text lengths, array sizes and recording-duration bounds.
 
-At the default 3 FPS, playback stays at 1× for recordings up to one minute, uses
-4× through 30 minutes and 8× for longer recordings. Frame rate and speed can be
-overridden. Idle time is retained, and the selected settings are saved with the
+The default is 3 FPS at 1× playback for all recording lengths, preserving one
+rendered frame every 333 ms of original activity. `REPLAY_RENDER_FPS` and
+`REPLAY_RENDER_SPEED` can override these settings. Idle time is retained, and the selected settings are saved with the
 summary. Higher frame density does not guarantee the provider examines every frame.
+Real-time playback increases processing cost and video size for long recordings;
+the existing 64 MiB video limit still applies.
+
+Summaries explain causes supported by visible messages or demonstrated interactions,
+while distinguishing application-reported reasons from verified observations and
+omitting unsupported technical explanations.
 
 The video is accompanied by up to 500 recorded click, touch, scroll and input-change
 events. This evidence excludes URLs, DOM text and entered values, and marks

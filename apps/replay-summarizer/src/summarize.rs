@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{io::Read, path::Path, time::Duration};
 
-pub const PROMPT_VERSION: &str = "replay-summary-v5-coverage";
+pub const PROMPT_VERSION: &str = "replay-summary-v6-visible-causes";
 pub const SCHEMA_VERSION: u32 = 3;
 pub const MODEL: &str = "google/gemini-3.8-flash";
 const PROMPT: &str = include_str!("../prompt.md");
@@ -64,19 +64,19 @@ fn request(
                     "type": "object", "additionalProperties": false,
                     "required": ["summary", "confidence", "painPoints"],
                     "properties": {
-                        "summary": {"type": "string", "description": "Complete sentences describing the visible actions and outcome. At most 16000 characters."},
+                        "summary": {"type": "string", "description": "Complete sentences describing meaningful visible actions, feedback, outcome, and causes supported by the replay. At most 16000 characters."},
                         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
                         "painPoints": {"type": "array", "items": {
                             "type": "object", "additionalProperties": false,
                             "required": ["timestampMs", "description", "evidence", "confidence", "surface", "action", "failure", "consequence"],
                             "properties": {
                                 "timestampMs": {"type": "integer", "minimum": 0, "description": "Original elapsed replay milliseconds shown in the video footer."},
-                                "description": {"type": "string", "description": "The observed UX problem and its visible consequence, excluding replay artifacts and speculation."},
-                                "evidence": {"type": "string", "description": "Concrete visible observations supporting this problem, without inferring a cause."},
+                                "description": {"type": "string", "description": "The observed UX problem, its visibly supported cause when available, and its consequence, excluding replay artifacts and speculation."},
+                                "evidence": {"type": "string", "description": "Concrete visible sequence or message supporting this problem and any stated cause. Attribute explanations from application messages; do not invent causes."},
                                 "confidence": {"type": "number", "minimum": 0, "maximum": 1},
                                 "surface": {"type": ["string", "null"], "description": "Visible product area or control, or null when not identifiable."},
                                 "action": {"type": ["string", "null"], "description": "Observed user action, or null. Never include private input values."},
-                                "failure": {"type": ["string", "null"], "description": "Observed failure state only, or null. Do not infer a cause."},
+                                "failure": {"type": ["string", "null"], "description": "Observed failure state, including an explicit visible reason when available, or null. Do not invent a cause."},
                                 "consequence": {"type": ["string", "null"], "description": "Visible consequence for the user, or null."}
                             }
                         }}

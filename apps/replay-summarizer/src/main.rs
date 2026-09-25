@@ -179,7 +179,7 @@ async fn run_job(
         let replay_time_ms = replay.duration_ms;
         let replay_start_ms = replay.start_ms;
         let fps = config::optional("REPLAY_RENDER_FPS", 3)?;
-        let speed = config::render_speed(replay_time_ms)?;
+        let speed = config::render_speed()?;
         let temporary = tempfile::tempdir()?;
         let output = temporary.path().join("replay.mp4");
         let report = match renderer

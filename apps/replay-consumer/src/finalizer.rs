@@ -81,7 +81,7 @@ async fn finalize_batch(pool: &PgPool) -> Result<(), sqlx::Error> {
             INSERT INTO replay_summary_jobs(id,project_id,session_id,window_id,storage_generation,chunk_count,
                 completeness_revision,coverage,finalization_state,state,render_profile,manual,priority)
             SELECT gen_random_uuid(),s.project_id,s.session_id,s.window_id,$4,s.chunk_count,
-                s.completeness_revision,s.coverage,s.finalization_state,'ready','h264-3fps-adaptive-v3',
+                s.completeness_revision,s.coverage,s.finalization_state,'ready','h264-3fps-1x-v4',
                 COALESCE((SELECT j.manual FROM replay_summary_jobs j WHERE j.project_id=$1 AND j.session_id=$2 AND j.window_id=$3 AND j.storage_generation=$4 ORDER BY j.chunk_count DESC,j.completeness_revision DESC LIMIT 1),false),
                 CASE WHEN COALESCE((SELECT j.manual FROM replay_summary_jobs j WHERE j.project_id=$1 AND j.session_id=$2 AND j.window_id=$3 AND j.storage_generation=$4 ORDER BY j.chunk_count DESC,j.completeness_revision DESC LIMIT 1),false) THEN 100 ELSE 0 END
             FROM replay_sessions s WHERE s.project_id=$1 AND s.session_id=$2 AND s.window_id=$3
